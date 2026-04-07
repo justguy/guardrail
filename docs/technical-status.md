@@ -59,6 +59,7 @@ tests/
   test-integration-runtime.js  Integration: runtime policy + audit wired into all 3 supervisors
   test-recipe.js               Recipe packaging: schema, inputs, steps, guardrails, hash, pack/unpack
   test-recipe-system.js        Recipe system: categories, tags, index, channel, executor, dry-run
+  test-bucket5.js              Bucket 5: resource bounds, learning, profiles, policy, metrics, identity
 
 docs/                    Product requirements, specs, invariants, implementation guides
 .guardrail/              Runtime state (approved manifests, logs, state files)
@@ -180,6 +181,19 @@ docs/                    Product requirements, specs, invariants, implementation
 | CLI commands | Done | `guardrail list`, `guardrail create`, `guardrail pack`, `guardrail recipe validate/inspect` |
 | Example recipes (6) | Done | npm-publish, git-branch-cleanup, github-pr-merge, dep-upgrade, infra-deploy, openclaw-wrapper |
 
+### Bucket 5 — Policy, UX, Adoption
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Resource bounds | Done | max_execution_time, max_files_touched, max_network_calls, max_cost; runtime tracker with violations |
+| Learning mode | Done | --learning flag: step/recipe/block explanations with risk context |
+| Profiles | Done | cautious-dev, fast-ci, prod-safe builtins; `guardrail profile create/use/list/show` |
+| Safe defaults | Done | Dangerous pattern blocking, dry-run for high-risk, --force with warnings |
+| Policy CLI commands | Done | `guardrail policy list/inspect/validate`; allowed actions, restricted scopes, required approvals |
+| Metrics and events | Done | Structured JSONL events, per-type/actor/recipe aggregation, `guardrail metrics` |
+| Agent identity and governance | Done | Actor/origin tracking, scoped permissions, audit-ready identity model |
+| Agent strict mode | Done | Approved recipe list, scope enforcement, dynamic command blocking |
+
 ### Adversarial Testing
 
 | Scenario | Status | Notes |
@@ -231,19 +245,6 @@ docs/                    Product requirements, specs, invariants, implementation
 | Recipe execution via `guardrail run <recipe-id>` | Not started | Medium — executor exists, CLI wiring pending |
 | Recipe registry / remote publishing | Not started | Medium — local pack/inspect done |
 | Recipe versioning conflict detection | Not started | Low — hash immutability enforced, no registry dedup |
-
-### Bucket 5 — Policy, UX, Adoption
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Resource bounds | Done | max_execution_time, max_files_touched, max_network_calls, max_cost; runtime tracker with violations |
-| Learning mode | Done | --learning flag: step/recipe/block explanations with risk context |
-| Profiles | Done | cautious-dev, fast-ci, prod-safe builtins; `guardrail profile create/use/list/show` |
-| Safe defaults | Done | Dangerous pattern blocking, dry-run for high-risk, --force with warnings |
-| Policy CLI commands | Done | `guardrail policy list/inspect/validate`; allowed actions, restricted scopes, required approvals |
-| Metrics and events | Done | Structured JSONL events, per-type/actor/recipe aggregation, `guardrail metrics` |
-| Agent identity and governance | Done | Actor/origin tracking, scoped permissions, audit-ready identity model |
-| Agent strict mode | Done | Approved recipe list, scope enforcement, dynamic command blocking |
 
 ### Bucket 6 — Enterprise & Team Features
 
@@ -362,6 +363,8 @@ docs/                    Product requirements, specs, invariants, implementation
 9. **Environment handshake** — Templates cannot silently harvest env vars.
 10. **Verified channel default-deny** — Community recipes blocked unless explicitly opted in.
 11. **Recipe immutability** — Content hash computed at pack time; tampered content detected on inspect.
+12. **Safe by default** — Dangerous patterns blocked, dry-run for high-risk, approval for production. Override requires explicit --force.
+13. **Strict mode for agents** — Agents restricted to approved recipes and declared scope; dynamic commands blocked.
 
 ---
 
