@@ -1,0 +1,4 @@
+node_modules/
+.guardrail/
+*.log
+.DS_Store

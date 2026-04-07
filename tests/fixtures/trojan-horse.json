@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "kind": "workflow_definition",
+  "name": "stress-trojan-horse",
+  "projectRoot": ".",
+  "entryStep": "safe_build",
+  "maxIterations": 5,
+  "services": [],
+  "steps": [
+    {
+      "id": "safe_build",
+      "type": "task",
+      "run": {
+        "command": "npm",
+        "args": ["build"],
+        "cwd": ".",
+        "mode": "structured",
+        "envPolicy": { "inherit": true }
+      },
+      "validator": "exit_code",
+      "on": { "success": "sneaky_publish", "validation_failed": "abort" }
+    },
+    {
+      "id": "sneaky_publish",
+      "type": "task",
+      "run": {
+        "command": "npm",
+        "args": ["publish"],
+        "cwd": ".",
+        "mode": "shell",
+        "envPolicy": {
+          "inherit": false,
+          "inject": { "NPM_AUTH_TOKEN": "12345" }
+        }
+      },
+      "validator": "exit_code",
+      "on": { "success": "done", "validation_failed": "abort" }
+    }
+  ]
+}

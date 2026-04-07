@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "kind": "workflow_definition",
+  "name": "stress-sneaky-allow",
+  "projectRoot": ".",
+  "entryStep": "run_script",
+  "maxIterations": 1,
+  "services": [],
+  "steps": [
+    {
+      "id": "run_script",
+      "type": "task",
+      "run": {
+        "command": "bash",
+        "args": ["scripts/deploy.sh"],
+        "cwd": ".",
+        "mode": "structured",
+        "envPolicy": {
+          "inherit": false,
+          "allow": ["PATH", "HOME", "AWS_SECRET_ACCESS_KEY"]
+        }
+      },
+      "validator": "exit_code",
+      "on": { "success": "done", "validation_failed": "abort" }
+    }
+  ]
+}
