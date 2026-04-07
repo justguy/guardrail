@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { serializeStable } from './contract.js';
+import { serializeStable, checkRegexSafety } from './contract.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -197,6 +197,34 @@ export function validateTemplate(def) {
   }
 
   errors.push(...validateRollback(def));
+
+  // ReDoS safety check: reject input patterns with catastrophic backtracking potential
+  for (const [key, schema] of Object.entries(def.inputs || {})) {
+    if (schema.pattern) {
+      const safety = checkRegexSafety(schema.pattern);
+      if (!safety.safe) {
+        errors.push(`input "${key}": pattern rejected — ${safety.reason}`);
+      }
+    }
+  }
+
+  // ReDoS safety check: reject validator regexes with catastrophic backtracking potential
+  if (def.kind === 'template' && def.validator?.regex) {
+    const safety = checkRegexSafety(def.validator.regex);
+    if (!safety.safe) {
+      errors.push(`template validator regex rejected — ${safety.reason}`);
+    }
+  }
+  if (def.kind === 'workflow_template') {
+    for (const step of (def.steps || [])) {
+      if (step.validator?.regex) {
+        const safety = checkRegexSafety(step.validator.regex);
+        if (!safety.safe) {
+          errors.push(`step "${step.id}": validator regex rejected — ${safety.reason}`);
+        }
+      }
+    }
+  }
 
   if (errors.length > 0) {
     throw new TemplateValidationError(

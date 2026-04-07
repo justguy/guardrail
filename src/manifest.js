@@ -25,7 +25,7 @@ const CONTRACT_DIFF_FIELDS = [
   'command', 'args', 'cwd', 'mode', 'shell', 'shellFeatures',
   'allowedBinaries', 'writablePaths', 'readablePaths',
   'envPolicy', 'childProcessPolicy', 'retryPolicy', 'timeoutMs',
-  'updatePolicy',
+  'fileHash', 'updatePolicy',
 ];
 
 // ---------------------------------------------------------------------------

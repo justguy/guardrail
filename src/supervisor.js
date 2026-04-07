@@ -1,11 +1,11 @@
 import { createInterface } from 'node:readline';
 import { join, resolve } from 'node:path';
 
-import { createContract, hashContract } from './contract.js';
+import { createContract, hashContract, checkRegexSafety, verifyFileHash } from './contract.js';
 import { createManifest, saveManifest, loadManifest, compareManifests, DEFAULT_MANIFEST_PATH } from './manifest.js';
 import { evaluateRisk } from './policy-engine.js';
 import { createLogger, printBanner, printApprovalSummary, printDrift, printDenied, printResult, generateRunId, colorize } from './logger.js';
-import { launchWorker } from './worker-interface.js';
+import { launchWorker, detectInteractiveAttempt } from './worker-interface.js';
 import { validateResult, validateUpdateProposal, createConvergenceTracker, computeValidationSignature } from './validator.js';
 import { persistStateSafe, executeSubprocess } from './shared.js';
 
@@ -217,12 +217,63 @@ export async function runSupervisor(options) {
     logger.info('contract_created', { mode, command });
 
     // ------------------------------------------------------------------
+    // Step 1b: ReDoS safety check on any validator regex in the contract
+    // ------------------------------------------------------------------
+    if (validator && typeof validator === 'object' && validator.regex) {
+      const safety = checkRegexSafety(validator.regex);
+      if (!safety.safe) {
+        logger.error('redos_regex_rejected', { reason: safety.reason });
+        const result = buildResult(runId, 'policy_violation', resultOpts);
+        persistState(stateDir, state, result);
+        if (!jsonOutput) {
+          printResult({
+            success: false,
+            exitCode: result.exitCode,
+            message: `Validator regex rejected: ${safety.reason}`,
+          });
+        }
+        return result;
+      }
+    }
+
+    // ------------------------------------------------------------------
     // Step 2: Hash the contract
     // ------------------------------------------------------------------
     const contractHash = hashContract(contract);
     resultOpts.contractHash = contractHash;
 
     logger.info('contract_hashed', { contractHash });
+
+    // ------------------------------------------------------------------
+    // Step 2b: File provenance check
+    // ------------------------------------------------------------------
+    const fileHashCheck = verifyFileHash(contract.command, contract.fileHash);
+    if (!fileHashCheck.skipped) {
+      logger.info('file_hash_check', {
+        path: fileHashCheck.path,
+        expected: fileHashCheck.expected,
+        actual: fileHashCheck.actual,
+        verified: fileHashCheck.verified,
+      });
+
+      if (!fileHashCheck.verified) {
+        logger.error('file_hash_mismatch', {
+          path: fileHashCheck.path,
+          expected: fileHashCheck.expected,
+          actual: fileHashCheck.actual,
+        });
+        const result = buildResult(runId, 'policy_violation', resultOpts);
+        persistState(stateDir, state, result);
+        if (!jsonOutput) {
+          printResult({
+            success: false,
+            exitCode: result.exitCode,
+            message: `File hash mismatch: expected ${fileHashCheck.expected}, got ${fileHashCheck.actual ?? 'unreadable'} for ${fileHashCheck.path ?? contract.command}`,
+          });
+        }
+        return result;
+      }
+    }
 
     // ------------------------------------------------------------------
     // Step 3: Evaluate risk
@@ -441,6 +492,28 @@ export async function runSupervisor(options) {
           exitCode:  workerResult.exitCode,
         });
         break;
+      }
+
+      // Check for interactive prompt attempt on non-zero exit
+      if (workerResult.exitCode !== 0) {
+        const interactiveCheck = detectInteractiveAttempt(workerResult);
+        if (interactiveCheck.detected) {
+          logger.warn('interactive_prompt_detected', {
+            attempt,
+            pattern: interactiveCheck.pattern,
+            exitCode: workerResult.exitCode,
+          });
+          finalStatus = 'validation_failed';
+          terminalMessage = `Interactive prompt detected (pattern: "${interactiveCheck.pattern}"). Process was spawned without a TTY and cannot receive interactive input.`;
+          state.attemptHistory.push({
+            attempt,
+            timestamp: new Date().toISOString(),
+            status:    'interactive_prompt_detected',
+            exitCode:  workerResult.exitCode,
+            pattern:   interactiveCheck.pattern,
+          });
+          break;
+        }
       }
 
       // Validate result

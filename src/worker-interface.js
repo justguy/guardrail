@@ -44,6 +44,43 @@ export function parseNdjsonLine(line) {
   return { valid: true, message: parsed, error: null };
 }
 
+// ---------------------------------------------------------------------------
+// Interactive prompt detection
+// ---------------------------------------------------------------------------
+
+const INTERACTIVE_PATTERNS = [
+  /password:/i,
+  /passphrase:/i,
+  /\bEnter\s/i,
+  /\by\/n\b/i,
+  /\[Y\/n\]/i,
+  /\(yes\/no\)/i,
+  /Press any key/i,
+  /Press Enter/i,
+  /Login:/i,
+  /Username:/i,
+];
+
+/**
+ * Inspect a worker result's stderr for common interactive prompt patterns.
+ * A process spawned with stdin='ignore' receives EOF immediately, so it
+ * cannot actually block — but the presence of these patterns in stderr
+ * strongly suggests the process expected interactive input.
+ *
+ * @param {object} workerResult - The result object returned by launchWorker.
+ * @returns {{ detected: boolean, pattern: string|null }}
+ */
+export function detectInteractiveAttempt(workerResult) {
+  const stderr = workerResult?.stderr || '';
+  for (const re of INTERACTIVE_PATTERNS) {
+    const match = stderr.match(re);
+    if (match) {
+      return { detected: true, pattern: match[0] };
+    }
+  }
+  return { detected: false, pattern: null };
+}
+
 // Environment building delegated to shared.js (buildEnvFromPolicy)
 const buildEnv = buildEnvFromPolicy;
 

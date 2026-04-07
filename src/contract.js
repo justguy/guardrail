@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { resolve, isAbsolute } from 'node:path';
 
 const SHELL_METACHARACTERS = /[|><&;$`()]/;
@@ -31,6 +31,7 @@ const DEFAULTS = {
     backoff: [1000, 2000, 4000],
   },
   timeoutMs: 60000,
+  fileHash: null,
   updatePolicy: {
     allowedActions: ['apply_patch', 'run_script'],
   },
@@ -177,4 +178,94 @@ export function hashContract(contract) {
   const normalized = normalizeContract(contract);
   const serialized = serializeStable(normalized);
   return createHash('sha256').update(serialized).digest('hex');
+}
+
+// ---------------------------------------------------------------------------
+// ReDoS regex safety check
+// ---------------------------------------------------------------------------
+
+const REDOS_PATTERNS = [
+  { re: /\([^)]*[+*][^)]*\)[+*{]/, desc: 'nested quantifier on group (e.g. (a+)+)' },
+  { re: /\([^)]*[+*][^)]*\)\{/, desc: 'quantified group with inner quantifier and brace quantifier (e.g. (a+){2,})' },
+  { re: /(\.\*){2,}/, desc: 'multiple adjacent greedy wildcards' },
+  { re: /\([^)]*\|[^)]*\)[+*]\{?/, desc: 'alternation in quantified group (e.g. (a|b)+)' },
+];
+
+/**
+ * Check whether a regex pattern is safe from catastrophic backtracking (ReDoS).
+ *
+ * @param {string} pattern - The regex pattern string to check.
+ * @returns {{ safe: boolean, reason: string|null }}
+ */
+export function checkRegexSafety(pattern) {
+  if (typeof pattern !== 'string') {
+    return { safe: true, reason: null };
+  }
+
+  for (const { re, desc } of REDOS_PATTERNS) {
+    if (re.test(pattern)) {
+      return { safe: false, reason: `ReDoS risk: ${desc} detected in pattern "${pattern}"` };
+    }
+  }
+
+  return { safe: true, reason: null };
+}
+
+// ---------------------------------------------------------------------------
+// File provenance enforcement
+// ---------------------------------------------------------------------------
+
+function resolveCommandPath(command) {
+  if (!command || typeof command !== 'string') return null;
+
+  // Absolute path — resolve symlinks directly
+  if (isAbsolute(command)) {
+    try { return realpathSync(command); } catch { return null; }
+  }
+
+  // Search PATH
+  const pathDirs = (process.env.PATH || '').split(':');
+  for (const dir of pathDirs) {
+    const candidate = resolve(dir, command);
+    try {
+      return realpathSync(candidate);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Verify that a command binary matches a declared SHA-256 file hash.
+ *
+ * @param {string} command      - Command name or path.
+ * @param {string|null} declaredHash - Expected SHA-256 hex digest, or null to skip.
+ * @returns {{ verified: boolean, expected?: string, actual?: string, path?: string, skipped: boolean }}
+ */
+export function verifyFileHash(command, declaredHash) {
+  if (declaredHash == null) {
+    return { verified: true, skipped: true };
+  }
+
+  const resolvedPath = resolveCommandPath(command);
+  if (!resolvedPath) {
+    return { verified: false, expected: declaredHash, actual: null, path: null, skipped: false };
+  }
+
+  let contents;
+  try {
+    contents = readFileSync(resolvedPath);
+  } catch {
+    return { verified: false, expected: declaredHash, actual: null, path: resolvedPath, skipped: false };
+  }
+
+  const actual = createHash('sha256').update(contents).digest('hex');
+  return {
+    verified: actual === declaredHash,
+    expected: declaredHash,
+    actual,
+    path: resolvedPath,
+    skipped: false,
+  };
 }

@@ -25,6 +25,7 @@ tests/test-core.js          Contract, manifest, risk, approval, drift tests
 tests/test-workflow.js      Workflow parsing, hashing, drift, risk tests
 tests/test-adversarial.js   Security edge case tests
 tests/test-template.js      Template validation, lint, inputs, interpolation tests
+tests/test-bucket1.js       Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, anti-interactive
 docs/technical-status.md    Current implementation status and roadmap
 ```
 
@@ -34,7 +35,7 @@ docs/technical-status.md    Current implementation status and roadmap
 npm test
 ```
 
-All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 266 tests, all passing.
+All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 324 tests, all passing.
 
 ## Key Patterns
 
@@ -79,7 +80,7 @@ Hash: `SHA256(canonical(template_def) + canonical(resolved_inputs) + canonical(e
 ## When Updating This Project
 
 - Update `docs/technical-status.md` when adding features, fixing bugs, or changing the roadmap status.
-- Run `npm test` after changes — all 266+ tests must pass.
+- Run `npm test` after changes — all 324+ tests must pass.
 - Follow existing patterns: pure validation functions return error arrays, supervisors handle approval flow, workers handle process spawning.
 - Keep zero dependencies. Only Node.js built-ins.
 - The test pattern uses `node:test` with `describe/it/assert`. Fixtures are built with helper functions (e.g., `makeIndividualTemplate()`).

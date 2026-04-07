@@ -20,7 +20,7 @@ import {
   printDenied,
   generateRunId,
 } from './logger.js';
-import { launchWorker } from './worker-interface.js';
+import { launchWorker, detectInteractiveAttempt } from './worker-interface.js';
 import {
   validateResult,
   validateUpdateProposal,
@@ -274,6 +274,19 @@ async function executeTaskStep(stepDef, stepId, ctx) {
   if (workerResult.timedOut) {
     logger.warn('worker_timeout', { stepId, timeoutMs });
     return { outcome: 'failure', iteration, terminalReason: `Step "${stepId}" timed out after ${timeoutMs}ms` };
+  }
+
+  // Check for interactive prompt attempt on non-zero exit
+  if (workerResult.exitCode !== 0) {
+    const interactiveCheck = detectInteractiveAttempt(workerResult);
+    if (interactiveCheck.detected) {
+      logger.warn('interactive_prompt_detected', { stepId, pattern: interactiveCheck.pattern, exitCode: workerResult.exitCode });
+      return {
+        outcome: 'failure',
+        iteration,
+        terminalReason: `Interactive prompt detected in step "${stepId}" (pattern: "${interactiveCheck.pattern}"). Process was spawned without a TTY and cannot receive interactive input.`,
+      };
+    }
   }
 
   const validation = validateResult(workerResult, validatorMode);

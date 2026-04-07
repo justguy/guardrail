@@ -30,12 +30,13 @@ tests/
   test-workflow.js        Workflow parsing, hashing, drift, risk, normalization, lint tests
   test-adversarial.js    Sneaky allow-list, fake success trap, trojan step, tamper detection
   test-template.js       Template validation, lint, inputs, interpolation, env, hash, manifest tests
+  test-bucket1.js        Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening
 
 docs/                    Product requirements, specs, invariants, implementation guides
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~6,970 lines of source, ~3,420 lines of tests, 266 passing tests, 0 dependencies.
+**Stats:** ~7,200 lines of source, ~3,900 lines of tests, 324 passing tests, 0 dependencies.
 
 ---
 
@@ -60,6 +61,9 @@ docs/                    Product requirements, specs, invariants, implementation
 | NDJSON protocol validation | Done | Real-time parsing, protocol message extraction |
 | Output validator engine | Done | exit_code + ndjson modes with update proposal support |
 | Convergence tracker | Done | Detects repeated signatures, no-progress loops, retry limits |
+| File provenance enforcement (fileHash) | Done | SHA-256 verification before execution, blocks on mismatch |
+| Anti-interactive detection | Done | Stderr pattern scan for password/prompt patterns, exit 13 |
+| Formal ReDoS rejection | Done | Blocks manifest save for unsafe regex (not just advisory lint) |
 | CLI (run, demo drift) | Done | Structured + shell + shorthand string modes |
 
 ### Bucket 2 — Workflow Engine
@@ -117,10 +121,7 @@ docs/                    Product requirements, specs, invariants, implementation
 
 | Feature | Status | Priority |
 |---------|--------|----------|
-| TOCTOU mitigation (hash → fd → exec) | Not started | High — requires platform-specific fd exec |
-| File provenance enforcement (file_hash) | Not started | Medium |
-| Anti-interactive execution (pty: false, stdin kill) | Not started | Medium |
-| Regex complexity budget (formal check) | Partial | Heuristic ReDoS indicators exist, no formal budget |
+| TOCTOU mitigation (hash → fd → exec) | Documented limitation | Node.js lacks fexecve; fileHash provides best-effort guard |
 | Executable path resolution (resolve via PATH) | Not started | Low — currently uses command name, not abs path |
 
 ### Bucket 2 Gaps
@@ -189,10 +190,11 @@ docs/                    Product requirements, specs, invariants, implementation
 
 ### Phase 2 — Hardening
 
-- [ ] TOCTOU mitigation (fd-based exec)
-- [ ] File provenance enforcement (file_hash matching)
-- [ ] Anti-interactive execution (pty kill)
-- [ ] Formal regex complexity budget
+- [x] File provenance enforcement (fileHash SHA-256 verification)
+- [x] Anti-interactive execution detection (stderr pattern scan)
+- [x] Formal ReDoS regex rejection at manifest approval time
+- [x] Bucket 1 test coverage requirements (58 tests)
+- [ ] TOCTOU mitigation (fd-based exec — requires native addon, documented limitation)
 - [ ] Remote template pinning (SHA-locked URI)
 - [ ] Executable PATH resolution to absolute
 
@@ -250,6 +252,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | test-workflow.js | 56 | Workflow parsing, hashing, drift, risk, normalization, lint |
 | test-adversarial.js | 15 | Security edge cases, sneaky escalation, tamper detection |
 | test-template.js | 75 | Template validation, lint, inputs, interpolation, env, hash |
-| **Total** | **266** | |
+| test-bucket1.js | 58 | Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening, anti-interactive |
+| **Total** | **324** | |
 
-Run: `npm test` or `node --test tests/test-core.js tests/test-workflow.js tests/test-adversarial.js tests/test-template.js`
+Run: `npm test`

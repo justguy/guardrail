@@ -169,6 +169,66 @@ For the full template specification, see [docs/guardrail-template-implementation
 
 ---
 
+## 🔥 Guardrail Recipes
+
+**A library of safe, pre-approved execution patterns for real-world developer and AI workflows.**
+
+Guardrail Recipes are not a template gallery or a config repo. Each recipe is a packaged, contract-locked workflow -- validated inputs, enforced environment handshake, cryptographic hash, and rollback where needed. Install a recipe and run it knowing the execution surface is exactly what was reviewed.
+
+### Browse the Recipe Library
+
+| Category | Examples |
+|----------|----------|
+| **GitHub** | `open_pr`, `clone_repo`, `release_safe` |
+| **Package** | `npm_install_safe`, `pip_install_safe` |
+| **Cloud** | `aws_s3_sync_safe`, `terraform_plan_only` |
+| **AI / Agent** | `fix_tests`, `debug_ci`, `safe_deploy` |
+
+### Using Recipes
+
+```bash
+# Install a recipe
+guardrail recipe install github/open_pr
+
+# Inspect before running
+guardrail template explain --template recipes/open_pr.json
+guardrail template lint --template recipes/open_pr.json
+
+# Simulate
+guardrail template simulate \
+  --template recipes/open_pr.json \
+  --input repo=my-org/my-repo \
+  --input branch=feature-x
+
+# Execute
+guardrail run \
+  --template recipes/open_pr.json \
+  --input repo=my-org/my-repo \
+  --input branch=feature-x
+```
+
+### How Recipes Work
+
+Every recipe is a Guardrail template under the hood:
+
+- **`kind: "template"`** -- single-command recipe (e.g., `npm_install_safe`)
+- **`kind: "workflow_template"`** -- multi-step recipe with rollback (e.g., `safe_deploy`)
+
+The same contract enforcement applies: typed inputs, environment handshake, canonical hashing, and drift detection. A recipe that changes requires re-approval -- no silent updates.
+
+### Guardrail Cloud (Coming Soon)
+
+| Tier | What You Get |
+|------|-------------|
+| **Free** | Community recipes -- open, auditable, community-maintained |
+| **Verified** | 🔐 Security-reviewed, enterprise-approved recipes |
+| **Custom** | 🧠 Org-specific constraints and private recipe libraries |
+| **Insights** | 📊 Usage analytics, risk patterns, drift reporting |
+
+> Think of it as the App Store for safe execution.
+
+---
+
 ## Manifest Paths
 
 Each mode stores its approval separately:

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { serializeStable } from './contract.js';
+import { serializeStable, checkRegexSafety } from './contract.js';
 import { deepEqual, pretty, indexById, resolvePath } from './shared.js';
 
 // ---------------------------------------------------------------------------
@@ -164,6 +164,16 @@ function validateWorkflowDefinition(def) {
     if (typeof step.id !== 'string' || step.id.trim() === '') continue;
     errors.push(...validateStepBody(step, svcResult.ids));
     errors.push(...validateStepTransitions(step, stepResult.ids));
+  }
+
+  // ReDoS safety check: reject any validator regex with catastrophic backtracking potential
+  for (const step of steps) {
+    if (step.validator?.regex) {
+      const safety = checkRegexSafety(step.validator.regex);
+      if (!safety.safe) {
+        errors.push(`step ${JSON.stringify(step.id)}: validator regex rejected — ${safety.reason}`);
+      }
+    }
   }
 
   if (errors.length > 0) {
