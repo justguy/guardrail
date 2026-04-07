@@ -1,0 +1,75 @@
+{
+  "id": "github-pr-merge",
+  "name": "GitHub PR Merge",
+  "description": "List approved pull requests matching a label, verify their CI status, and merge them in batch.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "repo": {
+      "type": "string",
+      "description": "GitHub repository in owner/repo format",
+      "pattern": "^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$"
+    },
+    "max_prs": {
+      "type": "integer",
+      "description": "Maximum number of PRs to merge in a single run",
+      "min": 1,
+      "max": 10
+    },
+    "label": {
+      "type": "string",
+      "description": "Label that marks PRs as eligible for merging",
+      "enum": ["ready-to-merge", "approved"]
+    }
+  },
+  "steps": [
+    {
+      "id": "list-approved",
+      "description": "List open PRs with the specified label that have been approved",
+      "run": {
+        "command": "gh",
+        "args": ["pr", "list", "--repo", "{{inputs.repo}}", "--label", "{{inputs.label}}", "--state", "open", "--limit", "{{inputs.max_prs}}", "--json", "number,title,reviews,statusCheckRollup"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "check-status",
+      "description": "Verify that all required status checks are passing for each listed PR",
+      "run": {
+        "command": "gh",
+        "args": ["pr", "checks", "--repo", "{{inputs.repo}}", "--required"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "merge-prs",
+      "description": "Merge each approved PR that has passing status checks",
+      "run": {
+        "command": "gh",
+        "args": ["pr", "merge", "--repo", "{{inputs.repo}}", "--squash", "--auto"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Only merge PRs that have at least one approving review",
+      "Block merge if any required status check is failing or pending",
+      "Limit the number of PRs merged per run to the max_prs input"
+    ],
+    "invariants": [
+      "No PR without an approving review is ever merged",
+      "No PR with failing required checks is ever merged",
+      "The total number of merged PRs never exceeds max_prs"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "github",
+  "tags": ["github", "pr", "merge"],
+  "channel": "verified",
+  "signature": null
+}

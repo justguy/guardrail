@@ -1,0 +1,69 @@
+{
+  "id": "openclaw-wrapper",
+  "name": "OpenClaw Wrapper",
+  "description": "Execute an OpenClaw automation flow with enforced scope boundaries and output verification.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "flow_id": {
+      "type": "string",
+      "description": "Identifier of the OpenClaw flow to execute",
+      "pattern": "^[a-zA-Z0-9_-]+$"
+    },
+    "scope": {
+      "type": "string",
+      "description": "Permission scope for the flow execution",
+      "enum": ["read", "write", "admin"]
+    }
+  },
+  "steps": [
+    {
+      "id": "validate-scope",
+      "description": "Verify the requested scope is allowed for the given flow and current user",
+      "run": {
+        "command": "openclaw",
+        "args": ["scope", "check", "--flow", "{{inputs.flow_id}}", "--scope", "{{inputs.scope}}"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "execute-flow",
+      "description": "Execute the OpenClaw flow within the validated scope boundary",
+      "run": {
+        "command": "openclaw",
+        "args": ["run", "--flow", "{{inputs.flow_id}}", "--scope", "{{inputs.scope}}", "--no-escalate"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "verify-output",
+      "description": "Validate the flow output conforms to the declared schema and scope constraints",
+      "run": {
+        "command": "openclaw",
+        "args": ["verify", "--flow", "{{inputs.flow_id}}", "--check-scope", "{{inputs.scope}}", "--check-output"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Flow execution is strictly bounded by the declared scope (read, write, or admin)",
+      "All flow outputs must pass schema validation before the recipe completes",
+      "Runaway or long-running flows are terminated after the configured timeout"
+    ],
+    "invariants": [
+      "No scope escalation beyond the declared level is possible during execution",
+      "Flow outputs that fail verification block the recipe from reporting success",
+      "No side effects outside the declared scope boundary are permitted"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "openclaw",
+  "tags": ["openclaw", "automation", "wrapper"],
+  "channel": "community",
+  "signature": null
+}

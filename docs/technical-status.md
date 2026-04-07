@@ -25,6 +25,9 @@ src/
   logger.js              NDJSON structured logging, terminal output formatting
   negotiation.js         Negotiation engine: issue codes, request generation, delta application, escalation
   recipe.js              Recipe packaging: schema validation, parsing, hashing, pack/unpack
+  recipe-index.js        Recipe indexing, category filtering, fuzzy search
+  recipe-channel.js      Verified/community trust model, signature mock, enforcement
+  recipe-executor.js     Native recipe execution, runtime guardrails, dry-run
   audit.js               Hash-chained audit log, chain verification, query surface
   fingerprint.js         Environment fingerprinting (OS, arch, hostname, Node version, env vars)
   runtime-policy.js      Time policy, counter persistence, concurrency locks
@@ -42,7 +45,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~9,000 lines of source, ~6,700 lines of tests, 487 passing tests, 0 dependencies.
+**Stats:** ~10,200 lines of source, ~8,000 lines of tests, 542 passing tests, 0 dependencies.
 
 ---
 
@@ -136,19 +139,27 @@ docs/                    Product requirements, specs, invariants, implementation
 | Cryptographic separation (I-A1) | Done | Execution path (worker) cannot access signing/approval functions |
 | Exit codes (20/21/22) | Done | time_policy_violated, concurrent_blocked, audit_chain_broken |
 
-### Bucket 4 — Recipe System (In Progress)
+### Bucket 4 — Recipe System
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Recipe packaging | Done | JSON schema with id, name, version (semver), author, inputs, steps, guardrails, risk_level |
-| Recipe validation | Done | Schema validator with typed inputs (string/integer/boolean), step/guardrail validation |
-| Recipe hashing | Done | SHA-256 of canonical JSON, immutability via content hash verification |
+| Recipe categories | Done | 6 categories: git, github, infra, packages, openclaw, custom |
+| Recipe tagging | Done | Multiple tags per recipe, filterable |
+| Recipe indexing + fuzzy search | Done | Scan directories, filter by category/tag/risk/channel, fuzzy text search |
+| Verified recipe channel | Done | Mock HMAC-SHA256 signatures, trust classification, enforcement |
+| Channel enforcement | Done | Unverified blocked by default, `--allow-unverified` override |
+| Static analysis | Done | 5 checks: structured mode, guardrails, risk, description, input constraints |
+| Native executor | Done | Step-by-step execution with runtime guardrail enforcement |
+| Dangerous command blocking | Done | rm -rf /, chmod 777, sudo rm, dd, mkfs, fork bomb detection |
+| Scope restriction | Done | Path-based scope enforcement, blocks out-of-scope file access |
+| Dry-run mode | Done | Full simulation: interpolation, danger check, scope check, no execution |
+| Recipe authoring (`guardrail create`) | Done | Generates skeleton recipe from flags with risk warnings |
 | Recipe packing | Done | `guardrail pack` produces versioned artifact with content hash |
 | Recipe inspect | Done | `guardrail recipe inspect` verifies hash integrity, detects tampering |
-| Local recipe loading | Done | Load + validate from filesystem |
-| Remote recipe loading | Done | HTTP/HTTPS fetch + validate |
-| Example recipe | Done | `recipes/npm-publish.recipe.json` — build, test, publish workflow |
-| CLI commands | Done | `guardrail pack`, `guardrail recipe validate`, `guardrail recipe inspect` |
+| Local + remote recipe loading | Done | Filesystem + HTTP/HTTPS fetch + validate |
+| CLI commands | Done | `guardrail list`, `guardrail create`, `guardrail pack`, `guardrail recipe validate/inspect` |
+| Example recipes (6) | Done | npm-publish, git-branch-cleanup, github-pr-merge, dep-upgrade, infra-deploy, openclaw-wrapper |
 
 ### Adversarial Testing
 
@@ -311,6 +322,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | test-bucket3.js | 40 | Bucket 3 coverage: fingerprint, audit chain, tamper detection, time policy, counters, locks, I-A1/I-A2 |
 | test-integration-runtime.js | 12 | Integration: runtime policy + audit wired into all 3 supervisors end-to-end |
 | test-recipe.js | 43 | Recipe packaging: schema validation, inputs, steps, guardrails, hashing, pack/unpack |
-| **Total** | **487** | |
+| test-recipe-system.js | 55 | Recipe system: categories, tags, index, fuzzy search, channel, executor, dry-run |
+| **Total** | **542** | |
 
 Run: `npm test`

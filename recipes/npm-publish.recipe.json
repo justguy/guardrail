@@ -75,5 +75,9 @@
     ]
   },
   "approval_required": true,
-  "risk_level": "high"
+  "risk_level": "high",
+  "category": "packages",
+  "tags": ["npm", "publish", "ci"],
+  "channel": "verified",
+  "signature": null
 }

@@ -36,9 +36,11 @@ Commands:
   template schema --template <path>     Show template input schema
   template simulate --template <path>   Simulate a template run (no execution)
   template diff --template <path>       Show diff from approved hash
+  list [--category X] [--search Q]      List and filter available recipes
   pack <recipe.json> [--output <path>]   Package a recipe for distribution
   recipe validate <recipe.json>         Validate a recipe file
   recipe inspect <packed.json>          Inspect a packaged recipe (verify hash)
+  create --name <n> --category <c>      Generate a recipe skeleton
   audit verify [--path <file>]           Verify audit log chain integrity
   audit query [--trace-id X] [filters]  Query audit log entries
   demo drift                            Run the built-in drift demo
@@ -262,11 +264,44 @@ function parseArgs(argv) {
     return result;
   }
 
-  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit') {
+  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create') {
     return { error: 'usage' };
   }
 
   result.subcommand = sub;
+
+  // --- list subcommand -------------------------------------------------------
+
+  if (sub === 'list') {
+    result.subcommand = 'list';
+    result.listFilters = {};
+    while (i < argv.length) {
+      if (argv[i] === '--category') { i++; result.listFilters.category = argv[i++]; continue; }
+      if (argv[i] === '--tag') { i++; result.listFilters.tag = argv[i++]; continue; }
+      if (argv[i] === '--search') { i++; result.listFilters.search = argv[i++]; continue; }
+      if (argv[i] === '--risk') { i++; result.listFilters.risk_level = argv[i++]; continue; }
+      if (argv[i] === '--channel') { i++; result.listFilters.channel = argv[i++]; continue; }
+      if (argv[i] === '--json') { result.json = true; i++; continue; }
+      return { error: 'usage' };
+    }
+    return result;
+  }
+
+  // --- create subcommand -----------------------------------------------------
+
+  if (sub === 'create') {
+    result.subcommand = 'create';
+    result.createOpts = {};
+    while (i < argv.length) {
+      if (argv[i] === '--name') { i++; result.createOpts.name = argv[i++]; continue; }
+      if (argv[i] === '--category') { i++; result.createOpts.category = argv[i++]; continue; }
+      if (argv[i] === '--risk') { i++; result.createOpts.risk = argv[i++]; continue; }
+      if (argv[i] === '--output') { i++; result.outputPath = argv[i++]; continue; }
+      if (argv[i] === '--json') { result.json = true; i++; continue; }
+      return { error: 'usage' };
+    }
+    return result;
+  }
 
   // --- pack subcommand -------------------------------------------------------
 
@@ -722,6 +757,96 @@ async function main() {
   }
 
   // --- audit verify ----------------------------------------------------------
+
+  // --- pack ----------------------------------------------------------------
+
+  // --- list ----------------------------------------------------------------
+
+  if (parsed.subcommand === 'list') {
+    const { buildIndex, filterRecipes, formatRecipeList } = await import('./recipe-index.js');
+
+    const dirs = ['recipes', 'node_modules/.guardrail/recipes'];
+    const index = buildIndex(dirs);
+    const filtered = filterRecipes(index, parsed.listFilters);
+
+    if (parsed.json) {
+      console.log(JSON.stringify(filtered.map(r => ({
+        id: r.id, name: r.name, version: r.version,
+        category: r.category, tags: r.tags, channel: r.channel,
+        risk_level: r.risk_level, approval_required: r.approval_required,
+      })), null, 2));
+    } else {
+      if (filtered.length === 0) {
+        console.log('No recipes found.');
+      } else {
+        console.log(`  ${'ID'.padEnd(25)} ${'RISK'.padEnd(6)} ${'CHANNEL'.padEnd(12)} NAME`);
+        console.log(`  ${'─'.repeat(25)} ${'─'.repeat(6)} ${'─'.repeat(12)} ${'─'.repeat(30)}`);
+        console.log(formatRecipeList(filtered));
+        console.log(`\n  ${filtered.length} recipe(s) found.`);
+      }
+    }
+    process.exit(0);
+  }
+
+  // --- create --------------------------------------------------------------
+
+  if (parsed.subcommand === 'create') {
+    const opts = parsed.createOpts || {};
+    if (!opts.name) {
+      console.error('Error: --name is required for create');
+      process.exit(1);
+    }
+
+    const id = opts.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const category = opts.category || 'custom';
+    const risk = opts.risk || 'medium';
+    const outputPath = parsed.outputPath || `${id}.recipe.json`;
+
+    const skeleton = {
+      id,
+      name: opts.name,
+      description: `TODO: Describe what ${opts.name} does`,
+      version: '0.1.0',
+      author: process.env.USER || 'unknown',
+      category,
+      tags: [category],
+      channel: 'community',
+      signature: null,
+      inputs: {
+        target: { type: 'string', pattern: '^[a-zA-Z0-9_.-]+$', description: 'TODO: describe this input' },
+      },
+      steps: [
+        { id: 'step-1', description: 'TODO: describe this step', run: { command: 'echo', args: ['{{inputs.target}}'], mode: 'structured' } },
+      ],
+      guardrails: {
+        constraints: ['TODO: define constraints'],
+        invariants: ['TODO: define invariants'],
+      },
+      approval_required: risk !== 'low',
+      risk_level: risk,
+    };
+
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(outputPath, JSON.stringify(skeleton, null, 2) + '\n');
+
+    const riskWarnings = {
+      high: '  WARNING: High-risk recipe — will require explicit approval before execution.',
+      medium: '  Note: Medium-risk recipe — approval required by default.',
+      low: '',
+    };
+
+    if (!parsed.json) {
+      console.log(`Created recipe skeleton: ${outputPath}`);
+      console.log(`  ID:       ${id}`);
+      console.log(`  Category: ${category}`);
+      console.log(`  Risk:     ${risk}`);
+      if (riskWarnings[risk]) console.log(riskWarnings[risk]);
+      console.log('\n  Edit the file to define your inputs, steps, and guardrails.');
+    } else {
+      console.log(JSON.stringify({ created: outputPath, id, category, risk }));
+    }
+    process.exit(0);
+  }
 
   // --- pack ----------------------------------------------------------------
 

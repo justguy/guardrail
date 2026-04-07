@@ -11,6 +11,8 @@ const SEMVER_RE = /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/;
 const ID_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const VALID_RISK_LEVELS = new Set(['low', 'medium', 'high']);
 const VALID_INPUT_TYPES = new Set(['string', 'integer', 'boolean']);
+export const VALID_CATEGORIES = new Set(['git', 'github', 'infra', 'packages', 'openclaw', 'custom']);
+export const VALID_CHANNELS = new Set(['verified', 'community']);
 const RECIPE_SCHEMA_VERSION = 1;
 
 // ---------------------------------------------------------------------------
@@ -52,6 +54,25 @@ function validateTopLevel(recipe) {
   }
   if (!VALID_RISK_LEVELS.has(recipe.risk_level)) {
     errors.push(`risk_level must be one of ${[...VALID_RISK_LEVELS].join(', ')}, got ${JSON.stringify(recipe.risk_level)}`);
+  }
+
+  // Category (optional but constrained)
+  if (recipe.category !== undefined && !VALID_CATEGORIES.has(recipe.category)) {
+    errors.push(`category must be one of ${[...VALID_CATEGORIES].join(', ')}, got ${JSON.stringify(recipe.category)}`);
+  }
+
+  // Tags (optional, array of strings)
+  if (recipe.tags !== undefined) {
+    if (!Array.isArray(recipe.tags)) {
+      errors.push('tags must be an array of strings');
+    } else if (recipe.tags.some(t => typeof t !== 'string' || t.trim() === '')) {
+      errors.push('tags must be non-empty strings');
+    }
+  }
+
+  // Channel (optional but constrained)
+  if (recipe.channel !== undefined && !VALID_CHANNELS.has(recipe.channel)) {
+    errors.push(`channel must be one of ${[...VALID_CHANNELS].join(', ')}, got ${JSON.stringify(recipe.channel)}`);
   }
 
   return errors;

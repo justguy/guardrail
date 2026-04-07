@@ -1,0 +1,75 @@
+{
+  "id": "dep-upgrade",
+  "name": "Dependency Upgrade",
+  "description": "Check for outdated NPM dependencies, upgrade within the allowed semver scope, and run the test suite to verify compatibility.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "package_dir": {
+      "type": "string",
+      "description": "Path to the package directory containing package.json",
+      "pattern": "^[a-zA-Z0-9_./-]+$"
+    },
+    "scope": {
+      "type": "string",
+      "description": "Semver scope for upgrades: patch (x.x.PATCH) or minor (x.MINOR.x)",
+      "enum": ["patch", "minor"]
+    },
+    "run_tests": {
+      "type": "boolean",
+      "description": "If true, run the test suite after upgrading dependencies",
+      "default": true
+    }
+  },
+  "steps": [
+    {
+      "id": "check-outdated",
+      "description": "List all outdated dependencies within the allowed semver scope",
+      "run": {
+        "command": "npm",
+        "args": ["outdated", "--prefix", "{{inputs.package_dir}}", "--json"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "upgrade",
+      "description": "Upgrade dependencies to the latest versions within the allowed scope",
+      "run": {
+        "command": "npm",
+        "args": ["update", "--prefix", "{{inputs.package_dir}}", "--save"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "test",
+      "description": "Run the test suite to verify upgraded dependencies are compatible",
+      "skip_if": "{{inputs.run_tests}} === false",
+      "run": {
+        "command": "npm",
+        "args": ["test", "--prefix", "{{inputs.package_dir}}"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "No major version bumps without explicit separate approval",
+      "Upgrades are limited to the selected semver scope (patch or minor)",
+      "Tests must run and pass after upgrade unless explicitly skipped"
+    ],
+    "invariants": [
+      "No dependency is upgraded beyond the declared semver scope",
+      "package-lock.json is always regenerated after upgrade",
+      "A failing test suite blocks the recipe from completing successfully"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "packages",
+  "tags": ["dependencies", "upgrade", "npm"],
+  "channel": "community",
+  "signature": null
+}
