@@ -23,6 +23,7 @@ src/
   validator.js           Result validation (exit_code, NDJSON protocol), convergence tracker
   service-registry.js    Service lifecycle management (start/stop/restart)
   logger.js              NDJSON structured logging, terminal output formatting
+  negotiation.js         Negotiation engine: issue codes, request generation, delta application, escalation
   shared.js              Utilities (deep equality, atomic writes, env building, subprocess execution)
 
 tests/
@@ -31,12 +32,13 @@ tests/
   test-adversarial.js    Sneaky allow-list, fake success trap, trojan step, tamper detection
   test-template.js       Template validation, lint, inputs, interpolation, env, hash, manifest tests
   test-bucket1.js        Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening
+  test-bucket2.js        Bucket 2 coverage: rollback, idempotency, negotiation, delta, escalation
 
 docs/                    Product requirements, specs, invariants, implementation guides
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~7,260 lines of source, ~4,190 lines of tests, 331 passing tests, 0 dependencies.
+**Stats:** ~7,700 lines of source, ~4,800 lines of tests, 392 passing tests, 0 dependencies.
 
 ---
 
@@ -67,22 +69,31 @@ docs/                    Product requirements, specs, invariants, implementation
 | Cross-supervisor parity | Done | file hash, anti-interactive, regex validators enforced in command/workflow/template modes |
 | CLI (run, demo drift) | Done | Structured + shell + shorthand string modes |
 
-### Bucket 2 — Workflow Engine
+### Bucket 2 — Workflow & Negotiation Engine
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Workflow definition format | Done | JSON with steps, services, transitions, typed step dispatch |
-| Workflow validation | Done | Top-level schema, unique IDs, transitions, entry step |
-| Workflow linting | Done | failure-to-done warnings, unreachable step detection |
-| Workflow normalization | Done | Sorted steps/services, default envPolicy, path resolution |
-| Workflow hashing | Done | SHA-256 of canonical serialized workflow |
-| Workflow manifest (v2) | Done | Separate from command manifests, includes full workflow |
-| Workflow drift detection | Done | Step/service/transition-level diffing |
+| Workflow validation | Done | Top-level schema, unique IDs, transitions, entry step, rollback validation |
+| Workflow linting | Done | Fatal errors (failure→done, shell mode, missing rollback) + advisory warnings |
+| Workflow normalization | Done | Sorted steps/services, default envPolicy, path resolution, idempotent defaults |
+| Workflow hashing | Done | SHA-256 of canonical serialized workflow (includes rollback + rollback_policy) |
+| Workflow manifest (v2) | Done | Includes rollback section, rollback_policy, idempotent flags |
+| Workflow drift detection | Done | Step/service/transition/rollback-level diffing |
 | Workflow execution | Done | State machine with step dispatch, service lifecycle |
+| Rollback guarantees (I-W2) | Done | Pre-approved rollback, auto-execute on abort/non-idempotent failure |
+| Idempotency enforcement (I-W4) | Done | Steps default false, non-idempotent failure forces rollback+abort |
+| Negotiation request generation | Done | Structured issue codes, self_resolvable field, round tracking |
+| Delta application engine | Done | Merge, re-validate, scope direction, cumulative drift |
+| Self-resolvable issue handling | Done | 5 self-resolvable codes (MISSING_ROLLBACK, MISSING_VALIDATOR, etc.) |
+| Non-self-resolvable enforcement | Done | Hard blocks (SIGNING_ATTEMPT, PTY_ADDITION, etc.) + human escalation |
+| Negotiation round limits (I-W8) | Done | Hard ceiling, NEGOTIATION_EXHAUSTED on exceed |
+| Cumulative drift detection (I-W6) | Done | Net widening across rounds triggers CUMULATIVE_WIDENING |
+| Human escalation package | Done | Full trace: original manifest, all rounds, blocking reason, recommendation |
 | Service registry | Done | Start/stop/restart with signal handling and cleanup |
 | Workflow risk aggregation | Done | Per-step evaluation rolled up to workflow level |
 | envPolicy normalization | Done | Workflow steps default inherit=true, single commands inherit=false |
-| CLI (workflow run, workflow lint) | Done | Full approval flow with workflow-specific output |
+| CLI (workflow run, workflow lint) | Done | Full approval flow, fatal lint errors block approval |
 
 ### Template System (New)
 
@@ -129,12 +140,8 @@ docs/                    Product requirements, specs, invariants, implementation
 
 | Feature | Status | Priority |
 |---------|--------|----------|
-| Negotiation request generation | Not started | Medium — agent loop negotiation |
-| Delta application engine | Not started | Medium |
-| Self-resolvable issue handling | Not started | Medium |
-| Cumulative drift tracking across rounds | Not started | Medium |
-| Round limits enforcement | Not started | Medium |
-| Idempotency enforcement (retry rules) | Partial | idempotent flag exists, auto-retry not wired |
+| CLI negotiate command | Not started | Low — agent round-trip via CLI (API available via negotiateWorkflowDelta) |
+| Agent-initiated retry for idempotent steps | Not started | Low — transition system handles retries, but no agent-triggered retry API |
 
 ### Template System Gaps
 
@@ -181,7 +188,7 @@ docs/                    Product requirements, specs, invariants, implementation
 
 ## Roadmap
 
-### Phase 1 (Current) — Foundation
+### Phase 1 — Foundation
 
 - [x] Core contract engine (Bucket 1 MVP)
 - [x] Workflow engine (Bucket 2 MVP)
@@ -199,13 +206,20 @@ docs/                    Product requirements, specs, invariants, implementation
 - [ ] Remote template pinning (SHA-locked URI)
 - [ ] Executable PATH resolution to absolute
 
-### Phase 3 — Negotiation Engine
+### Phase 3 (Current) — Negotiation Engine
 
-- [ ] Negotiation request generation (structured issue codes)
-- [ ] Delta application engine (agent-submitted narrowing)
-- [ ] Self-resolvable issue handling
-- [ ] Cumulative drift tracking
-- [ ] Round limits and escalation
+- [x] Rollback guarantees for workflows (I-W2): pre-approved rollback, auto-execute on failure
+- [x] Idempotency enforcement (I-W4): steps default false, non-idempotent failure → rollback+abort
+- [x] Workflow lint upgrade: fatal errors (failure→done, shell mode, missing rollback) block approval
+- [x] Negotiation request generation (15 structured issue codes, self_resolvable classification)
+- [x] Delta application engine (agent-submitted narrowing with deep merge)
+- [x] Self-resolvable issue handling (MISSING_ROLLBACK, MISSING_VALIDATOR, REGEX_OVERBROAD, etc.)
+- [x] Cumulative drift tracking (I-W6): net widening across rounds triggers CUMULATIVE_WIDENING
+- [x] Round limits (I-W8): hard ceiling, NEGOTIATION_EXHAUSTED on exceed
+- [x] Human escalation package (full trace, all rounds, blocking reason, recommendation)
+- [x] Hard blocks: SIGNING_ATTEMPT, ROLLBACK_MUTATION, PTY_ADDITION, IDEMPOTENT_ADDITION, etc.
+- [x] Bucket 2 test coverage requirements (61 tests)
+- [ ] CLI negotiate command (agent round-trip via CLI)
 
 ### Phase 4 — Observability & Audit
 
@@ -254,6 +268,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | test-adversarial.js | 15 | Security edge cases, sneaky escalation, tamper detection |
 | test-template.js | 75 | Template validation, lint, inputs, interpolation, env, hash |
 | test-bucket1.js | 65 | Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening, anti-interactive, cross-supervisor parity |
-| **Total** | **331** | |
+| test-bucket2.js | 61 | Bucket 2 coverage: rollback, idempotency, negotiation, delta engine, issue codes, escalation, cumulative drift |
+| **Total** | **392** | |
 
 Run: `npm test`

@@ -86,24 +86,24 @@ describe('Adversarial: Fake Success Trap', () => {
     assert.equal(def.name, 'stress-fake-success');
   });
 
-  it('lint catches validation_failed → done as a warning', () => {
+  it('lint catches validation_failed → done as a fatal error', () => {
     const def = loadWorkflowDefinition(join(FIXTURES, 'fake-success.json'));
-    const warnings = lintWorkflowDefinition(def);
+    const { errors } = lintWorkflowDefinition(def);
 
-    assert.ok(warnings.length > 0, 'Expected at least one lint warning');
+    assert.ok(errors.length > 0, 'Expected at least one lint error');
     assert.ok(
-      warnings.some(w => w.includes('validation_failed') && w.includes('done')),
-      `Expected warning about validation_failed → done, got: ${warnings.join('; ')}`,
+      errors.some(e => e.includes('validation_failed') && e.includes('done')),
+      `Expected error about validation_failed → done, got: ${errors.join('; ')}`,
     );
   });
 
   it('lint suggests using "abort" instead', () => {
     const def = loadWorkflowDefinition(join(FIXTURES, 'fake-success.json'));
-    const warnings = lintWorkflowDefinition(def);
+    const { errors } = lintWorkflowDefinition(def);
 
     assert.ok(
-      warnings.some(w => w.includes('abort')),
-      'Warning should suggest "abort" as the alternative',
+      errors.some(e => e.includes('abort')),
+      'Error should suggest "abort" as the alternative',
     );
   });
 });

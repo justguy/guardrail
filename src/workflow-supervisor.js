@@ -33,6 +33,13 @@ import {
   buildOutOfScopeUpdateDecision,
 } from './supervisor.js';
 import { indexById, persistStateSafe, executeSubprocess } from './shared.js';
+import {
+  createNegotiationState,
+  detectIssues,
+  generateNegotiationRequest,
+  applyDelta,
+  buildEscalationPackage,
+} from './negotiation.js';
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -51,6 +58,7 @@ function buildResult(runId, status, opts = {}) {
     stepsExecuted:   opts.stepsExecuted   ?? 0,
     failedStep:      opts.failedStep      ?? null,
     terminalReason:  opts.terminalReason  ?? null,
+    rollbackRan:     opts.rollbackRan     ?? false,
   };
 }
 
@@ -132,7 +140,7 @@ function compareAgainstApproved(candidate, manifestPath, logger) {
 
 async function handleApproval(candidate, manifestPath, driftDiffs, approved, riskAssessment, { nonInteractive, jsonOutput, logger, stateDir, state, runId, resultOpts }) {
   if (nonInteractive) {
-    return handleNonInteractiveApproval(approved, driftDiffs, { logger, stateDir, state, runId, resultOpts, jsonOutput });
+    return handleNonInteractiveApproval(approved, driftDiffs, candidate, { logger, stateDir, state, runId, resultOpts, jsonOutput });
   }
 
   if (!process.stdin.isTTY) {
@@ -147,7 +155,7 @@ async function handleApproval(candidate, manifestPath, driftDiffs, approved, ris
   return handleInteractiveApproval(candidate, manifestPath, driftDiffs, riskAssessment, { jsonOutput, logger, stateDir, state, runId, resultOpts });
 }
 
-function handleNonInteractiveApproval(approved, driftDiffs, { logger, stateDir, state, runId, resultOpts, jsonOutput }) {
+function handleNonInteractiveApproval(approved, driftDiffs, candidate, { logger, stateDir, state, runId, resultOpts, jsonOutput }) {
   if (approved === null) {
     logger.error('non_interactive_no_manifest');
     resultOpts.terminalReason = 'No approved manifest found. Run interactively to approve.';
@@ -156,12 +164,20 @@ function handleNonInteractiveApproval(approved, driftDiffs, { logger, stateDir, 
     return buildResult(runId, 'approval_required', resultOpts);
   }
 
-  logger.error('non_interactive_drift', { diffs: driftDiffs });
+  // Generate negotiation request for agent consumption
+  const negState = createNegotiationState(approved);
+  const issues = detectIssues(candidate, approved);
+  const negotiationRequest = generateNegotiationRequest(issues, negState);
+
+  logger.error('non_interactive_drift', { diffs: driftDiffs, negotiation: negotiationRequest });
   resultOpts.terminalReason = 'Workflow drift detected in non-interactive mode.';
   state.terminalReason = resultOpts.terminalReason;
   persistStateSafe(stateDir, state);
   if (!jsonOutput) printWorkflowDrift(formatDriftsForPrint(driftDiffs));
-  return buildResult(runId, 'drift_detected', resultOpts);
+
+  const result = buildResult(runId, 'drift_detected', resultOpts);
+  result.negotiationRequest = negotiationRequest;
+  return result;
 }
 
 async function handleInteractiveApproval(candidate, manifestPath, driftDiffs, riskAssessment, { jsonOutput, logger, stateDir, state, runId, resultOpts }) {
@@ -398,6 +414,53 @@ function resolveTransition(stepDef, outcome, stepMap, logger) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase D-pre: Rollback execution
+// ---------------------------------------------------------------------------
+
+async function executeRollbackSteps(rollbackSteps, logger, jsonOutput) {
+  if (!rollbackSteps || rollbackSteps.length === 0) return false;
+
+  logger.info('rollback_start', { stepCount: rollbackSteps.length });
+  if (!jsonOutput) printStepProgress('  Running rollback...', 'rollback', 'running');
+
+  for (const step of rollbackSteps) {
+    logger.info('rollback_step', { stepId: step.id });
+
+    const contract = createContract({
+      command:   step.run.command,
+      args:      step.run.args || [],
+      cwd:       step.run.cwd,
+      mode:      step.run.mode || 'structured',
+      timeoutMs: step.run.timeoutMs,
+      envPolicy: step.run.envPolicy,
+    });
+
+    try {
+      const workerResult = await launchWorker(contract, {
+        timeoutMs: step.run.timeoutMs || 60000,
+        validatorMode: 'exit_code',
+      });
+
+      const validation = validateResult(workerResult, 'exit_code');
+
+      if (!validation.valid) {
+        logger.warn('rollback_step_failed', { stepId: step.id, exitCode: validation.exitCode });
+        if (!jsonOutput) printStepProgress(`  Rollback step "${step.id}"`, 'rollback', 'failed');
+        // I-W9: Rollback step failure is logged, subsequent rollback steps continue
+      } else {
+        logger.info('rollback_step_done', { stepId: step.id });
+      }
+    } catch (err) {
+      logger.warn('rollback_step_error', { stepId: step.id, error: err.message });
+      if (!jsonOutput) printStepProgress(`  Rollback step "${step.id}"`, 'rollback', 'failed');
+      // Continue with remaining rollback steps
+    }
+  }
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Phase D: Execution loop
 // ---------------------------------------------------------------------------
 
@@ -466,6 +529,15 @@ async function executeWorkflow(workflow, { serviceRegistry, logger, jsonOutput, 
       printStepProgress(`[step ${stepsExecuted}/${totalSteps}] ${currentStep}`, stepDef.type, outcome === 'success' ? 'done' : 'failed');
     }
 
+    // I-W4: Non-idempotent step failure forces rollback and abort
+    if (outcome !== 'success' && !(stepDef.idempotent ?? false)) {
+      failedStep = currentStep;
+      finalStatus = 'validation_failed';
+      terminalReason = terminalReason || `Non-idempotent step "${currentStep}" failed — rollback required`;
+      logger.warn('non_idempotent_failure', { stepId: currentStep });
+      break;
+    }
+
     // Resolve transition
     const transition = resolveTransition(stepDef, outcome, stepMap, logger);
 
@@ -479,7 +551,15 @@ async function executeWorkflow(workflow, { serviceRegistry, logger, jsonOutput, 
     currentStep = transition.nextStep;
   }
 
-  return { stepsExecuted, failedStep, finalStatus, terminalReason, iteration };
+  // Execute rollback on non-success terminal state (I-W2, I-W9)
+  const rollbackSteps = workflow.rollback?.steps ?? [];
+  let rollbackRan = false;
+
+  if (finalStatus !== 'success' && rollbackSteps.length > 0) {
+    rollbackRan = await executeRollbackSteps(rollbackSteps, logger, jsonOutput);
+  }
+
+  return { stepsExecuted, failedStep, finalStatus, terminalReason, iteration, rollbackRan };
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +598,7 @@ export async function runWorkflowSupervisor(options) {
 
   const resultOpts = {
     workflowHash: '', manifestPath, riskLevel: '', riskReasons: [],
-    attempt: 0, stepsExecuted: 0, failedStep: null, terminalReason: null,
+    attempt: 0, stepsExecuted: 0, failedStep: null, terminalReason: null, rollbackRan: false,
   };
 
   const state = makeEmptyState(runId);
@@ -580,6 +660,7 @@ export async function runWorkflowSupervisor(options) {
     resultOpts.stepsExecuted = execResult.stepsExecuted;
     resultOpts.failedStep = execResult.failedStep;
     resultOpts.terminalReason = execResult.terminalReason;
+    resultOpts.rollbackRan = execResult.rollbackRan ?? false;
 
     // Phase E: Cleanup
     await cleanupServices(serviceRegistry, logger, state);
@@ -610,4 +691,50 @@ export async function runWorkflowSupervisor(options) {
     persistStateSafe(stateDir, state);
     return buildResult(runId, 'internal_error', resultOpts);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Negotiation round handler — for agent delta submissions
+// ---------------------------------------------------------------------------
+
+/**
+ * Process an agent-submitted delta against a negotiation state.
+ *
+ * @param {object} negState - Negotiation state from createNegotiationState().
+ * @param {object} delta    - Agent-proposed manifest delta.
+ * @param {object} [opts]   - Options: { workflowStarted, agentSigned }.
+ * @returns {{ accepted: boolean, negotiationRequest: object|null, escalation: object|null, negState: object }}
+ */
+export function negotiateWorkflowDelta(negState, delta, opts = {}) {
+  // Hard block: agent attempted to sign
+  if (delta.signature || delta.approved_by) {
+    const issues = detectIssues(
+      { workflow: delta.workflow ?? {}, riskAssessment: delta.riskAssessment ?? {} },
+      negState.originalManifest,
+      { agentSigned: true, ...opts },
+    );
+    const escalation = buildEscalationPackage(negState, issues, 'Agent attempted to sign manifest');
+    return { accepted: false, negotiationRequest: null, escalation, negState };
+  }
+
+  const result = applyDelta(delta, negState);
+
+  if (result.accepted) {
+    return { accepted: true, negotiationRequest: null, escalation: null, negState: result.negState };
+  }
+
+  // Generate next negotiation request or escalation
+  const hasHardBlock = result.issues.some(i => !i.self_resolvable);
+  const isExhausted = result.negState.terminated;
+
+  if (hasHardBlock || isExhausted) {
+    const reason = isExhausted
+      ? `Negotiation exhausted after ${result.negState.maxRounds} rounds`
+      : `Hard block: ${result.issues.filter(i => !i.self_resolvable).map(i => i.code).join(', ')}`;
+    const escalation = buildEscalationPackage(result.negState, result.issues, reason);
+    return { accepted: false, negotiationRequest: null, escalation, negState: result.negState };
+  }
+
+  const request = generateNegotiationRequest(result.issues, result.negState);
+  return { accepted: false, negotiationRequest: request, escalation: null, negState: result.negState };
 }

@@ -146,6 +146,41 @@ function validateStepTransitions(step, stepIds) {
   return errors;
 }
 
+function validateRollbackSection(def) {
+  const errors = [];
+  if (def.rollback_policy !== undefined && def.rollback_policy !== 'required' && def.rollback_policy !== 'none') {
+    errors.push(`rollback_policy must be "required" or "none", got ${JSON.stringify(def.rollback_policy)}`);
+  }
+  if (def.rollback_policy === 'none') {
+    if (typeof def.rollback_none_reason !== 'string' || def.rollback_none_reason.trim() === '') {
+      errors.push('rollback_none_reason is required when rollback_policy is "none"');
+    }
+  }
+  if (def.rollback?.steps) {
+    if (!Array.isArray(def.rollback.steps)) {
+      errors.push('rollback.steps must be an array');
+    } else {
+      const ids = new Set();
+      for (const step of def.rollback.steps) {
+        if (typeof step.id !== 'string' || step.id.trim() === '') {
+          errors.push('every rollback step must have a non-empty string id');
+          continue;
+        }
+        if (ids.has(step.id)) {
+          errors.push(`duplicate rollback step id: ${JSON.stringify(step.id)}`);
+        }
+        ids.add(step.id);
+        if (!step.run || typeof step.run !== 'object') {
+          errors.push(`rollback step ${JSON.stringify(step.id)}: must have a run block`);
+        } else if (typeof step.run.command !== 'string' || step.run.command.trim() === '') {
+          errors.push(`rollback step ${JSON.stringify(step.id)}: run.command must be a non-empty string`);
+        }
+      }
+    }
+  }
+  return errors;
+}
+
 function validateWorkflowDefinition(def) {
   const errors = [
     ...validateTopLevel(def),
@@ -165,6 +200,8 @@ function validateWorkflowDefinition(def) {
     errors.push(...validateStepBody(step, svcResult.ids));
     errors.push(...validateStepTransitions(step, stepResult.ids));
   }
+
+  errors.push(...validateRollbackSection(def));
 
   // ReDoS safety check: reject any validator regex with catastrophic backtracking potential
   for (const step of steps) {
@@ -234,20 +271,45 @@ function lintUnreachableSteps(entryStep, steps) {
   return warnings;
 }
 
+function lintShellMode(steps) {
+  const errors = [];
+  for (const step of steps) {
+    if (step.run?.mode === 'shell') {
+      errors.push(`step "${step.id}": mode must be "structured", got "shell"`);
+    }
+  }
+  return errors;
+}
+
+function lintRollbackRequirement(def) {
+  const steps = Array.isArray(def.steps) ? def.steps : [];
+  const hasNonIdempotent = steps.some(s => (s.idempotent ?? false) === false);
+  if (!hasNonIdempotent) return [];
+  if (def.rollback_policy === 'none') return [];
+  if (def.rollback?.steps && Array.isArray(def.rollback.steps) && def.rollback.steps.length > 0) return [];
+  return ['non-idempotent step(s) present but no rollback section declared (and rollback_policy is not "none")'];
+}
+
 /**
- * Lint a validated workflow definition for intent-level issues.
- * Returns an array of warning strings. These are advisory — they don't
- * block execution but indicate likely mistakes in the workflow design.
+ * Lint a validated workflow definition.
+ * Returns { errors, warnings } where errors are fatal (block approval)
+ * and warnings are advisory.
  *
  * @param {object} def - A validated workflow definition.
- * @returns {string[]} Warning messages.
+ * @returns {{ errors: string[], warnings: string[] }}
  */
 export function lintWorkflowDefinition(def) {
   const steps = Array.isArray(def.steps) ? def.steps : [];
-  return [
-    ...lintFailureToSuccessTransitions(steps),
-    ...lintUnreachableSteps(def.entryStep, steps),
-  ];
+  return {
+    errors: [
+      ...lintFailureToSuccessTransitions(steps),
+      ...lintShellMode(steps),
+      ...lintRollbackRequirement(def),
+    ],
+    warnings: [
+      ...lintUnreachableSteps(def.entryStep, steps),
+    ],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -286,9 +348,27 @@ function normalizeService(svc, projectRoot) {
 function normalizeStep(step, projectRoot) {
   return {
     ...step,
+    idempotent: step.idempotent ?? false,
     validator: step.validator ?? STEP_DEFAULTS.validator,
     updateSource: step.updateSource ?? STEP_DEFAULTS.updateSource,
     run: step.run ? normalizeRunBlock(step.run, projectRoot) : step.run,
+  };
+}
+
+function normalizeRollbackStep(step, projectRoot) {
+  return {
+    id: step.id,
+    idempotent: step.idempotent ?? true,
+    run: normalizeRunBlock(step.run, projectRoot),
+  };
+}
+
+function normalizeRollback(rollback, projectRoot) {
+  if (!rollback?.steps || !Array.isArray(rollback.steps)) return null;
+  return {
+    steps: rollback.steps
+      .map(step => normalizeRollbackStep(step, projectRoot))
+      .sort((a, b) => a.id.localeCompare(b.id)),
   };
 }
 
@@ -413,6 +493,32 @@ function diffSteps(cSteps, aSteps) {
   return diffs;
 }
 
+function diffRollback(cRollback, aRollback) {
+  const diffs = [];
+  const cSteps = cRollback?.steps ?? [];
+  const aSteps = aRollback?.steps ?? [];
+  const cMap = indexById(cSteps);
+  const aMap = indexById(aSteps);
+
+  for (const id of aMap.keys()) {
+    if (!cMap.has(id)) diffs.push(`- Remove rollback step: ${id}`);
+  }
+  for (const id of cMap.keys()) {
+    if (!aMap.has(id)) diffs.push(`+ Add rollback step: ${id}`);
+  }
+  for (const [id, cStep] of cMap) {
+    const aStep = aMap.get(id);
+    if (!aStep) continue;
+    if (!deepEqual(cStep.run, aStep.run)) {
+      diffs.push(`~ Rollback step ${id} run block changed`);
+    }
+    if (cStep.idempotent !== aStep.idempotent) {
+      diffs.push(`~ Rollback step ${id} idempotent: ${pretty(aStep.idempotent)} -> ${pretty(cStep.idempotent)}`);
+    }
+  }
+  return diffs;
+}
+
 function diffRiskAssessment(cRisk, aRisk) {
   const diffs = [];
   if (cRisk.trustClass !== aRisk.trustClass) {
@@ -473,6 +579,9 @@ export function normalizeWorkflowDefinition(definition, basePath) {
     maxIterations: definition.maxIterations ?? 10,
     services,
     steps,
+    rollback_policy: definition.rollback_policy ?? 'required',
+    rollback_none_reason: definition.rollback_none_reason ?? null,
+    rollback: normalizeRollback(definition.rollback, projectRoot),
   };
 }
 
@@ -483,6 +592,8 @@ export function hashWorkflow(normalizedWorkflow) {
     maxIterations: normalizedWorkflow.maxIterations,
     services: normalizedWorkflow.services,
     steps: normalizedWorkflow.steps,
+    rollback_policy: normalizedWorkflow.rollback_policy,
+    rollback: normalizedWorkflow.rollback,
   };
   return createHash('sha256').update(serializeStable(hashable)).digest('hex');
 }
@@ -501,6 +612,8 @@ export function createWorkflowManifest(normalizedWorkflow, workflowHash, riskAss
       maxIterations: normalizedWorkflow.maxIterations,
       services: normalizedWorkflow.services,
       steps: normalizedWorkflow.steps,
+      rollback_policy: normalizedWorkflow.rollback_policy,
+      rollback: normalizedWorkflow.rollback,
     },
     riskAssessment: {
       trustClass:                 riskAssessment.trustClass   ?? 'unknown',
@@ -524,6 +637,10 @@ export function diffWorkflowManifests(candidate, approved) {
     ...diffTopLevelFields(cWf, aWf),
     ...diffServices(cWf.services, aWf.services),
     ...diffSteps(cWf.steps, aWf.steps),
+    ...diffRollback(cWf.rollback, aWf.rollback),
+    ...(cWf.rollback_policy !== aWf.rollback_policy
+      ? [`~ rollback_policy: ${pretty(aWf.rollback_policy)} -> ${pretty(cWf.rollback_policy)}`]
+      : []),
     ...diffRiskAssessment(candidate.riskAssessment ?? {}, approved.riskAssessment ?? {}),
     ...(candidate.workflowHash !== approved.workflowHash
       ? [`~ workflowHash: ${pretty(approved.workflowHash)} -> ${pretty(candidate.workflowHash)}`]

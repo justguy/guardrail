@@ -1143,34 +1143,37 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
 // ===========================================================================
 
 describe('Workflow Lint', () => {
-  it('warns on failure → done transitions', () => {
+  it('errors on failure → done transitions (fatal lint)', () => {
     const def = {
       version: 1, kind: 'workflow_definition', name: 'test', projectRoot: '.',
       entryStep: 'a', maxIterations: 5, services: [],
+      rollback_policy: 'none', rollback_none_reason: 'all steps idempotent',
       steps: [{
-        id: 'a', type: 'task',
+        id: 'a', type: 'task', idempotent: true,
         run: { command: 'echo', args: ['hi'], cwd: '.' },
         on: { success: 'done', validation_failed: 'done' },
       }],
     };
-    const warnings = lintWorkflowDefinition(def);
-    assert.ok(warnings.length > 0);
-    assert.ok(warnings[0].includes('validation_failed'));
-    assert.ok(warnings[0].includes('done'));
-    assert.ok(warnings[0].includes('abort'));
+    const { errors } = lintWorkflowDefinition(def);
+    assert.ok(errors.length > 0);
+    assert.ok(errors[0].includes('validation_failed'));
+    assert.ok(errors[0].includes('done'));
+    assert.ok(errors[0].includes('abort'));
   });
 
-  it('no warnings for failure → abort transitions', () => {
+  it('no errors for failure → abort transitions', () => {
     const def = {
       version: 1, kind: 'workflow_definition', name: 'test', projectRoot: '.',
       entryStep: 'a', maxIterations: 5, services: [],
+      rollback_policy: 'none', rollback_none_reason: 'all steps idempotent',
       steps: [{
-        id: 'a', type: 'task',
+        id: 'a', type: 'task', idempotent: true,
         run: { command: 'echo', args: ['hi'], cwd: '.' },
         on: { success: 'done', validation_failed: 'abort' },
       }],
     };
-    const warnings = lintWorkflowDefinition(def);
+    const { errors, warnings } = lintWorkflowDefinition(def);
+    assert.equal(errors.length, 0);
     assert.equal(warnings.length, 0);
   });
 
@@ -1178,14 +1181,15 @@ describe('Workflow Lint', () => {
     const def = {
       version: 1, kind: 'workflow_definition', name: 'test', projectRoot: '.',
       entryStep: 'a', maxIterations: 5, services: [],
+      rollback_policy: 'none', rollback_none_reason: 'all steps idempotent',
       steps: [
-        { id: 'a', type: 'task', run: { command: 'echo', args: ['a'], cwd: '.' },
+        { id: 'a', type: 'task', idempotent: true, run: { command: 'echo', args: ['a'], cwd: '.' },
           on: { success: 'done', validation_failed: 'abort' } },
-        { id: 'orphan', type: 'task', run: { command: 'echo', args: ['orphan'], cwd: '.' },
+        { id: 'orphan', type: 'task', idempotent: true, run: { command: 'echo', args: ['orphan'], cwd: '.' },
           on: { success: 'done', validation_failed: 'abort' } },
       ],
     };
-    const warnings = lintWorkflowDefinition(def);
+    const { warnings } = lintWorkflowDefinition(def);
     assert.ok(warnings.some(w => w.includes('orphan') && w.includes('unreachable')));
   });
 
@@ -1193,14 +1197,16 @@ describe('Workflow Lint', () => {
     const def = {
       version: 1, kind: 'workflow_definition', name: 'test', projectRoot: '.',
       entryStep: 'a', maxIterations: 5, services: [],
+      rollback_policy: 'none', rollback_none_reason: 'all steps idempotent',
       steps: [
-        { id: 'a', type: 'task', run: { command: 'echo', args: ['a'], cwd: '.' },
+        { id: 'a', type: 'task', idempotent: true, run: { command: 'echo', args: ['a'], cwd: '.' },
           on: { success: 'b', validation_failed: 'abort' } },
-        { id: 'b', type: 'task', run: { command: 'echo', args: ['b'], cwd: '.' },
+        { id: 'b', type: 'task', idempotent: true, run: { command: 'echo', args: ['b'], cwd: '.' },
           on: { success: 'done', validation_failed: 'abort' } },
       ],
     };
-    const warnings = lintWorkflowDefinition(def);
+    const { errors, warnings } = lintWorkflowDefinition(def);
+    assert.equal(errors.length, 0);
     assert.equal(warnings.length, 0);
   });
 });

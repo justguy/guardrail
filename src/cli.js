@@ -679,18 +679,26 @@ async function main() {
       process.exit(1);
     }
 
-    const warnings = lintWorkflowDefinition(def);
+    const { errors, warnings } = lintWorkflowDefinition(def);
 
-    if (warnings.length === 0) {
+    if (errors.length === 0 && warnings.length === 0) {
       console.log('No issues found.');
       process.exit(0);
     }
 
-    console.error(`${warnings.length} warning${warnings.length > 1 ? 's' : ''}:\n`);
-    for (const w of warnings) {
-      console.error(`  ⚠ ${w}`);
+    if (errors.length > 0) {
+      console.error(`${errors.length} error${errors.length > 1 ? 's' : ''} (block approval):\n`);
+      for (const e of errors) {
+        console.error(`  ✗ ${e}`);
+      }
     }
-    process.exit(1);
+    if (warnings.length > 0) {
+      console.error(`${warnings.length} warning${warnings.length > 1 ? 's' : ''}:\n`);
+      for (const w of warnings) {
+        console.error(`  ⚠ ${w}`);
+      }
+    }
+    process.exit(errors.length > 0 ? 1 : 0);
   }
 
   // --- workflow run ---------------------------------------------------------
