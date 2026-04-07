@@ -595,4 +595,4 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 | test-feature-acceptance.js | 54 | README-derived acceptance coverage, including recipe non-interactive enforcement |
 | **Total** | **891** | |
 
-Run: `npm test` (all 891), `npm run test:e2e` (verification/e2e/adversarial suites), `npm run test:core` (core unit/integration suites)
+Run: `npm test` (all 957), `npm run test:e2e` (verification/e2e/adversarial suites), `npm run test:core` (core unit/integration suites), `npm run test:acceptance` (51 feature acceptance tests)

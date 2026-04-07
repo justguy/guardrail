@@ -390,7 +390,7 @@ guardrail demo blocked
 
 ## Testing
 
-The suite is currently 891 tests, all passing, with zero dependencies. Node.js built-in test runner only.
+957 tests, all passing, zero dependencies. Node.js built-in test runner only.
 
 ```bash
 npm test              # full suite

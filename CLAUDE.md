@@ -51,6 +51,9 @@ src/recipe-runner.js        Recipe resolution by ID, input validation, execution
 src/recipe-install.js       Local registry, install from path/URL, trusted sources
 src/verify.js               Self-verification checks (guardrail verify)
 src/demo-scenarios.js       Demo pack: recipe, trust, blocked scenarios
+src/risk-traits.js          Risk trait taxonomy, bucket classification, capability summary
+src/input-validator.js      Typed input validation, path policy, shell parsing, normalization
+src/recipe-supervisor.js    Manifest-backed recipe approval, drift detection, runtime policy
 tests/test-core.js          Contract, manifest, risk, approval, drift tests
 tests/test-workflow.js      Workflow parsing, hashing, drift, risk tests
 tests/test-adversarial.js   Security edge case tests
@@ -66,9 +69,16 @@ tests/test-e2e.js           E2E: recipe loading, dry-run, approval, scope, chann
 tests/test-policy-scenarios.js  Declarative policy → expected decision scenarios
 tests/test-golden-demos.js  Golden demo regressions (rm -rf, PR merge, prod rollout, tamper, version swap)
 tests/test-adversarial-e2e.js   Adversarial e2e: path traversal, agent bypass, schema bypass, audit tamper
-tests/test-gap-closure.js   Gap closure: recipe runner, install, verify, demo scenarios
+tests/test-gap-closure.js   Gap closure: recipe runner, install, verify, demo scenarios, versioning
+tests/test-feature-acceptance.js  Feature acceptance: 51 scenarios derived from README
+tests/test-input-validator.js     Input validation, risk traits, buckets, shell parsing
 docs/technical-status.md    Current implementation status and roadmap
 docs/issues.md              Issue tracker — all bugs, fixes, and resolutions are logged here
+docs/acceptance-tests.md    Feature acceptance test matrix with results
+docs/parameter-approval-plan.md  Parameter approval & risk taxonomy implementation plan
+docs/SaaS.md                Enterprise SaaS architecture design
+docs/openclaw_adapter.md    OpenClaw adapter architecture (Node.js CLI integration)
+docs/more_adapters.md       Adapter strategy: IDE, GitHub Actions, LangChain
 ```
 
 ## How to Run Tests
@@ -77,7 +87,7 @@ docs/issues.md              Issue tracker — all bugs, fixes, and resolutions a
 npm test
 ```
 
-All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 824 tests, all passing. `npm run test:e2e` runs the 179 verification/e2e/adversarial/gap-closure tests.
+All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 957 tests, all passing.
 
 ## Key Patterns
 
@@ -123,7 +133,7 @@ Hash: `SHA256(canonical(template_def) + canonical(resolved_inputs) + canonical(e
 
 - Update `docs/technical-status.md` when adding features, fixing bugs, or changing the roadmap status.
 - Track all bugs and resolutions in `docs/issues.md`. Every issue gets a numbered entry (ISSUE-NNN) with problem, root cause, fix, and status. Update status when resolved.
-- Run `npm test` after changes — all 824+ tests must pass.
+- Run `npm test` after changes — all 957+ tests must pass.
 - Follow existing patterns: pure validation functions return error arrays, supervisors handle approval flow, workers handle process spawning.
 - Keep zero dependencies. Only Node.js built-ins.
 - The test pattern uses `node:test` with `describe/it/assert`. Fixtures are built with helper functions (e.g., `makeIndividualTemplate()`).
