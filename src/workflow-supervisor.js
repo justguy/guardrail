@@ -26,7 +26,7 @@ import {
   validateUpdateProposal,
 } from './validator.js';
 import { createServiceRegistry } from './service-registry.js';
-import { createContract } from './contract.js';
+import { createContract, verifyFileHash } from './contract.js';
 import {
   promptApproval,
   STATUS_EXIT_CODES,
@@ -260,7 +260,17 @@ async function executeTaskStep(stepDef, stepId, ctx) {
     envPolicy: stepDef.run.envPolicy,
   });
 
-  const validatorMode = stepDef.validator || 'exit_code';
+  // File provenance check
+  const fileHashCheck = verifyFileHash(contract.command, contract.fileHash);
+  if (!fileHashCheck.skipped && !fileHashCheck.verified) {
+    logger.error('file_hash_mismatch', { stepId, path: fileHashCheck.path, expected: fileHashCheck.expected, actual: fileHashCheck.actual });
+    return { outcome: 'failure', iteration, terminalReason: `File hash mismatch for ${fileHashCheck.path ?? contract.command}` };
+  }
+
+  // Resolve validator mode: stepDef.validator can be a string ('exit_code'/'ndjson')
+  // or an object ({ regex: "..." }). For launchWorker we need the string mode.
+  const stepValidator = stepDef.validator;
+  const validatorMode = (typeof stepValidator === 'string') ? stepValidator : 'exit_code';
   const timeoutMs = stepDef.run.timeoutMs || 60000;
 
   let workerResult;
@@ -293,6 +303,14 @@ async function executeTaskStep(stepDef, stepId, ctx) {
   logger.info('task_validation', { stepId, valid: validation.valid, status: validation.status });
 
   if (validation.valid && validation.status === 'success') {
+    // Apply regex validator if step declares one (object form with .regex)
+    if (typeof stepValidator === 'object' && stepValidator?.regex) {
+      const re = new RegExp(stepValidator.regex);
+      if (!re.test(workerResult.stdout)) {
+        logger.warn('step_validator_regex_failed', { stepId, regex: stepValidator.regex });
+        return { outcome: 'validation_failed', iteration, terminalReason: null };
+      }
+    }
     return { outcome: 'success', iteration, terminalReason: null };
   }
 

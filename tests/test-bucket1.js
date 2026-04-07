@@ -697,3 +697,67 @@ describe('Bucket 1: Exit Code Mapping', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// 13. Cross-Supervisor Parity
+// ---------------------------------------------------------------------------
+
+describe('Bucket 1: Cross-Supervisor Parity', () => {
+  it('template-supervisor imports verifyFileHash', () => {
+    const src = readFileSync(new URL('../src/template-supervisor.js', import.meta.url), 'utf8');
+    assert.ok(src.includes('verifyFileHash'), 'template-supervisor must import verifyFileHash');
+    assert.ok(src.includes('file_hash_mismatch'), 'template-supervisor must log file_hash_mismatch');
+  });
+
+  it('workflow-supervisor imports verifyFileHash', () => {
+    const src = readFileSync(new URL('../src/workflow-supervisor.js', import.meta.url), 'utf8');
+    assert.ok(src.includes('verifyFileHash'), 'workflow-supervisor must import verifyFileHash');
+    assert.ok(src.includes('file_hash_mismatch'), 'workflow-supervisor must log file_hash_mismatch');
+  });
+
+  it('template-supervisor imports detectInteractiveAttempt', () => {
+    const src = readFileSync(new URL('../src/template-supervisor.js', import.meta.url), 'utf8');
+    assert.ok(src.includes('detectInteractiveAttempt'), 'template-supervisor must import detectInteractiveAttempt');
+    assert.ok(src.includes('interactive_prompt_detected'), 'template-supervisor must log interactive_prompt_detected');
+  });
+
+  it('workflow-supervisor imports detectInteractiveAttempt', () => {
+    const src = readFileSync(new URL('../src/workflow-supervisor.js', import.meta.url), 'utf8');
+    assert.ok(src.includes('detectInteractiveAttempt'), 'workflow-supervisor must import detectInteractiveAttempt');
+    assert.ok(src.includes('interactive_prompt_detected'), 'workflow-supervisor must log interactive_prompt_detected');
+  });
+
+  it('workflow-supervisor applies regex validator on success (not just exit code)', () => {
+    const src = readFileSync(new URL('../src/workflow-supervisor.js', import.meta.url), 'utf8');
+    // The workflow supervisor must apply step.validator.regex after exit-code success
+    assert.ok(src.includes('stepValidator.regex'), 'workflow-supervisor must apply regex validator');
+    assert.ok(src.includes('new RegExp(stepValidator.regex)'), 'workflow-supervisor must construct RegExp from step validator');
+  });
+
+  it('all three supervisors check file hash before execution', () => {
+    const cmd = readFileSync(new URL('../src/supervisor.js', import.meta.url), 'utf8');
+    const wf  = readFileSync(new URL('../src/workflow-supervisor.js', import.meta.url), 'utf8');
+    const tpl = readFileSync(new URL('../src/template-supervisor.js', import.meta.url), 'utf8');
+
+    // All must call verifyFileHash before launchWorker
+    for (const [name, src] of [['supervisor', cmd], ['workflow-supervisor', wf], ['template-supervisor', tpl]]) {
+      const verifyPos = src.indexOf('verifyFileHash');
+      const launchPos = src.indexOf('launchWorker(');
+      assert.ok(verifyPos !== -1, `${name} must contain verifyFileHash`);
+      assert.ok(verifyPos < launchPos, `${name} must call verifyFileHash before launchWorker`);
+    }
+  });
+
+  it('all three supervisors detect interactive prompts after worker exit', () => {
+    const cmd = readFileSync(new URL('../src/supervisor.js', import.meta.url), 'utf8');
+    const wf  = readFileSync(new URL('../src/workflow-supervisor.js', import.meta.url), 'utf8');
+    const tpl = readFileSync(new URL('../src/template-supervisor.js', import.meta.url), 'utf8');
+
+    for (const [name, src] of [['supervisor', cmd], ['workflow-supervisor', wf], ['template-supervisor', tpl]]) {
+      const detectPos = src.indexOf('detectInteractiveAttempt(');
+      const launchPos = src.indexOf('launchWorker(');
+      assert.ok(detectPos !== -1, `${name} must call detectInteractiveAttempt`);
+      assert.ok(detectPos > launchPos, `${name} must call detectInteractiveAttempt after launchWorker`);
+    }
+  });
+});

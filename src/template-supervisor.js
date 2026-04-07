@@ -20,9 +20,9 @@ import {
   generateRunId,
   colorize,
 } from './logger.js';
-import { launchWorker } from './worker-interface.js';
+import { launchWorker, detectInteractiveAttempt } from './worker-interface.js';
 import { validateResult } from './validator.js';
-import { createContract } from './contract.js';
+import { createContract, verifyFileHash } from './contract.js';
 import { promptApproval, STATUS_EXIT_CODES } from './supervisor.js';
 import { persistStateSafe, buildEnvFromPolicy } from './shared.js';
 
@@ -165,6 +165,13 @@ async function executeStep(step, envIntersection, cwd, logger) {
     envPolicy,
   });
 
+  // File provenance check
+  const fileHashCheck = verifyFileHash(contract.command, contract.fileHash);
+  if (!fileHashCheck.skipped && !fileHashCheck.verified) {
+    logger.error('file_hash_mismatch', { stepId: step.id, path: fileHashCheck.path, expected: fileHashCheck.expected, actual: fileHashCheck.actual });
+    return { success: false, error: `File hash mismatch for ${fileHashCheck.path ?? contract.command}` };
+  }
+
   let workerResult;
   try {
     workerResult = await launchWorker(contract, {
@@ -179,6 +186,15 @@ async function executeStep(step, envIntersection, cwd, logger) {
   if (workerResult.timedOut) {
     logger.warn('step_timeout', { stepId: step.id });
     return { success: false, error: 'Step timed out' };
+  }
+
+  // Anti-interactive detection
+  if (workerResult.exitCode !== 0) {
+    const interactiveCheck = detectInteractiveAttempt(workerResult);
+    if (interactiveCheck.detected) {
+      logger.warn('interactive_prompt_detected', { stepId: step.id, pattern: interactiveCheck.pattern });
+      return { success: false, error: `Interactive prompt detected (pattern: "${interactiveCheck.pattern}")` };
+    }
   }
 
   const validation = validateResult(workerResult, 'exit_code');
