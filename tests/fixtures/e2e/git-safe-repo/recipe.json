@@ -1,0 +1,33 @@
+{
+  "id": "git-status-check",
+  "name": "Git Status Check",
+  "description": "Check git status — read-only, repo-local, safe.",
+  "version": "1.0.0",
+  "author": "test-team",
+  "category": "git",
+  "tags": ["safe", "read-only"],
+  "channel": "verified",
+  "inputs": {
+    "repo_path": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_./-]+$"
+    }
+  },
+  "steps": [
+    {
+      "id": "status",
+      "description": "Run git status",
+      "run": {
+        "command": "git",
+        "args": ["status", "--porcelain"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": ["read-only operation"],
+    "invariants": ["no writes"]
+  },
+  "approval_required": false,
+  "risk_level": "low"
+}

@@ -299,6 +299,12 @@ export function evaluateRisk(contract, options = {}) {
     reasons.push('destructive command detected');
   }
 
+  // ---- System path targeting in args ----------------------------------------
+  const hasSystemPathArgs = detectSystemPathArgs(contract);
+  if (hasSystemPathArgs) {
+    reasons.push('targets system path in arguments');
+  }
+
   // ---- Production-like targets ---------------------------------------------
   const hasProdTarget = detectProdTarget(contract, commandText);
   if (hasProdTarget) {
@@ -344,6 +350,7 @@ export function evaluateRisk(contract, options = {}) {
     hasBroadWritableScope,
     hasRestart,
     hasSecretInjection,
+    hasSystemPathArgs,
     referencedBinaries,
     projectRoot,
     contract,
@@ -566,6 +573,22 @@ function detectProdTarget(contract, commandText) {
   return false;
 }
 
+function detectSystemPathArgs(contract) {
+  const args = Array.isArray(contract.args) ? contract.args : [];
+  for (const arg of args) {
+    // Extract path from key=value style args (e.g., of=/dev/sda)
+    const pathPart = arg.includes('=') ? arg.split('=').pop() : arg;
+    for (const sp of SYSTEM_PATHS) {
+      if (pathPart === sp || pathPart.startsWith(sp + '/') || pathPart === sp + '/') return true;
+    }
+    // Root path targeting
+    if (pathPart === '/' || pathPart === '/*') return true;
+    // /dev/ targeting (raw devices)
+    if (pathPart.startsWith('/dev/')) return true;
+  }
+  return false;
+}
+
 function detectRestartCapability(commandText) {
   for (const indicator of RESTART_INDICATORS) {
     if (commandText.includes(indicator)) return true;
@@ -627,6 +650,16 @@ function computeRiskLevel(ctx) {
 
   // Shell mode combined with package install, download, or destructive behaviour
   if (ctx.isShellMode && (ctx.hasPackageInstall || ctx.hasDownload || ctx.hasDestructive)) {
+    return RISK_LEVELS.RED;
+  }
+
+  // Destructive command targeting system paths (regardless of mode)
+  if (ctx.hasDestructive && ctx.hasSystemPathArgs) {
+    return RISK_LEVELS.RED;
+  }
+
+  // Any command targeting system paths — RED
+  if (ctx.hasSystemPathArgs) {
     return RISK_LEVELS.RED;
   }
 

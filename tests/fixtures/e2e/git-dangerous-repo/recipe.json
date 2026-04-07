@@ -1,0 +1,33 @@
+{
+  "id": "git-force-push",
+  "name": "Git Force Push",
+  "description": "Force push to remote — destructive, dangerous.",
+  "version": "1.0.0",
+  "author": "test-team",
+  "category": "git",
+  "tags": ["destructive", "dangerous"],
+  "channel": "community",
+  "inputs": {
+    "branch": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9/_-]+$"
+    }
+  },
+  "steps": [
+    {
+      "id": "force-push",
+      "description": "Force push to remote",
+      "run": {
+        "command": "git",
+        "args": ["push", "--force", "origin", "{{inputs.branch}}"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": ["destructive operation"],
+    "invariants": ["requires approval"]
+  },
+  "approval_required": true,
+  "risk_level": "high"
+}

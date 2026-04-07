@@ -50,6 +50,10 @@ src/
   marketplace.js         Recipe discovery, publishing, usage tracking
   incident-hooks.js      Incident response triggers + actions
   shared.js              Utilities (deep equality, atomic writes, env building, subprocess execution)
+  recipe-runner.js       Recipe resolution by ID, input validation, execution orchestration
+  recipe-install.js      Local registry management, install from path/URL, trusted sources
+  verify.js              Self-verification checks (core imports, signing, safe defaults, risk)
+  demo-scenarios.js      Demo pack: recipe, trust, blocked scenarios
 
 recipes/
   npm-publish            Packages: build, test, publish NPM package (verified, high)
@@ -71,12 +75,24 @@ tests/
   test-recipe.js               Recipe packaging: schema, inputs, steps, guardrails, hash, pack/unpack
   test-recipe-system.js        Recipe system: categories, tags, index, channel, executor, dry-run
   test-bucket5.js              Bucket 5: resource bounds, learning, profiles, policy, metrics, identity
+  test-bucket6.js              Bucket 6: shared manifests, approval queue, RBAC, keys, env, marketplace, incidents
+  test-e2e.js                  E2E: recipe loading, dry-run, approval, scope, channel, strict mode, bounds, audit
+  test-policy-scenarios.js     Declarative policy scenarios: risk classification, workflow risk, channel, strict mode
+  test-golden-demos.js         Golden demo regressions: rm -rf, PR merge, dep upgrade, prod rollout, tamper, version swap
+  test-adversarial-e2e.js      Adversarial e2e: path traversal, wildcards, destructive flags, agent bypass, schema bypass
+
+  fixtures/e2e/                E2E fixture repos (5 environments with recipes and expected behaviors)
+    git-safe-repo/             Read-only git status, verified, low risk
+    git-dangerous-repo/        Force push, community, high risk
+    package-upgrade-app/       Dep upgrade, verified, medium risk
+    fake-prod-config/          Prod deploy, verified, high risk
+    openclaw-wrapper-sim/      Agent-bounded edit, community, medium risk
 
 docs/                    Product requirements, specs, invariants, implementation guides
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~13,100 lines of source, ~11,000 lines of tests, 645 passing tests, 0 dependencies.
+**Stats:** ~14,000 lines of source, ~13,200 lines of tests, 824 passing tests, 0 dependencies.
 
 ---
 
@@ -222,6 +238,23 @@ docs/                    Product requirements, specs, invariants, implementation
 | Marketplace | Done | Recipe discovery, publishing, version conflict detection, usage stats |
 | Incident response hooks | Done | Trigger on violations/failures; alert/halt/escalate/log actions |
 
+### Gap Closure — Pre-SaaS Readiness
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Recipe execution via CLI | Done | `guardrail run --recipe <id> --input k=v [--dry-run]` |
+| Recipe input validation | Done | Type coercion, pattern/enum/range checks, unknown input rejection |
+| Recipe install (local) | Done | `guardrail recipe install <path>` to `~/.guardrail/recipes/` |
+| Recipe install (remote) | Done | `guardrail recipe install <url>` with trusted source check |
+| Local recipe registry | Done | `~/.guardrail/recipes/`, duplicate/version conflict handling |
+| Trusted source config | Done | `~/.guardrail/config.json` with `trusted_sources` array |
+| Self-verification | Done | `guardrail verify` — 7 checks: modules, validation, signing, safe defaults, risk, dangerous, recipes |
+| Demo: recipe | Done | `guardrail demo recipe` — dry-run, risk, guardrails |
+| Demo: trust | Done | `guardrail demo trust` — verified vs community enforcement |
+| Demo: blocked | Done | `guardrail demo blocked` — dangerous command blocking |
+| Demo: list | Done | `guardrail demo list` — all available scenarios |
+| Demo pack | Done | `/demos/` directory with shell scripts |
+
 ### Adversarial Testing
 
 | Scenario | Status | Notes |
@@ -270,8 +303,9 @@ docs/                    Product requirements, specs, invariants, implementation
 
 | Feature | Status | Priority |
 |---------|--------|----------|
-| Recipe execution via `guardrail run <recipe-id>` | Not started | Medium — executor exists, CLI wiring pending |
-| Recipe registry / remote publishing | Not started | Medium — local pack/inspect done |
+| Recipe execution via `guardrail run <recipe-id>` | Done | `run --recipe <id> --input k=v [--dry-run]` |
+| Recipe install (local + remote) | Done | `recipe install <path\|url>` with trusted source config |
+| Recipe registry / remote publishing | Partial | Local registry done; remote publishing deferred to SaaS |
 
 ---
 
@@ -367,6 +401,83 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Incident response hooks (alert/halt/escalate/log on violations)
 - [x] 54 Bucket 6 tests
 
+### Phase 8 — Gap Closure (Pre-SaaS Readiness)
+
+- [x] Recipe execution via CLI (`run --recipe <id> --input k=v [--dry-run] [--allow-unverified]`)
+- [x] Recipe input validation pipeline (type coercion, pattern/enum/range, unknown rejection)
+- [x] Recipe install from local path (`recipe install <path> [--overwrite]`)
+- [x] Recipe install from URL (`recipe install <url>`) with trusted source enforcement
+- [x] Local recipe registry (`~/.guardrail/recipes/`, duplicate/version handling)
+- [x] Trusted source configuration (`~/.guardrail/config.json` with `trusted_sources`)
+- [x] Self-verification command (`guardrail verify [--json]` — 7 async checks)
+- [x] Demo pack: 4 scenarios (drift, recipe, trust, blocked) + `demo list`
+- [x] Demo shell scripts in `/demos/` directory
+- [x] 28 gap closure tests
+- [x] All 6 shipped recipes tested via dry-run: git-branch-cleanup, dep-upgrade, github-pr-merge, infra-deploy, npm-publish, openclaw-wrapper
+- [x] Versioned recipe storage (`~/.guardrail/recipes/<id>/<version>.json`)
+- [x] Version immutability (same version + different content → blocked)
+- [x] Version resolution (`id@version` or latest)
+- [x] `recipe versions <id>` CLI command
+- [x] Runbook support (sequential multi-recipe execution with independent guardrails)
+- [x] `buildVersionIndex()` for multi-version indexing
+- [x] `deduplicateLatest()` for `list` command
+- [x] Backward compatibility with legacy flat recipe files
+- [x] 39 gap closure + versioning tests
+
+---
+
+## Verification & E2E Testing
+
+### E2E Fixture Repos
+
+Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known files, expected allowed/blocked scope, and expected risk level:
+
+| Fixture | Category | Channel | Risk | Approval | Purpose |
+|---------|----------|---------|------|----------|---------|
+| git-safe-repo | git | verified | low | No | Read-only git status — baseline safe recipe |
+| git-dangerous-repo | git | community | high | Yes | Force push — destructive, unverified |
+| package-upgrade-app | packages | verified | medium | No | Dep upgrade within patch scope |
+| fake-prod-config | infra | verified | high | Yes | Production config deploy |
+| openclaw-wrapper-sim | openclaw | community | medium | No | Agent-bounded edit within src/ |
+
+### Test Levels
+
+| Level | File(s) | Count | What It Proves |
+|-------|---------|-------|----------------|
+| Schema/unit | test-core, test-recipe, test-bucket1-6 | 645 | Deterministic functions: hashing, validation, risk, approval, policy |
+| Policy scenarios | test-policy-scenarios | 30 | Declarative policy → expected decision (GREEN/YELLOW/RED, channel, strict mode) |
+| E2E integration | test-e2e | 42 | Full path: load recipe → validate → dry-run → scope check → channel → audit |
+| Golden demos | test-golden-demos | 31 | Viral demo scenarios as regression tests (rm -rf, PR merge, prod rollout, tamper) |
+| Adversarial | test-adversarial-e2e | 37 | Intentional breakage: path traversal, version swap, agent bypass, schema bypass |
+
+### Must-Pass Acceptance Matrix
+
+**Happy path:**
+- [x] Can load a recipe from fixture
+- [x] Can validate inputs against patterns and enums
+- [x] Can show dry-run plan with resolved interpolation
+- [x] Can request approval when needed (approval_required, computeDefaults)
+- [x] Can block/allow based on channel enforcement
+- [x] Can emit hash-chained audit trail
+
+**Safety:**
+- [x] Blocks out-of-scope file changes (checkScope)
+- [x] Blocks dangerous commands (checkDangerous, checkSafeDefaults)
+- [x] Blocks prod/destructive actions without approval (evaluateRisk → RED)
+- [x] Blocks unverified recipes by default (enforceChannel)
+- [x] Blocks agent drift in strict mode (createStrictMode)
+- [x] Stops execution when resource bounds exceeded (createResourceTracker)
+
+**Adversarial:**
+- [x] Path traversal inputs blocked
+- [x] Wildcard deletes blocked
+- [x] Hidden destructive flags detected
+- [x] Misleading recipe descriptions don't bypass dry-run
+- [x] Agent outside approved recipe blocked
+- [x] Recipe claiming dev but targeting prod → RED
+- [x] Version swap (v1 approved, v2 content) detected via hash mismatch
+- [x] Audit log tampering detected via chain verification
+
 ---
 
 ## Key Design Decisions
@@ -389,6 +500,37 @@ docs/                    Product requirements, specs, invariants, implementation
 
 ---
 
+## CLI Command Reference
+
+| Command | Status | Description |
+|---------|--------|-------------|
+| `run -- <cmd> [args]` | Done | Execute a command under contract |
+| `run --shell "<script>"` | Done | Shell mode (explicit opt-in) |
+| `run --template <path> --input k=v` | Done | Execute a parameterized template |
+| `run --recipe <id> --input k=v [--dry-run]` | Done | Execute a recipe by ID |
+| `workflow run --definition <path>` | Done | Execute a multi-step workflow |
+| `workflow lint --definition <path>` | Done | Lint a workflow definition |
+| `template lint\|explain\|schema\|simulate\|diff` | Done | Template inspection commands (5) |
+| `list [--category\|--tag\|--search\|--risk\|--channel]` | Done | List and filter recipes |
+| `create --name <n> --category <c>` | Done | Generate a recipe skeleton |
+| `pack <recipe.json>` | Done | Package a recipe with content hash |
+| `recipe validate <file>` | Done | Validate a recipe JSON |
+| `recipe inspect <packed.json>` | Done | Inspect packed recipe, verify hash |
+| `recipe install <path\|url> [--overwrite]` | Done | Install to versioned local registry |
+| `recipe versions <id>` | Done | List installed versions of a recipe |
+| `profile create\|use\|list\|show` | Done | Manage user profiles |
+| `policy list\|inspect\|validate` | Done | Manage and enforce policies |
+| `audit verify [--path]` | Done | Verify audit log chain integrity |
+| `audit query [--trace-id\|--event\|--after\|--before]` | Done | Query audit log entries |
+| `metrics [--path]` | Done | View execution metrics |
+| `approve [list] [--id\|--reject]` | Done | Approval queue management |
+| `marketplace [list]` | Done | Browse recipe marketplace |
+| `export [--format\|--path\|--output]` | Done | Export audit/compliance data |
+| `verify [--json]` | Done | Self-verification (7 checks) |
+| `demo drift\|recipe\|trust\|blocked\|list` | Done | Built-in demo scenarios |
+
+---
+
 ## Test Matrix
 
 | Suite | Tests | Focus |
@@ -405,6 +547,11 @@ docs/                    Product requirements, specs, invariants, implementation
 | test-recipe-system.js | 55 | Recipe system: categories, tags, index, fuzzy search, channel, executor, dry-run |
 | test-bucket5.js | 49 | Bucket 5: resource bounds, learning mode, profiles, safe defaults, policy, metrics, identity, strict mode |
 | test-bucket6.js | 54 | Bucket 6: shared manifests, approval queue, RBAC, key mgmt, env separation, marketplace, incidents |
-| **Total** | **645** | |
+| test-e2e.js | 42 | E2E: recipe loading from fixtures, input validation, dry-run plans, approval requirements, dangerous command blocking, scope enforcement, channel enforcement, strict mode, resource bounds, audit trail, safe defaults, hash integrity |
+| test-policy-scenarios.js | 30 | Declarative policy scenarios: 20 risk classification (GREEN/YELLOW/RED), workflow risk, channel enforcement, strict mode, safe defaults decisions |
+| test-golden-demos.js | 31 | Golden demo regressions: accidental rm -rf, broken PR bulk merge, dep upgrade major bump, infra rollout targeting prod, OpenClaw beyond scope, recipe tamper detection, version swap detection |
+| test-adversarial-e2e.js | 37 | Adversarial e2e: path traversal (5 vectors), wildcard deletes, hidden destructive flags, misleading recipe descriptions, agent outside approved recipe, dev-targeting-prod, version swap attacks, audit log tampering, resource bounds exhaustion, schema bypass attempts |
+| test-gap-closure.js | 39 | Gap closure: recipe runner, install, verify, demo scenarios, versioned storage, version resolution, runbook |
+| **Total** | **824** | |
 
-Run: `npm test`
+Run: `npm test` (all 824), `npm run test:e2e` (179 verification/e2e tests), `npm run test:core` (645 original tests only)

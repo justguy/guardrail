@@ -187,24 +187,27 @@ Guardrail Recipes are not a template gallery or a config repo. Each recipe is a 
 ### Using Recipes
 
 ```bash
-# Install a recipe
-guardrail recipe install github/open_pr
+# Install a recipe from a file
+guardrail recipe install ./my-recipe.recipe.json
 
-# Inspect before running
+# Install from a URL (trusted sources enforced)
+guardrail recipe install https://registry.example.com/recipes/deploy.recipe.json
+
+# List available recipes
+guardrail list
+
+# Dry-run a recipe (latest version)
+guardrail run --recipe git-branch-cleanup --input repo_path=. --dry-run
+
+# Pin to a specific version
+guardrail run --recipe git-branch-cleanup@1.0.0 --input repo_path=. --dry-run
+
+# List installed versions
+guardrail recipe versions git-branch-cleanup
+
+# Inspect before running (template-based)
 guardrail template explain --template recipes/open_pr.json
 guardrail template lint --template recipes/open_pr.json
-
-# Simulate
-guardrail template simulate \
-  --template recipes/open_pr.json \
-  --input repo=my-org/my-repo \
-  --input branch=feature-x
-
-# Execute
-guardrail run \
-  --template recipes/open_pr.json \
-  --input repo=my-org/my-repo \
-  --input branch=feature-x
 ```
 
 ### How Recipes Work
@@ -329,10 +332,53 @@ guardrail run -- npm test
 
 ## Try It
 
-See drift detection in action with a built-in demo:
+See Guardrail in action with built-in demos:
 
 ```bash
+# List all demos
+guardrail demo list
+
+# Drift detection — the core UX moment
 guardrail demo drift
+
+# Recipe execution — dry-run, risk, guardrails
+guardrail demo recipe
+
+# Trust channels — verified vs community enforcement
+guardrail demo trust
+
+# Dangerous command blocking — rm -rf, sudo, chmod 777
+guardrail demo blocked
+```
+
+---
+
+## Testing
+
+824 tests, zero dependencies. Node.js built-in test runner only.
+
+```bash
+npm test              # all 824 tests
+npm run test:e2e      # 179 verification/e2e/adversarial tests
+npm run test:core     # 645 original unit/integration tests
+```
+
+Tests are organized in five levels:
+
+| Level | What It Proves |
+|-------|----------------|
+| **Schema/unit** (645) | Deterministic functions: hashing, validation, risk classification, approval, policy |
+| **Policy scenarios** (30) | Declarative policy -> expected decision (GREEN/YELLOW/RED, channel, strict mode) |
+| **E2E integration** (42) | Full path: load recipe -> validate -> dry-run -> scope check -> channel -> audit |
+| **Golden demos + adversarial** (68) | Viral demos as regressions + intentional breakage (path traversal, version swap, agent bypass, audit tamper) |
+| **Gap closure + versioning** (39) | Recipe runner, versioned install, version resolution, runbook, verify, demos |
+
+Five [fixture repos](tests/fixtures/e2e/) simulate real environments (safe git, dangerous git, package upgrade, prod config, OpenClaw wrapper) with known expected behaviors.
+
+Quick self-test:
+
+```bash
+guardrail verify
 ```
 
 ---

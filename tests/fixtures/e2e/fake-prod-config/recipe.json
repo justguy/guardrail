@@ -1,0 +1,46 @@
+{
+  "id": "prod-config-deploy",
+  "name": "Production Config Deploy",
+  "description": "Deploy configuration to production environment.",
+  "version": "1.0.0",
+  "author": "test-team",
+  "category": "infra",
+  "tags": ["production", "deploy", "config"],
+  "channel": "verified",
+  "inputs": {
+    "env": {
+      "type": "string",
+      "enum": ["production", "staging"]
+    },
+    "config_path": {
+      "type": "string",
+      "pattern": "^configs/[a-z0-9-]+\\.json$"
+    }
+  },
+  "steps": [
+    {
+      "id": "validate-config",
+      "description": "Validate config file",
+      "run": {
+        "command": "node",
+        "args": ["scripts/validate-config.js", "{{inputs.config_path}}"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "deploy",
+      "description": "Deploy to target environment",
+      "run": {
+        "command": "node",
+        "args": ["scripts/deploy.js", "--env", "{{inputs.env}}", "--config", "{{inputs.config_path}}"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": ["validated config only", "approved environments only"],
+    "invariants": ["production requires approval"]
+  },
+  "approval_required": true,
+  "risk_level": "high"
+}

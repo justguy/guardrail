@@ -4,12 +4,13 @@ import { loadRecipe, VALID_CATEGORIES } from './recipe.js';
 
 // ---------------------------------------------------------------------------
 // Index building — scan directories for recipe files
+// Supports: flat (*.recipe.json) and versioned (<id>/<version>.json)
 // ---------------------------------------------------------------------------
 
 /**
  * Scan one or more directories and build a recipe index.
  *
- * @param {string[]} dirs - Directories to scan for .recipe.json files.
+ * @param {string[]} dirs - Directories to scan for recipe files.
  * @returns {object[]} Array of indexed recipe entries.
  */
 export function buildIndex(dirs) {
@@ -17,23 +18,70 @@ export function buildIndex(dirs) {
   for (const dir of dirs) {
     const resolved = resolve(dir);
     if (!existsSync(resolved)) continue;
-    const files = readdirSync(resolved).filter(f => f.endsWith('.recipe.json'));
-    for (const file of files) {
-      try {
-        const recipe = loadRecipe(join(resolved, file));
-        entries.push({
-          ...recipe,
-          _source: join(resolved, file),
-          category: recipe.category ?? 'custom',
-          tags:     recipe.tags ?? [],
-          channel:  recipe.channel ?? 'community',
-        });
-      } catch {
-        // Skip invalid recipes during indexing
+
+    const items = readdirSync(resolved, { withFileTypes: true });
+
+    for (const item of items) {
+      if (item.isDirectory()) {
+        // Versioned: <id>/<version>.json — index all versions
+        const idDir = join(resolved, item.name);
+        const vFiles = readdirSync(idDir).filter(f => f.endsWith('.json'));
+        for (const vf of vFiles) {
+          tryAddRecipe(entries, join(idDir, vf));
+        }
+      } else if (item.name.endsWith('.recipe.json')) {
+        // Flat legacy: <id>.recipe.json
+        tryAddRecipe(entries, join(resolved, item.name));
       }
     }
   }
   return entries;
+}
+
+function tryAddRecipe(entries, filePath) {
+  try {
+    const recipe = loadRecipe(filePath);
+    entries.push({
+      ...recipe,
+      _source: filePath,
+      category: recipe.category ?? 'custom',
+      tags:     recipe.tags ?? [],
+      channel:  recipe.channel ?? 'community',
+    });
+  } catch {
+    // Skip invalid recipes during indexing
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Build a version-aware index: { id → [{ version, recipe, source }] }
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a map of recipe ID → sorted version list.
+ *
+ * @param {string[]} dirs - Directories to scan.
+ * @returns {Map<string, object[]>} Map of id → [{ version, recipe, source }] sorted newest-first.
+ */
+export function buildVersionIndex(dirs) {
+  const all = buildIndex(dirs);
+  const map = new Map();
+
+  for (const entry of all) {
+    if (!map.has(entry.id)) map.set(entry.id, []);
+    map.get(entry.id).push({
+      version: entry.version,
+      recipe: entry,
+      source: entry._source,
+    });
+  }
+
+  // Sort each ID's versions newest-first
+  for (const [, versions] of map) {
+    versions.sort((a, b) => compareSemver(b.version, a.version));
+  }
+
+  return map;
 }
 
 // ---------------------------------------------------------------------------
@@ -42,10 +90,6 @@ export function buildIndex(dirs) {
 
 /**
  * Filter indexed recipes by criteria.
- *
- * @param {object[]} index  - Recipe index from buildIndex().
- * @param {object} filters  - { category, tag, risk_level, channel, search }.
- * @returns {object[]} Matching recipes.
  */
 export function filterRecipes(index, filters = {}) {
   let results = index;
@@ -53,19 +97,15 @@ export function filterRecipes(index, filters = {}) {
   if (filters.category) {
     results = results.filter(r => r.category === filters.category);
   }
-
   if (filters.tag) {
     results = results.filter(r => r.tags.includes(filters.tag));
   }
-
   if (filters.risk_level) {
     results = results.filter(r => r.risk_level === filters.risk_level);
   }
-
   if (filters.channel) {
     results = results.filter(r => r.channel === filters.channel);
   }
-
   if (filters.search) {
     results = fuzzySearch(results, filters.search);
   }
@@ -74,54 +114,54 @@ export function filterRecipes(index, filters = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Deduplicate: keep only latest version per recipe ID
+// ---------------------------------------------------------------------------
+
+/**
+ * Deduplicate indexed recipes, keeping the latest version of each ID.
+ */
+export function deduplicateLatest(index) {
+  const best = new Map();
+  for (const entry of index) {
+    const existing = best.get(entry.id);
+    if (!existing || compareSemver(entry.version, existing.version) > 0) {
+      best.set(entry.id, entry);
+    }
+  }
+  return [...best.values()];
+}
+
+// ---------------------------------------------------------------------------
 // Fuzzy search
 // ---------------------------------------------------------------------------
 
 /**
  * Fuzzy search across recipe name, description, id, and tags.
- * Uses substring matching + simple distance scoring.
- *
- * @param {object[]} recipes - Recipe array.
- * @param {string} query     - Search query.
- * @returns {object[]} Matching recipes sorted by relevance.
  */
 export function fuzzySearch(recipes, query) {
   const q = query.toLowerCase();
 
   const scored = recipes.map(r => {
     const fields = [
-      r.id,
-      r.name,
-      r.description,
+      r.id, r.name, r.description,
       ...(r.tags || []),
       r.category || '',
     ].map(f => (f || '').toLowerCase());
 
     let score = 0;
-
-    // Exact substring match in id or name (highest weight)
     if (fields[0].includes(q)) score += 100;
     if (fields[1].includes(q)) score += 80;
-
-    // Substring in description
     if (fields[2].includes(q)) score += 40;
-
-    // Substring in tags
     for (let i = 3; i < fields.length - 1; i++) {
       if (fields[i].includes(q)) score += 60;
     }
-
-    // Category match
     if (fields[fields.length - 1].includes(q)) score += 50;
 
-    // Token overlap (split query into words)
     const qTokens = q.split(/\s+/);
     const allText = fields.join(' ');
     for (const token of qTokens) {
       if (token.length >= 2 && allText.includes(token)) score += 20;
     }
-
-    // Levenshtein-like: prefix match on id
     if (fields[0].startsWith(q.slice(0, 3))) score += 15;
 
     return { recipe: r, score };
@@ -137,12 +177,6 @@ export function fuzzySearch(recipes, query) {
 // Group by category
 // ---------------------------------------------------------------------------
 
-/**
- * Group recipes by category.
- *
- * @param {object[]} recipes - Recipe array.
- * @returns {Map<string, object[]>} Map of category → recipes.
- */
 export function groupByCategory(recipes) {
   const groups = new Map();
   for (const cat of VALID_CATEGORIES) groups.set(cat, []);
@@ -156,9 +190,6 @@ export function groupByCategory(recipes) {
 
 /**
  * Format a recipe list for terminal display.
- *
- * @param {object[]} recipes - Recipe array.
- * @returns {string} Formatted output.
  */
 export function formatRecipeList(recipes) {
   if (recipes.length === 0) return 'No recipes found.';
@@ -167,8 +198,22 @@ export function formatRecipeList(recipes) {
   for (const r of recipes) {
     const trust = r.channel === 'verified' ? '[verified]' : '[community]';
     const risk = r.risk_level.toUpperCase().padEnd(6);
+    const ver = (r.version || '').padEnd(8);
     const tags = r.tags?.length ? ` tags: ${r.tags.join(', ')}` : '';
-    lines.push(`  ${r.id.padEnd(25)} ${risk} ${trust.padEnd(12)} ${r.name}${tags}`);
+    lines.push(`  ${r.id.padEnd(25)} ${ver} ${risk} ${trust.padEnd(12)} ${r.name}${tags}`);
   }
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Semver comparison
+// ---------------------------------------------------------------------------
+
+function compareSemver(a, b) {
+  const pa = (a || '0.0.0').split('.').map(Number);
+  const pb = (b || '0.0.0').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  }
+  return 0;
 }

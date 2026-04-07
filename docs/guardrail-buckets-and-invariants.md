@@ -672,4 +672,200 @@ Before this bucket is considered complete, the following must have passing autom
 
 ---
 
-*This document is implementation-grade. Implement Bucket 1 first. Do not begin Bucket 2 until all Bucket 1 test coverage requirements pass.*
+*Implement Bucket 1 first. Do not begin Bucket 2 until all Bucket 1 test coverage requirements pass. Do not begin Bucket 3 until all Bucket 2 test coverage requirements pass.*
+
+---
+
+---
+
+# Invariant Prompt — Bucket 3: Audit, Observability, and Runtime Integrity
+
+## Role
+
+You are implementing the Audit, Observability, and Runtime Integrity layer for Guardrail. This layer ensures that execution is cryptographically accountable, temporally bounded, concurrency-safe, and tamper-evident. It provides the evidence trail that makes every other invariant auditable and enforceable after the fact.
+
+This layer operates on top of Buckets 1 and 2. Every invariant from those buckets applies here. This layer adds runtime integrity constraints and audit guarantees. It does not relax them.
+
+---
+
+## Invariants
+
+**I-A1: Cryptographic Separation**
+Execution environments cannot access signing capabilities. The process that runs a command must never hold the key that approved it. Approval attempts detected during runtime execution are rejected immediately. Signing authority lives exclusively in the approval path, never in the execution path.
+
+**I-A2: Risk Escalation — Secrets and Production Context**
+If the engine detects both secret-shaped values (env vars matching secret name patterns) and a production-like target (hostname, URL, or env indicator matching production patterns), the risk classification is RED regardless of any other factor. This is not overridable by manifest declaration, negotiation, or policy. Both conditions together always require human approval.
+
+**I-A3: Temporal Enforcement**
+Execution is constrained to declared time windows and counter limits. If `validUntil` has passed, execution is blocked. If `maxRuns` is exhausted, execution is blocked. If `allowedWindow` excludes the current time, execution is blocked. Counter state must be persisted atomically. If counter state is missing or corrupt, fail closed — do not reset to zero or assume remaining budget.
+
+**I-A4: Concurrency Control**
+Concurrent execution of the same manifest or conflicting resource locks is prevented via lock acquisition with TTL. A lock that cannot be acquired blocks execution — it does not queue, retry, or wait. Expired locks (past TTL) are reclaimed automatically. Lock state is persisted, not in-memory. A crashed process with an expired lock does not permanently block future execution.
+
+**I-A5: Audit Integrity**
+Every execution, approval, rejection, negotiation round, rollback, and state transition is appended to a hash-chained audit log. Each log entry includes the SHA-256 hash of the previous entry. The chain is verified on read. If any entry is missing, modified, or out of sequence, tampering is detected and execution halts. The audit log is append-only. There is no delete, update, or truncate operation.
+
+---
+
+## Implementation Directives
+
+### 1. Environment Fingerprinting
+
+Capture a deterministic snapshot of the execution environment at runtime:
+- OS, architecture, hostname
+- Node.js version
+- Relevant env var names (not values) that are present
+- Working directory canonical path
+
+The fingerprint is included in the audit log entry. It is not used for enforcement (environments change), but it enables forensic reconstruction.
+
+### 2. Secret Detection
+
+Scan `env_injected` and `env_accessed` fields for secret name patterns:
+- Names matching: `*_KEY`, `*_SECRET`, `*_TOKEN`, `*_PASSWORD`, `*_CREDENTIAL`, `*_API_KEY`, `*_PRIVATE_KEY`
+- Case-insensitive matching
+
+If any match is found, set `traits.handles_secrets: true` in the scope vector. This feeds into risk classification (I-A2).
+
+### 3. Production-Like Target Detection
+
+Detect production-like targets from:
+- `target_environment` field values: `prod`, `production`, `live`, `release`
+- Hostname patterns in args: containing `prod`, `production`, `live` as substrings
+- Env var values (if declared): `NODE_ENV=production`, `RAILS_ENV=production`, etc.
+
+If any match is found, set `traits.targets_production: true` in the scope vector. Combined with secret detection, this triggers I-A2.
+
+### 4. Time Policy Enforcement
+
+At execution time:
+1. Check `runtime_limits.validUntil` — if current time is past this, block with `time_window_expired`.
+2. Check `runtime_limits.allowedWindow` — parse cron-like window spec, block if outside with `outside_allowed_window`.
+3. Check `runtime_limits.maxRuns` — read persisted counter, block if exhausted with `max_runs_exhausted`.
+4. Check `runtime_limits.maxExecutionsPerMinute` — read persisted rate counter, block if exceeded with `rate_limit_exceeded`.
+
+Counter persistence:
+- Counters are stored in a file keyed by manifest hash.
+- Incremented atomically (read → increment → write-to-temp → rename).
+- Missing counter file on first run: initialize to 0, not error.
+- Corrupt counter file: fail closed. Do not reset.
+
+### 5. Concurrency Locks
+
+Lock acquisition:
+1. Compute lock key from manifest hash + resource lock identifiers.
+2. Attempt to create lock file atomically (O_EXCL).
+3. Lock file contains: PID, timestamp, TTL expiry.
+4. If lock file exists and TTL has not expired: block with `concurrent_execution_blocked`.
+5. If lock file exists and TTL has expired: reclaim (delete and re-acquire).
+6. If lock file exists and owning PID is dead: reclaim.
+
+Lock release:
+- On normal exit (success or failure): release lock.
+- On crash: TTL-based expiry handles cleanup.
+
+### 6. Local Audit Log
+
+Format: NDJSON (`audit.jsonl`), one entry per line.
+
+Entry structure:
+```json
+{
+  "timestamp": "ISO8601",
+  "event": "execution_start | execution_end | approval | rejection | drift_detected | negotiation_round | rollback_start | rollback_end | validation_failed | ...",
+  "trace_id": "string",
+  "manifest_hash": "string",
+  "scope_vector_hash": "string",
+  "exit_code": "integer or null",
+  "fingerprint": { },
+  "prev_hash": "SHA256 of previous log entry",
+  "entry_hash": "SHA256 of this entry (excluding entry_hash field)"
+}
+```
+
+Append rules:
+- Open file in append mode. Never seek. Never overwrite.
+- Compute `prev_hash` by reading the last line of the file.
+- Compute `entry_hash` over all fields except `entry_hash` itself.
+- Write atomically (single write call, not buffered).
+
+### 7. Tamper Resistance
+
+On any audit log read (query, export, verification):
+1. Read all entries sequentially.
+2. For each entry: verify `entry_hash` matches recomputed hash of the entry.
+3. For each entry after the first: verify `prev_hash` matches `entry_hash` of the previous entry.
+4. If any verification fails: report `audit_chain_broken` with the index of the first invalid entry.
+5. Halt execution if tamper is detected during a pre-execution audit check.
+
+### 8. Audit Query Surface
+
+Provide query capabilities:
+- Filter by `trace_id`, `manifest_hash`, `event` type, time range.
+- Return matching entries with chain verification status.
+- `guardrail audit verify` — full chain verification, reports first break or confirms integrity.
+- `guardrail audit query --trace-id X` — all entries for a specific execution.
+
+### 9. Explainability UX
+
+For any blocked execution, produce a human-readable explanation:
+- What was proposed (command, args, scope)
+- What was approved (manifest summary)
+- Why it was blocked (specific drift, risk, temporal, concurrency reason)
+- What action is needed (re-approve, narrow scope, wait for window, etc.)
+
+This is a formatting concern, not an enforcement concern. It does not affect the block/allow decision.
+
+---
+
+## Exit Codes (additions)
+
+| Code | Meaning |
+|---|---|
+| 14 | Time policy violated — execution outside allowed window or limits exhausted |
+| 15 | Concurrent execution blocked — lock acquisition failed |
+| 16 | Audit chain broken — tamper detected |
+
+---
+
+## Test Coverage Requirements
+
+Before this bucket is considered complete, the following must have passing automated tests:
+
+**Cryptographic Separation**
+- Execution process cannot invoke approval/signing functions
+- Approval attempt during runtime: rejected immediately
+
+**Risk Escalation**
+- Secret-shaped env var + production target: classified RED regardless of other factors
+- Secret-shaped env var without production target: does not auto-escalate to RED
+- Production target without secret-shaped env var: does not auto-escalate to RED
+- Both present with manifest declaring GREEN: computed RED overrides declaration
+
+**Temporal Enforcement**
+- `validUntil` in the past: blocked with `time_window_expired`
+- `maxRuns` exhausted: blocked with `max_runs_exhausted`
+- `allowedWindow` outside current time: blocked with `outside_allowed_window`
+- `maxExecutionsPerMinute` exceeded: blocked with `rate_limit_exceeded`
+- Counter file missing on first run: initializes to 0, permits execution
+- Counter file corrupt: fail closed, blocks execution
+
+**Concurrency Control**
+- Two concurrent executions of same manifest: second blocked with `concurrent_execution_blocked`
+- Lock with expired TTL: reclaimed, new execution proceeds
+- Lock with dead PID: reclaimed, new execution proceeds
+- Normal exit: lock released
+- Lock file corrupt: fail closed
+
+**Audit Integrity**
+- Each log entry contains hash of previous entry
+- Tampered entry detected: `audit_chain_broken` reported at correct index
+- Deleted entry detected: chain verification fails
+- Inserted entry detected: chain verification fails
+- `guardrail audit verify` on clean log: passes
+- `guardrail audit verify` on tampered log: reports first break point
+- Append-only enforcement: no delete/update/truncate operations exist
+
+---
+
+*This document is implementation-grade. Implement buckets in order. Do not begin a bucket until all previous bucket test coverage requirements pass.*

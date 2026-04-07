@@ -28,6 +28,7 @@ const USAGE = `Usage: guardrail <command> [options]
 Commands:
   run [flags] -- <command> [args...]    Run a command under Guardrail
   run --shell "<script>"                Run a shell script under Guardrail
+  run --recipe <id[@ver]> --input k=v     Run a recipe by ID (optional @version)
   run --template <path> --input k=v     Run a template under Guardrail
   workflow run [flags]                  Run a workflow definition under Guardrail
   workflow lint --definition <path>     Lint a workflow definition for issues
@@ -40,13 +41,16 @@ Commands:
   pack <recipe.json> [--output <path>]   Package a recipe for distribution
   recipe validate <recipe.json>         Validate a recipe file
   recipe inspect <packed.json>          Inspect a packaged recipe (verify hash)
+  recipe install <path|url>             Install a recipe to local registry
+  recipe versions <id>                  List installed versions of a recipe
   create --name <n> --category <c>      Generate a recipe skeleton
   profile create|use|list|show          Manage user profiles
   policy list|inspect|validate          Manage and enforce policies
   metrics [--path <file>]               View execution metrics
   audit verify [--path <file>]           Verify audit log chain integrity
   audit query [--trace-id X] [filters]  Query audit log entries
-  demo drift                            Run the built-in drift demo
+  verify                                Run quick self-test verification
+  demo drift|recipe|trust|blocked       Run a built-in demo scenario
 
 Flags:
   --shell <text>              Shell mode with script text
@@ -267,7 +271,7 @@ function parseArgs(argv) {
     return result;
   }
 
-  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace') {
+  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify') {
     return { error: 'usage' };
   }
 
@@ -415,7 +419,7 @@ function parseArgs(argv) {
   // --- recipe subcommand ----------------------------------------------------
 
   if (sub === 'recipe') {
-    if (i >= argv.length || !['validate', 'inspect'].includes(argv[i])) {
+    if (i >= argv.length || !['validate', 'inspect', 'install', 'versions'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -424,6 +428,7 @@ function parseArgs(argv) {
     result.recipePath = argv[i++];
     while (i < argv.length) {
       if (argv[i] === '--json') { result.json = true; i++; continue; }
+      if (argv[i] === '--overwrite') { result.force = true; i++; continue; }
       return { error: 'usage' };
     }
     return result;
@@ -461,7 +466,18 @@ function parseArgs(argv) {
       return { error: 'usage' };
     }
     result.demoTarget = argv[i++];
-    if (result.demoTarget !== 'drift') {
+    if (!['drift', 'recipe', 'trust', 'blocked', 'list'].includes(result.demoTarget)) {
+      return { error: 'usage' };
+    }
+    return result;
+  }
+
+  // --- verify subcommand ----------------------------------------------------
+
+  if (sub === 'verify') {
+    result.subcommand = 'verify';
+    while (i < argv.length) {
+      if (argv[i] === '--json') { result.json = true; i++; continue; }
       return { error: 'usage' };
     }
     return result;
@@ -494,6 +510,27 @@ function parseArgs(argv) {
         return { error: 'usage' };
       }
       result.shell = argv[i++];
+      continue;
+    }
+
+    if (arg === '--recipe') {
+      i++;
+      if (i >= argv.length) {
+        return { error: 'usage' };
+      }
+      result.recipeId = argv[i++];
+      continue;
+    }
+
+    if (arg === '--dry-run') {
+      result.dryRunOnly = true;
+      i++;
+      continue;
+    }
+
+    if (arg === '--allow-unverified') {
+      result.allowUnverified = true;
+      i++;
       continue;
     }
 
@@ -606,6 +643,11 @@ function parseArgs(argv) {
     result.args = argv.slice(i);
   }
 
+  // Recipe mode: command comes from --recipe, nothing else needed
+  if (result.recipeId) {
+    return result;
+  }
+
   // Template mode: command comes from --template, nothing else needed
   if (result.template !== null) {
     return result;
@@ -681,9 +723,48 @@ async function main() {
   // --- demo drift ----------------------------------------------------------
 
   if (parsed.subcommand === 'demo') {
-    const { default: runDemoDrift } = await import('./demo-drift.js');
-    await runDemoDrift();
+    if (parsed.demoTarget === 'drift') {
+      const { default: runDemoDrift } = await import('./demo-drift.js');
+      await runDemoDrift();
+    } else if (parsed.demoTarget === 'list') {
+      const { listScenarios } = await import('./demo-scenarios.js');
+      for (const s of listScenarios()) {
+        console.log(`  ${s.id.padEnd(12)} ${s.name.padEnd(22)} ${s.description}`);
+      }
+    } else {
+      const mod = await import('./demo-scenarios.js');
+      const fns = { recipe: mod.runDemoRecipe, trust: mod.runDemoTrust, blocked: mod.runDemoBlocked };
+      if (fns[parsed.demoTarget]) {
+        await fns[parsed.demoTarget]();
+      } else {
+        console.error(`Unknown demo: ${parsed.demoTarget}`);
+        process.exit(1);
+      }
+    }
     process.exit(0);
+  }
+
+  // --- verify ---------------------------------------------------------------
+
+  if (parsed.subcommand === 'verify') {
+    const { runFullVerification } = await import('./verify.js');
+    const result = await runFullVerification();
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log('');
+      console.log('  Guardrail Self-Verification');
+      console.log('  ' + '─'.repeat(40));
+      for (const c of result.checks) {
+        const icon = c.passed ? '  PASS' : '  FAIL';
+        const color = c.passed ? '\x1b[32m' : '\x1b[31m';
+        console.log(`${color}${icon}\x1b[0m  ${c.name}: ${c.detail}`);
+      }
+      console.log('');
+      console.log(result.passed ? '  All checks passed.' : '  Some checks failed.');
+      console.log('');
+    }
+    process.exit(result.passed ? 0 : 1);
   }
 
   // --- template lint -------------------------------------------------------
@@ -858,11 +939,17 @@ async function main() {
   // --- list ----------------------------------------------------------------
 
   if (parsed.subcommand === 'list') {
-    const { buildIndex, filterRecipes, formatRecipeList } = await import('./recipe-index.js');
+    const { buildIndex, filterRecipes, formatRecipeList, deduplicateLatest } = await import('./recipe-index.js');
+    const { homedir } = await import('node:os');
+    const { resolve } = await import('node:path');
+    const { existsSync } = await import('node:fs');
 
     const dirs = ['recipes', 'node_modules/.guardrail/recipes'];
+    const homeRecipes = resolve(homedir(), '.guardrail', 'recipes');
+    if (existsSync(homeRecipes)) dirs.push(homeRecipes);
     const index = buildIndex(dirs);
-    const filtered = filterRecipes(index, parsed.listFilters);
+    const deduped = deduplicateLatest(index);
+    const filtered = filterRecipes(deduped, parsed.listFilters);
 
     if (parsed.json) {
       console.log(JSON.stringify(filtered.map(r => ({
@@ -874,8 +961,8 @@ async function main() {
       if (filtered.length === 0) {
         console.log('No recipes found.');
       } else {
-        console.log(`  ${'ID'.padEnd(25)} ${'RISK'.padEnd(6)} ${'CHANNEL'.padEnd(12)} NAME`);
-        console.log(`  ${'─'.repeat(25)} ${'─'.repeat(6)} ${'─'.repeat(12)} ${'─'.repeat(30)}`);
+        console.log(`  ${'ID'.padEnd(25)} ${'VERSION'.padEnd(8)} ${'RISK'.padEnd(6)} ${'CHANNEL'.padEnd(12)} NAME`);
+        console.log(`  ${'─'.repeat(25)} ${'─'.repeat(8)} ${'─'.repeat(6)} ${'─'.repeat(12)} ${'─'.repeat(30)}`);
         console.log(formatRecipeList(filtered));
         console.log(`\n  ${filtered.length} recipe(s) found.`);
       }
@@ -1183,6 +1270,52 @@ async function main() {
     }
   }
 
+  // --- recipe versions ------------------------------------------------------
+
+  if (parsed.subcommand === 'recipe-versions') {
+    const { listVersions } = await import('./recipe-install.js');
+    const recipeId = parsed.recipePath; // reused field
+    const versions = listVersions(recipeId);
+    if (parsed.json) {
+      console.log(JSON.stringify({ id: recipeId, versions }));
+    } else if (versions.length === 0) {
+      console.log(`No installed versions of "${recipeId}".`);
+    } else {
+      console.log(`Versions of "${recipeId}":`);
+      for (const v of versions) {
+        console.log(`  ${v}`);
+      }
+    }
+    process.exit(0);
+  }
+
+  // --- recipe install -------------------------------------------------------
+
+  if (parsed.subcommand === 'recipe-install') {
+    const source = parsed.recipePath;
+    try {
+      let result;
+      if (source.startsWith('http://') || source.startsWith('https://')) {
+        const { installFromUrl } = await import('./recipe-install.js');
+        result = await installFromUrl(source, { force: parsed.force });
+      } else {
+        const { installFromPath } = await import('./recipe-install.js');
+        result = installFromPath(source, { force: parsed.force });
+      }
+      if (parsed.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Installed recipe "${result.id}" v${result.version}`);
+        console.log(`  Path: ${result.path}`);
+        console.log(`  Hash: ${result.hash}`);
+      }
+      process.exit(0);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  }
+
   // --- audit verify --------------------------------------------------------
 
   if (parsed.subcommand === 'audit-verify') {
@@ -1298,6 +1431,38 @@ async function main() {
 
     const exitCode = STATUS_EXIT_CODES[result.status] ?? 1;
     process.exit(exitCode);
+  }
+
+  // --- run --recipe ---------------------------------------------------------
+
+  if (parsed.subcommand === 'run' && parsed.recipeId) {
+    const { runRecipeById } = await import('./recipe-runner.js');
+    try {
+      const result = await runRecipeById(parsed.recipeId, {
+        inputs: parsed.inputs,
+        allowUnverified: parsed.allowUnverified || false,
+        dryRunOnly: parsed.dryRunOnly || false,
+        cwd: process.cwd(),
+      });
+      if (parsed.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else if (result.status === 'dry_run') {
+        console.log(`Recipe: ${result.recipe.name} v${result.recipe.version}`);
+        console.log(`  Steps: ${result.steps.length}`);
+        console.log(`  Safe:  ${result.safe ? 'YES' : 'NO — blocked steps detected'}`);
+        for (const step of result.steps) {
+          const icon = step.dangerous || !step.inScope ? '✗' : '✓';
+          console.log(`  ${icon} ${step.id}: ${step.command} ${step.args.join(' ')}`);
+        }
+      } else {
+        console.log(`Recipe execution: ${result.status} (${result.stepsExecuted} steps)`);
+        if (result.reason) console.log(`  Reason: ${result.reason}`);
+      }
+      process.exit(result.status === 'success' || result.status === 'dry_run' ? 0 : 1);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
   }
 
   // --- run --template ------------------------------------------------------

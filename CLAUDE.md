@@ -47,6 +47,10 @@ src/validator.js            Result validation, convergence tracking
 src/service-registry.js     Service lifecycle (start/stop/restart)
 src/logger.js               NDJSON logging, terminal output formatting
 src/shared.js               Utilities (deep equality, atomic writes, env building)
+src/recipe-runner.js        Recipe resolution by ID, input validation, execution orchestrator
+src/recipe-install.js       Local registry, install from path/URL, trusted sources
+src/verify.js               Self-verification checks (guardrail verify)
+src/demo-scenarios.js       Demo pack: recipe, trust, blocked scenarios
 tests/test-core.js          Contract, manifest, risk, approval, drift tests
 tests/test-workflow.js      Workflow parsing, hashing, drift, risk tests
 tests/test-adversarial.js   Security edge case tests
@@ -58,7 +62,13 @@ tests/test-recipe.js        Recipe packaging: schema, inputs, steps, guardrails,
 tests/test-recipe-system.js Recipe system: categories, tags, index, channel, executor, dry-run
 tests/test-bucket5.js       Bucket 5: resource bounds, learning mode, profiles, safe defaults, policy, metrics, identity, strict mode
 tests/test-bucket6.js       Bucket 6: shared manifests, approval queue, RBAC, keys, env, marketplace, incidents
+tests/test-e2e.js           E2E: recipe loading, dry-run, approval, scope, channel, strict mode, bounds, audit
+tests/test-policy-scenarios.js  Declarative policy → expected decision scenarios
+tests/test-golden-demos.js  Golden demo regressions (rm -rf, PR merge, prod rollout, tamper, version swap)
+tests/test-adversarial-e2e.js   Adversarial e2e: path traversal, agent bypass, schema bypass, audit tamper
+tests/test-gap-closure.js   Gap closure: recipe runner, install, verify, demo scenarios
 docs/technical-status.md    Current implementation status and roadmap
+docs/issues.md              Issue tracker — all bugs, fixes, and resolutions are logged here
 ```
 
 ## How to Run Tests
@@ -67,7 +77,7 @@ docs/technical-status.md    Current implementation status and roadmap
 npm test
 ```
 
-All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 645 tests, all passing.
+All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 824 tests, all passing. `npm run test:e2e` runs the 179 verification/e2e/adversarial/gap-closure tests.
 
 ## Key Patterns
 
@@ -112,7 +122,8 @@ Hash: `SHA256(canonical(template_def) + canonical(resolved_inputs) + canonical(e
 ## When Updating This Project
 
 - Update `docs/technical-status.md` when adding features, fixing bugs, or changing the roadmap status.
-- Run `npm test` after changes — all 645+ tests must pass.
+- Track all bugs and resolutions in `docs/issues.md`. Every issue gets a numbered entry (ISSUE-NNN) with problem, root cause, fix, and status. Update status when resolved.
+- Run `npm test` after changes — all 824+ tests must pass.
 - Follow existing patterns: pure validation functions return error arrays, supervisors handle approval flow, workers handle process spawning.
 - Keep zero dependencies. Only Node.js built-ins.
 - The test pattern uses `node:test` with `describe/it/assert`. Fixtures are built with helper functions (e.g., `makeIndividualTemplate()`).
