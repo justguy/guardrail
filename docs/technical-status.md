@@ -24,6 +24,7 @@ src/
   service-registry.js    Service lifecycle management (start/stop/restart)
   logger.js              NDJSON structured logging, terminal output formatting
   negotiation.js         Negotiation engine: issue codes, request generation, delta application, escalation
+  recipe.js              Recipe packaging: schema validation, parsing, hashing, pack/unpack
   audit.js               Hash-chained audit log, chain verification, query surface
   fingerprint.js         Environment fingerprinting (OS, arch, hostname, Node version, env vars)
   runtime-policy.js      Time policy, counter persistence, concurrency locks
@@ -41,7 +42,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~8,500 lines of source, ~6,000 lines of tests, 444 passing tests, 0 dependencies.
+**Stats:** ~9,000 lines of source, ~6,700 lines of tests, 487 passing tests, 0 dependencies.
 
 ---
 
@@ -134,6 +135,20 @@ docs/                    Product requirements, specs, invariants, implementation
 | Audit CLI commands | Done | `guardrail audit verify`, `guardrail audit query` with filters |
 | Cryptographic separation (I-A1) | Done | Execution path (worker) cannot access signing/approval functions |
 | Exit codes (20/21/22) | Done | time_policy_violated, concurrent_blocked, audit_chain_broken |
+
+### Bucket 4 — Recipe System (In Progress)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Recipe packaging | Done | JSON schema with id, name, version (semver), author, inputs, steps, guardrails, risk_level |
+| Recipe validation | Done | Schema validator with typed inputs (string/integer/boolean), step/guardrail validation |
+| Recipe hashing | Done | SHA-256 of canonical JSON, immutability via content hash verification |
+| Recipe packing | Done | `guardrail pack` produces versioned artifact with content hash |
+| Recipe inspect | Done | `guardrail recipe inspect` verifies hash integrity, detects tampering |
+| Local recipe loading | Done | Load + validate from filesystem |
+| Remote recipe loading | Done | HTTP/HTTPS fetch + validate |
+| Example recipe | Done | `recipes/npm-publish.recipe.json` — build, test, publish workflow |
+| CLI commands | Done | `guardrail pack`, `guardrail recipe validate`, `guardrail recipe inspect` |
 
 ### Adversarial Testing
 
@@ -295,6 +310,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | test-bucket2.js | 61 | Bucket 2 coverage: rollback, idempotency, negotiation, delta engine, issue codes, escalation, cumulative drift |
 | test-bucket3.js | 40 | Bucket 3 coverage: fingerprint, audit chain, tamper detection, time policy, counters, locks, I-A1/I-A2 |
 | test-integration-runtime.js | 12 | Integration: runtime policy + audit wired into all 3 supervisors end-to-end |
-| **Total** | **444** | |
+| test-recipe.js | 43 | Recipe packaging: schema validation, inputs, steps, guardrails, hashing, pack/unpack |
+| **Total** | **487** | |
 
 Run: `npm test`
