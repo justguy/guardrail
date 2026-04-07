@@ -41,7 +41,7 @@ docs/technical-status.md    Current implementation status and roadmap
 npm test
 ```
 
-All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 432 tests, all passing.
+All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 444 tests, all passing.
 
 ## Key Patterns
 
@@ -86,7 +86,7 @@ Hash: `SHA256(canonical(template_def) + canonical(resolved_inputs) + canonical(e
 ## When Updating This Project
 
 - Update `docs/technical-status.md` when adding features, fixing bugs, or changing the roadmap status.
-- Run `npm test` after changes — all 432+ tests must pass.
+- Run `npm test` after changes — all 444+ tests must pass.
 - Follow existing patterns: pure validation functions return error arrays, supervisors handle approval flow, workers handle process spawning.
 - Keep zero dependencies. Only Node.js built-ins.
 - The test pattern uses `node:test` with `describe/it/assert`. Fixtures are built with helper functions (e.g., `makeIndividualTemplate()`).

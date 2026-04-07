@@ -40,6 +40,8 @@ import {
   applyDelta,
   buildEscalationPackage,
 } from './negotiation.js';
+import { checkTimePolicy, acquireLock } from './runtime-policy.js';
+import { createAuditLog } from './audit.js';
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -606,6 +608,7 @@ export async function runWorkflowSupervisor(options) {
   logger.info('workflow_supervisor_start', { definitionPath, manifestPath, nonInteractive, jsonOutput });
 
   let serviceRegistry = null;
+  let lockRelease = null;
 
   try {
     // Phase A: Load and prepare
@@ -649,6 +652,36 @@ export async function runWorkflowSupervisor(options) {
       if (approvalResult !== null) return approvalResult;
     }
 
+    // Phase D-pre: Runtime policy — time limits and concurrency lock
+    const runtimeLimits = options.runtimeLimits ?? null;
+    const auditLog = createAuditLog(resolve(stateDir, 'audit.jsonl'));
+
+    if (runtimeLimits) {
+      const timeCheck = checkTimePolicy(runtimeLimits, workflowHash, stateDir);
+      if (!timeCheck.allowed) {
+        const detail = timeCheck.errors.map(e => e.detail).join('; ');
+        logger.error('time_policy_violated', { errors: timeCheck.errors });
+        auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: workflowHash, reason: detail });
+        resultOpts.terminalReason = `Time policy violated: ${detail}`;
+        state.terminalReason = resultOpts.terminalReason;
+        persistStateSafe(stateDir, state);
+        return buildResult(runId, 'time_policy_violated', resultOpts);
+      }
+    }
+
+    const lockResult = acquireLock(workflowHash, [], stateDir);
+    if (!lockResult.acquired) {
+      logger.error('concurrent_blocked', { detail: lockResult.detail });
+      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: workflowHash, reason: lockResult.detail });
+      resultOpts.terminalReason = `Concurrent execution blocked: ${lockResult.detail}`;
+      state.terminalReason = resultOpts.terminalReason;
+      persistStateSafe(stateDir, state);
+      return buildResult(runId, 'concurrent_blocked', resultOpts);
+    }
+    lockRelease = lockResult.release;
+
+    auditLog.append({ event: 'execution_start', trace_id: runId, manifest_hash: workflowHash });
+
     // Phase D: Execute workflow
     serviceRegistry = createServiceRegistry(workflow.services || []);
 
@@ -662,7 +695,13 @@ export async function runWorkflowSupervisor(options) {
     resultOpts.terminalReason = execResult.terminalReason;
     resultOpts.rollbackRan = execResult.rollbackRan ?? false;
 
-    // Phase E: Cleanup
+    // Phase E: Cleanup — release lock, audit, services
+    if (lockRelease) lockRelease();
+    auditLog.append({
+      event: execResult.finalStatus === 'success' ? 'execution_end' : 'execution_failed',
+      trace_id: runId, manifest_hash: workflowHash, status: execResult.finalStatus,
+    });
+
     await cleanupServices(serviceRegistry, logger, state);
     state.terminalReason = execResult.terminalReason;
     persistStateSafe(stateDir, state);
@@ -685,6 +724,7 @@ export async function runWorkflowSupervisor(options) {
 
   } catch (err) {
     logger.error('workflow_supervisor_crash', { error: err.message, stack: err.stack });
+    try { if (lockRelease) lockRelease(); } catch { /* ignore */ }
     await cleanupServices(serviceRegistry, logger, state);
     resultOpts.terminalReason = `Internal error: ${err.message}`;
     state.terminalReason = resultOpts.terminalReason;

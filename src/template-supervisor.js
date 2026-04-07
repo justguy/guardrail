@@ -25,6 +25,8 @@ import { validateResult } from './validator.js';
 import { createContract, verifyFileHash } from './contract.js';
 import { promptApproval, STATUS_EXIT_CODES } from './supervisor.js';
 import { persistStateSafe, buildEnvFromPolicy } from './shared.js';
+import { checkTimePolicy, acquireLock } from './runtime-policy.js';
+import { createAuditLog } from './audit.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -284,6 +286,8 @@ export async function runTemplateSupervisor(options) {
 
   logger.info('template_supervisor_start', { templatePath, nonInteractive, jsonOutput });
 
+  let lockRelease = null;
+
   try {
     // ---- Load and validate template ----------------------------------------
     let def;
@@ -451,6 +455,36 @@ export async function runTemplateSupervisor(options) {
       }
     }
 
+    // ---- Runtime policy: time limits and concurrency lock -------------------
+    const runtimeLimits = options.runtimeLimits ?? null;
+    const auditLog = createAuditLog(resolve(stateDir, 'audit.jsonl'));
+
+    if (runtimeLimits) {
+      const timeCheck = checkTimePolicy(runtimeLimits, templateHash, stateDir);
+      if (!timeCheck.allowed) {
+        const detail = timeCheck.errors.map(e => e.detail).join('; ');
+        logger.error('time_policy_violated', { errors: timeCheck.errors });
+        auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: templateHash, reason: detail });
+        if (!jsonOutput) {
+          printResult({ success: false, exitCode: STATUS_EXIT_CODES.time_policy_violated, message: `Time policy violated: ${detail}` });
+        }
+        return buildResult(runId, 'time_policy_violated', resultOpts);
+      }
+    }
+
+    const lockResult = acquireLock(templateHash, [], stateDir);
+    if (!lockResult.acquired) {
+      logger.error('concurrent_blocked', { detail: lockResult.detail });
+      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: templateHash, reason: lockResult.detail });
+      if (!jsonOutput) {
+        printResult({ success: false, exitCode: STATUS_EXIT_CODES.concurrent_blocked, message: `Concurrent execution blocked: ${lockResult.detail}` });
+      }
+      return buildResult(runId, 'concurrent_blocked', resultOpts);
+    }
+    lockRelease = lockResult.release;
+
+    auditLog.append({ event: 'execution_start', trace_id: runId, manifest_hash: templateHash });
+
     // ---- Execute steps -----------------------------------------------------
     const resolvedSteps = buildResolvedSteps(def, inputValidation.values);
     const rollbackSteps = buildResolvedRollbackSteps(def, inputValidation.values);
@@ -504,12 +538,17 @@ export async function runTemplateSupervisor(options) {
             errors: stepResult.stderr ? [stepResult.stderr.slice(0, 500)] : [],
           });
         }
+        if (lockRelease) lockRelease();
+        auditLog.append({ event: 'execution_failed', trace_id: runId, manifest_hash: templateHash, status: 'validation_failed' });
         logger.info('template_supervisor_end', { status: 'validation_failed', failedStep });
         return result;
       }
     }
 
     // ---- Success -----------------------------------------------------------
+    if (lockRelease) lockRelease();
+    auditLog.append({ event: 'execution_end', trace_id: runId, manifest_hash: templateHash, status: 'success' });
+
     resultOpts.stepsExecuted = stepsExecuted;
     persistStateSafe(stateDir, state);
 
@@ -522,6 +561,7 @@ export async function runTemplateSupervisor(options) {
 
   } catch (err) {
     logger.error('template_supervisor_crash', { error: err.message, stack: err.stack });
+    try { if (lockRelease) lockRelease(); } catch { /* ignore */ }
     if (!jsonOutput) {
       printResult({ success: false, exitCode: 19, message: `Internal error: ${err.message}` });
     }

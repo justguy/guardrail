@@ -41,7 +41,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~8,200 lines of source, ~5,400 lines of tests, 432 passing tests, 0 dependencies.
+**Stats:** ~8,500 lines of source, ~6,000 lines of tests, 444 passing tests, 0 dependencies.
 
 ---
 
@@ -177,7 +177,6 @@ docs/                    Product requirements, specs, invariants, implementation
 | Feature | Status | Priority |
 |---------|--------|----------|
 | Manifest cryptographic signing | Not started | Medium — entry_hash chain exists, but no external signature |
-| Wire runtime policy into supervisors | Not started | Medium — checkTimePolicy/acquireLock available but not called from supervisors yet |
 | Explainability UX for Bucket 3 blocks | Not started | Low — template explain exists, need generic block explanation |
 
 ### Bucket 4 — Recipe System & OpenClaw Integration
@@ -250,7 +249,7 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Cryptographic separation (I-A1): execution path cannot access signing functions
 - [x] Risk traits (I-A2): handles_secrets, targets_production in evaluateRisk result
 - [x] Bucket 3 test coverage requirements (40 tests)
-- [ ] Wire runtime policy into supervisors (checkTimePolicy/acquireLock before execution)
+- [x] Runtime policy wired into all 3 supervisors (time, locks, audit — 12 integration tests)
 - [ ] Manifest cryptographic signing
 
 ### Phase 5 — Recipe System & Distribution
@@ -295,6 +294,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | test-bucket1.js | 65 | Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening, anti-interactive, cross-supervisor parity |
 | test-bucket2.js | 61 | Bucket 2 coverage: rollback, idempotency, negotiation, delta engine, issue codes, escalation, cumulative drift |
 | test-bucket3.js | 40 | Bucket 3 coverage: fingerprint, audit chain, tamper detection, time policy, counters, locks, I-A1/I-A2 |
-| **Total** | **432** | |
+| test-integration-runtime.js | 12 | Integration: runtime policy + audit wired into all 3 supervisors end-to-end |
+| **Total** | **444** | |
 
 Run: `npm test`

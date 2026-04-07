@@ -8,6 +8,8 @@ import { createLogger, printBanner, printApprovalSummary, printDrift, printDenie
 import { launchWorker, detectInteractiveAttempt } from './worker-interface.js';
 import { validateResult, validateUpdateProposal, createConvergenceTracker, computeValidationSignature } from './validator.js';
 import { persistStateSafe, executeSubprocess } from './shared.js';
+import { checkTimePolicy, acquireLock } from './runtime-policy.js';
+import { createAuditLog } from './audit.js';
 
 // ---------------------------------------------------------------------------
 // Exit code mapping
@@ -203,6 +205,8 @@ export async function runSupervisor(options) {
   };
 
   logger.info('supervisor_start', { command, args, shell, cwd, nonInteractive, jsonOutput });
+
+  let lockRelease = null;
 
   try {
     // ------------------------------------------------------------------
@@ -440,6 +444,42 @@ export async function runSupervisor(options) {
     }
 
     // ------------------------------------------------------------------
+    // Step 9b: Runtime policy — time limits and concurrency lock
+    // ------------------------------------------------------------------
+    const runtimeLimits = options.runtimeLimits ?? null;
+    const auditLog = createAuditLog(join(stateDir, 'audit.jsonl'));
+
+    if (runtimeLimits) {
+      const timeCheck = checkTimePolicy(runtimeLimits, contractHash, stateDir);
+      if (!timeCheck.allowed) {
+        const detail = timeCheck.errors.map(e => e.detail).join('; ');
+        logger.error('time_policy_violated', { errors: timeCheck.errors });
+        auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: contractHash, reason: detail });
+        const result = buildResult(runId, 'time_policy_violated', resultOpts);
+        persistState(stateDir, state, result);
+        if (!jsonOutput) {
+          printResult({ success: false, exitCode: result.exitCode, message: `Time policy violated: ${detail}` });
+        }
+        return result;
+      }
+    }
+
+    const lockResult = acquireLock(contractHash, [], stateDir);
+    if (!lockResult.acquired) {
+      logger.error('concurrent_blocked', { detail: lockResult.detail });
+      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: contractHash, reason: lockResult.detail });
+      const result = buildResult(runId, 'concurrent_blocked', resultOpts);
+      persistState(stateDir, state, result);
+      if (!jsonOutput) {
+        printResult({ success: false, exitCode: result.exitCode, message: `Concurrent execution blocked: ${lockResult.detail}` });
+      }
+      return result;
+    }
+    lockRelease = lockResult.release;
+
+    auditLog.append({ event: 'execution_start', trace_id: runId, manifest_hash: contractHash });
+
+    // ------------------------------------------------------------------
     // Step 10: Create convergence tracker
     // ------------------------------------------------------------------
     const maxRetries = contract.retryPolicy?.maxRetries ?? 3;
@@ -660,8 +700,17 @@ export async function runSupervisor(options) {
     }
 
     // ------------------------------------------------------------------
-    // Step 12: Write state
+    // Step 12: Release lock, write audit + state
     // ------------------------------------------------------------------
+    if (lockRelease) lockRelease();
+    auditLog.append({
+      event: finalStatus === 'success' ? 'execution_end' : 'execution_failed',
+      trace_id: runId,
+      manifest_hash: contractHash,
+      exit_code: lastWorkerResult?.exitCode ?? null,
+      status: finalStatus,
+    });
+
     const result = buildResult(runId, finalStatus, resultOpts);
     persistState(stateDir, state, result);
 
@@ -685,6 +734,9 @@ export async function runSupervisor(options) {
   } catch (err) {
     // Top-level catch for truly unexpected errors
     logger.error('supervisor_crash', { error: err.message, stack: err.stack });
+
+    // Release lock if held
+    try { if (lockRelease) lockRelease(); } catch { /* ignore */ }
 
     const result = buildResult(runId, 'internal_error', resultOpts);
     try {
