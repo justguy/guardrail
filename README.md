@@ -54,7 +54,7 @@ Nothing runs past that point. Every command is checked against what you already 
 
 ## How It Works
 
-**Contract-locked execution.** Every command or workflow is normalized, hashed, and stored as an approved manifest. The same approved shape produces the same hash. Anything else is a new approval unit.
+**Contract-locked execution.** Every command, workflow, or template is normalized, hashed, and stored as an approved manifest. The same approved shape produces the same hash. Anything else is a new approval unit.
 
 **Drift detection.** Changes to command name, arguments, scope, or risk level block execution immediately. No silent pass-through.
 
@@ -71,6 +71,60 @@ Risk levels come with human-readable reasons so you know *why* something was fla
 Secret detection scans both `envPolicy.inject` keys and `envPolicy.allow` lists for patterns like `SECRET`, `TOKEN`, `PASSWORD`, `API_KEY`, `CREDENTIAL`, `AUTH`, and `PRIVATE_KEY`. Secrets combined with shell mode or production targets escalate to Red.
 
 **Manifest reuse.** Once you approve a manifest, it's saved. The same command or workflow runs without re-prompting until something changes. Out-of-scope update proposals are halted and require a new approval record; Guardrail does not grant one-off in-session overrides.
+
+---
+
+## Three Execution Modes
+
+### 1. Command Mode
+
+Run a single command under contract:
+
+```bash
+guardrail run -- npm test
+guardrail run --shell "npm test && npm run lint"
+```
+
+### 2. Workflow Mode
+
+Run a multi-step workflow definition with services, transitions, and state machines:
+
+```bash
+guardrail workflow run --definition workflows/server-cycle.json
+guardrail workflow lint --definition workflows/server-cycle.json
+```
+
+### 3. Template Mode
+
+Run a parameterized, contract-locked execution template with typed inputs, environment handshake, and rollback:
+
+```bash
+# Explore a template
+guardrail template lint --template ./templates/npm-publish.json
+guardrail template explain --template ./templates/npm-publish.json
+guardrail template schema --template ./templates/npm-publish.json
+
+# Simulate without executing
+guardrail template simulate \
+  --template ./templates/npm-publish.json \
+  --input package_dir=packages/my-lib \
+  --input tag=beta
+
+# Execute
+guardrail run \
+  --template ./templates/npm-publish.json \
+  --input package_dir=packages/my-lib \
+  --input tag=beta
+
+# Show diff from approved hash
+guardrail template diff --template ./templates/npm-publish.json
+```
+
+Templates support two kinds:
+- **`kind: "template"`** -- Single command with typed inputs
+- **`kind: "workflow_template"`** -- Multi-step with rollback support
+
+Templates enforce structured mode only (no shell), require constrained inputs (pattern or enum for strings), and use an explicit environment handshake so templates cannot silently harvest env vars.
 
 ---
 
@@ -95,38 +149,35 @@ Guardrail shows both the trust class and the risk reasons at approval time. Non-
 
 ---
 
-## Workflow Manifests
+## Template System
 
-Guardrail supports both one-command manifests and first-class workflow manifests.
+Templates are typed, signed execution contracts that map validated user inputs to structured OS process arguments -- never to a shell string.
 
-For agent handoff and automation onboarding, see [Agent Onboarding](docs/agent-onboarding.md).
-
-Command mode:
-
-```bash
-guardrail run -- npm test
+```
+OpenClaw:  user input -> shell string -> OS
+Guardrail: user input -> schema validation -> args array -> OS (no shell)
 ```
 
-Workflow mode:
+Key properties:
+- **Input validation pipeline**: Type check -> pattern/enum/range -> injection scan -> interpolation -> args array
+- **Environment handshake**: Template declares `requires_env`, caller declares `allow` -- only the intersection reaches the process
+- **Cryptographic provenance**: `SHA256(template + inputs + env)` -- drift detection on every re-run
+- **Rollback**: Required when any step is `idempotent: false`, runs automatically on failure
+- **Lint**: 8 checks including bare string rejection, ReDoS detection, risk consistency
 
-```bash
-guardrail workflow run --definition workflows/server-cycle.json
-```
+For the full template specification, see [docs/guardrail-template-implementation.md](docs/guardrail-template-implementation.md).
 
-Each manifest path stores one approval unit. A command manifest does not also approve a workflow, and a workflow manifest does not implicitly approve ad hoc commands.
+---
 
-Lint a definition before running it:
+## Manifest Paths
 
-```bash
-guardrail workflow lint --definition workflows/server-cycle.json
-```
+Each mode stores its approval separately:
 
-Catches issues like failure transitions that silently report success, and unreachable steps.
+- Command manifest: `.guardrail/approved.json`
+- Workflow manifest: `.guardrail/workflows/default.approved.json`
+- Template manifest: `.guardrail/templates/<template-name>.approved.json`
 
-Default paths:
-
-- command manifest: `.guardrail/approved.json`
-- workflow manifest: `.guardrail/workflows/default.approved.json`
+A command manifest does not also approve a workflow or template. Each is an independent approval unit.
 
 ---
 
@@ -137,6 +188,8 @@ Guardrail controls what environment variables reach each process.
 **Single-command mode** defaults to `inherit: false` -- only `PATH` is passed. This is the restrictive default for one-off commands.
 
 **Workflow steps** default to `inherit: true` -- the full parent environment is passed. Workflow adapter scripts typically need the caller's env vars to function.
+
+**Template steps** use an explicit handshake -- only variables in both `requires_env` (template) and the caller's allow list are passed.
 
 Both modes support explicit control:
 
@@ -154,24 +207,24 @@ Both modes support explicit control:
 
 ---
 
-## When to Use It
-
-- **Repo-local build, test, lint commands** -- lock down what your dev scripts actually run
-- **CI automation** -- pre-approve a manifest, fail the build on drift
-- **AI-assisted command execution** -- stop agents from expanding their own scope
-- **Explicit server/task lifecycles** -- approve a named multi-step workflow instead of many loose commands
-- **Any repeatable workflow that shouldn't silently expand**
-
-> Guardrail doesn't try to be smarter than your workflow. It just ensures your workflow never does more than you approved.
-
----
-
 ## CI / Non-Interactive Mode
 
 Pre-approve a manifest, then run without prompts. Any drift fails the build.
 
 ```bash
+# Command mode
 guardrail run --non-interactive --approved-manifest .guardrail/approved.json -- npm test
+
+# Workflow mode
+guardrail workflow lint --definition workflows/server-cycle.json
+guardrail workflow run --definition workflows/server-cycle.json \
+  --non-interactive --approved-manifest .guardrail/workflows/server-cycle.approved.json
+
+# Template mode
+guardrail run --non-interactive \
+  --approved-manifest .guardrail/templates/npm-publish.approved.json \
+  --template ./templates/npm-publish.json \
+  --input package_dir=packages/my-lib --input tag=latest
 ```
 
 JSON output for structured logging and CI integration:
@@ -180,14 +233,18 @@ JSON output for structured logging and CI integration:
 guardrail run --json --non-interactive --approved-manifest .guardrail/approved.json -- npm test
 ```
 
-Workflow CI example -- lint first, then run:
+---
 
-```bash
-guardrail workflow lint --definition workflows/server-cycle.json
-guardrail workflow run --definition workflows/server-cycle.json --non-interactive --approved-manifest .guardrail/workflows/server-cycle.approved.json
-```
+## When to Use It
 
-Lint catches intent-level issues (failure transitions that silently report success, unreachable steps) before the workflow runs. Both commands return non-zero on failure. No silent pass-through.
+- **Repo-local build, test, lint commands** -- lock down what your dev scripts actually run
+- **CI automation** -- pre-approve a manifest, fail the build on drift
+- **AI-assisted command execution** -- stop agents from expanding their own scope
+- **Parameterized deployment templates** -- typed inputs, env handshake, rollback
+- **Explicit server/task lifecycles** -- approve a named multi-step workflow instead of many loose commands
+- **Any repeatable workflow that shouldn't silently expand**
+
+> Guardrail doesn't try to be smarter than your workflow. It just ensures your workflow never does more than you approved.
 
 ---
 
@@ -217,6 +274,14 @@ See drift detection in action with a built-in demo:
 ```bash
 guardrail demo drift
 ```
+
+---
+
+## Technical Status
+
+For detailed implementation status, what's working, what's not, and the full roadmap, see [docs/technical-status.md](docs/technical-status.md).
+
+For agent onboarding and automation integration, see [docs/agent-onboarding.md](docs/agent-onboarding.md).
 
 ---
 

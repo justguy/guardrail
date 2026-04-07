@@ -1,0 +1,255 @@
+# Guardrail — Technical Status & Roadmap
+
+**Last updated:** 2026-04-06
+
+---
+
+## Architecture Overview
+
+Guardrail is a Node.js CLI (zero dependencies) that enforces contract-locked execution for CLI commands, multi-step workflows, and parameterized templates. Every execution is normalized, hashed, compared against an approved manifest, and either permitted or blocked.
+
+```
+src/
+  cli.js                 Entry point, argument parsing, command routing
+  contract.js            Contract creation, normalization, hashing, shell detection
+  manifest.js            Manifest creation, persistence (atomic write), diff, comparison
+  workflow.js            Workflow definition loading, validation, linting, normalization, hashing
+  workflow-supervisor.js Workflow execution orchestrator (state machine, services, transitions)
+  template.js            Template engine: load, validate, lint, interpolate, hash, explain, simulate
+  template-supervisor.js Template execution supervisor with rollback support
+  supervisor.js          Single-command execution orchestrator (approval, convergence, retry)
+  worker-interface.js    Child process spawning (structured vs shell modes)
+  policy-engine.js       Risk evaluation, trust classification, binary/env/path analysis
+  validator.js           Result validation (exit_code, NDJSON protocol), convergence tracker
+  service-registry.js    Service lifecycle management (start/stop/restart)
+  logger.js              NDJSON structured logging, terminal output formatting
+  shared.js              Utilities (deep equality, atomic writes, env building, subprocess execution)
+
+tests/
+  test-core.js           Contract, manifest, risk, approval, drift, validator, logger tests
+  test-workflow.js        Workflow parsing, hashing, drift, risk, normalization, lint tests
+  test-adversarial.js    Sneaky allow-list, fake success trap, trojan step, tamper detection
+  test-template.js       Template validation, lint, inputs, interpolation, env, hash, manifest tests
+
+docs/                    Product requirements, specs, invariants, implementation guides
+.guardrail/              Runtime state (approved manifests, logs, state files)
+```
+
+**Stats:** ~6,970 lines of source, ~3,420 lines of tests, 266 passing tests, 0 dependencies.
+
+---
+
+## What's Working (v1)
+
+### Bucket 1 — Core Contract Engine
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Command normalization | Done | Structured + shell modes, deep merge defaults, path resolution |
+| Manifest creation & persistence | Done | Atomic write-to-temp-then-rename, JSON round-trip |
+| Manifest matching & drift detection | Done | Field-by-field comparison, human-readable diffs |
+| Contract hashing (SHA-256) | Done | Canonical JSON serialization, stable across formatting |
+| Risk classification (green/yellow/red) | Done | 15+ signal detectors (binary, env, path, pattern-based) |
+| Trust classification | Done | reviewed_internal, pinned_external, generated, unknown |
+| Approval flow (interactive + non-interactive) | Done | TTY detection, strong confirmation for red, Enter for green/yellow |
+| Non-interactive enforcement | Done | Fails closed on missing manifest or drift (exit 10/12) |
+| Path canonicalization | Done | Symlink resolution via realpathSync |
+| Shell metacharacter detection | Done | Blocks shorthand mode, requires explicit --shell |
+| Secret pattern detection | Done | Scans inject keys + allow lists, escalates with shell/prod |
+| Exit code mapping | Done | 0, 10-19 range covering all supervisor outcomes |
+| NDJSON protocol validation | Done | Real-time parsing, protocol message extraction |
+| Output validator engine | Done | exit_code + ndjson modes with update proposal support |
+| Convergence tracker | Done | Detects repeated signatures, no-progress loops, retry limits |
+| CLI (run, demo drift) | Done | Structured + shell + shorthand string modes |
+
+### Bucket 2 — Workflow Engine
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Workflow definition format | Done | JSON with steps, services, transitions, typed step dispatch |
+| Workflow validation | Done | Top-level schema, unique IDs, transitions, entry step |
+| Workflow linting | Done | failure-to-done warnings, unreachable step detection |
+| Workflow normalization | Done | Sorted steps/services, default envPolicy, path resolution |
+| Workflow hashing | Done | SHA-256 of canonical serialized workflow |
+| Workflow manifest (v2) | Done | Separate from command manifests, includes full workflow |
+| Workflow drift detection | Done | Step/service/transition-level diffing |
+| Workflow execution | Done | State machine with step dispatch, service lifecycle |
+| Service registry | Done | Start/stop/restart with signal handling and cleanup |
+| Workflow risk aggregation | Done | Per-step evaluation rolled up to workflow level |
+| envPolicy normalization | Done | Workflow steps default inherit=true, single commands inherit=false |
+| CLI (workflow run, workflow lint) | Done | Full approval flow with workflow-specific output |
+
+### Template System (New)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Template schema (individual + workflow) | Done | `kind: "template"` (single) and `kind: "workflow_template"` (multi-step) |
+| Input type system | Done | string (pattern/enum), integer (min/max), boolean; bare strings rejected |
+| Input validation pipeline | Done | Stage 1 (type), Stage 2 (constraint), Stage 3 (injection scan) |
+| Interpolation engine | Done | `{{inputs.x}}` → single arg element, resolved after validation |
+| Environment handshake | Done | requires_env intersection caller allow, secret pattern warnings |
+| Cryptographic provenance | Done | SHA-256(template + inputs + env), drift detection on re-run |
+| Template manifest | Done | Per-template approval at `.guardrail/templates/<name>.approved.json` |
+| Template lint (8 checks) | Done | Bare strings, structured mode, interpolation, rollback, ReDoS, risk, secrets |
+| Template explain | Done | Human-readable what-it-does/what-it-needs/what-it-cannot-do |
+| Template schema command | Done | Input type, constraints, defaults, required env vars |
+| Template simulate | Done | Full dry-run with resolved args, env, rollback preview |
+| Template diff | Done | Current vs approved hash comparison with change details |
+| Template execution | Done | Step-by-step with env scoping, validator regex, rollback on failure |
+| Rollback support | Done | Automatic for non-idempotent step failures |
+| CLI (template lint/explain/schema/simulate/diff, run --template) | Done | Full command surface per spec |
+
+### Adversarial Testing
+
+| Scenario | Status | Notes |
+|----------|--------|-------|
+| Sneaky allow-list inheritance | Tested | Secret env escalation detected |
+| Fake success trap | Tested | failure-to-done caught at lint |
+| Trojan horse step | Tested | Hidden secret in step 2 escalates to red |
+| Lazy schema normalization | Tested | Partial envPolicy normalizes to full shape, hash stable |
+| Silent tamper detection | Tested | Tampered manifest triggers drift in non-interactive mode |
+
+---
+
+## What's Not Working / Not Yet Implemented
+
+### Bucket 1 Gaps
+
+| Feature | Status | Priority |
+|---------|--------|----------|
+| TOCTOU mitigation (hash → fd → exec) | Not started | High — requires platform-specific fd exec |
+| File provenance enforcement (file_hash) | Not started | Medium |
+| Anti-interactive execution (pty: false, stdin kill) | Not started | Medium |
+| Regex complexity budget (formal check) | Partial | Heuristic ReDoS indicators exist, no formal budget |
+| Executable path resolution (resolve via PATH) | Not started | Low — currently uses command name, not abs path |
+
+### Bucket 2 Gaps
+
+| Feature | Status | Priority |
+|---------|--------|----------|
+| Negotiation request generation | Not started | Medium — agent loop negotiation |
+| Delta application engine | Not started | Medium |
+| Self-resolvable issue handling | Not started | Medium |
+| Cumulative drift tracking across rounds | Not started | Medium |
+| Round limits enforcement | Not started | Medium |
+| Idempotency enforcement (retry rules) | Partial | idempotent flag exists, auto-retry not wired |
+
+### Template System Gaps
+
+| Feature | Status | Priority |
+|---------|--------|----------|
+| Remote template pinning (SHA + URI) | Not started | Medium — `github://org/repo/file.json@SHA` |
+| Template composition / imports | Deferred | Intentionally out of v1 scope |
+| Trusted registries config | Not started | Needed for remote templates |
+| `mode: shell` in templates | Rejected | Intentionally forbidden in v1 |
+
+### Bucket 3 — Audit, Observability, Runtime Integrity
+
+| Feature | Status | Priority |
+|---------|--------|----------|
+| NDJSON audit log | Done | Per-run log files in `.guardrail/logs/` |
+| Environment fingerprinting | Not started | Medium |
+| Time policy enforcement | Not started | Low |
+| Counter persistence | Not started | Low |
+| Concurrency locks | Not started | Low |
+| Tamper resistance | Partial | Atomic writes, but no manifest signing |
+| Audit query surface | Not started | Low |
+
+### Bucket 4 — Recipe System & OpenClaw Integration
+
+| Feature | Status | Priority |
+|---------|--------|----------|
+| All features | Not started | Deferred until core stabilizes |
+
+### Bucket 5 — Policy, UX, Adoption
+
+| Feature | Status | Priority |
+|---------|--------|----------|
+| Learning mode | Not started | Medium |
+| Profiles | Not started | Low |
+| Safe defaults | Partial | Defaults exist but not configurable |
+
+### Bucket 6 — Enterprise & Team Features
+
+| Feature | Status | Priority |
+|---------|--------|----------|
+| All features | Not started | Future |
+
+---
+
+## Roadmap
+
+### Phase 1 (Current) — Foundation
+
+- [x] Core contract engine (Bucket 1 MVP)
+- [x] Workflow engine (Bucket 2 MVP)
+- [x] Template system (individual + workflow templates)
+- [x] Adversarial test suite
+- [x] 266 passing tests, 0 dependencies
+
+### Phase 2 — Hardening
+
+- [ ] TOCTOU mitigation (fd-based exec)
+- [ ] File provenance enforcement (file_hash matching)
+- [ ] Anti-interactive execution (pty kill)
+- [ ] Formal regex complexity budget
+- [ ] Remote template pinning (SHA-locked URI)
+- [ ] Executable PATH resolution to absolute
+
+### Phase 3 — Negotiation Engine
+
+- [ ] Negotiation request generation (structured issue codes)
+- [ ] Delta application engine (agent-submitted narrowing)
+- [ ] Self-resolvable issue handling
+- [ ] Cumulative drift tracking
+- [ ] Round limits and escalation
+
+### Phase 4 — Observability & Audit
+
+- [ ] Environment fingerprinting
+- [ ] Audit query surface
+- [ ] Tamper-resistant manifest signing
+- [ ] Time policy enforcement
+
+### Phase 5 — Recipe System & Distribution
+
+- [ ] Recipe packaging format
+- [ ] Verified recipe channel
+- [ ] OpenClaw wrapper integration
+- [ ] GitHub/package/git/infra recipes
+
+### Phase 6 — Enterprise
+
+- [ ] Shared manifests
+- [ ] Org policy engine
+- [ ] Multi-stage approval
+- [ ] Centralized audit
+- [ ] Compliance exports
+
+---
+
+## Key Design Decisions
+
+1. **Zero dependencies** — Only Node.js built-ins. Reduces supply chain attack surface.
+2. **Fail closed** — Missing, corrupt, or ambiguous state blocks execution.
+3. **Structured mode default** — Shell is explicit opt-in; templates forbid it entirely.
+4. **Separated trust and risk** — Provenance (trust) is orthogonal to operational danger (risk).
+5. **Atomic manifest writes** — Write to temp, rename to prevent partial reads.
+6. **Canonical JSON hashing** — Stable across formatting, key order, whitespace.
+7. **No sandbox** — Contract layer, not a security boundary.
+8. **Per-invocation template approval** — Hash includes template + inputs + env.
+9. **Environment handshake** — Templates cannot silently harvest env vars.
+
+---
+
+## Test Matrix
+
+| Suite | Tests | Focus |
+|-------|-------|-------|
+| test-core.js | 95 | Contract, manifest, risk, approval, drift, validator, logger |
+| test-workflow.js | 56 | Workflow parsing, hashing, drift, risk, normalization, lint |
+| test-adversarial.js | 15 | Security edge cases, sneaky escalation, tamper detection |
+| test-template.js | 75 | Template validation, lint, inputs, interpolation, env, hash |
+| **Total** | **266** | |
+
+Run: `npm test` or `node --test tests/test-core.js tests/test-workflow.js tests/test-adversarial.js tests/test-template.js`
