@@ -6,7 +6,7 @@
 
 ## Architecture Overview
 
-Guardrail is a Node.js CLI (zero dependencies) that enforces contract-locked execution for CLI commands, multi-step workflows, and parameterized templates. Every execution is normalized, hashed, compared against an approved manifest, and either permitted or blocked.
+Guardrail is a Node.js CLI (zero dependencies) that enforces contract-locked execution for CLI commands, multi-step workflows, parameterized templates, and recipe-based executions. Every real execution is normalized or hashed, compared against an approved manifest, and either permitted or blocked.
 
 ```
 src/
@@ -17,6 +17,7 @@ src/
   workflow-supervisor.js Workflow execution orchestrator (state machine, services, transitions)
   template.js            Template engine: load, validate, lint, interpolate, hash, explain, simulate
   template-supervisor.js Template execution supervisor with rollback support
+  recipe-supervisor.js   Recipe approval, drift detection, manifest reuse, runtime policy wiring
   supervisor.js          Single-command execution orchestrator (approval, convergence, retry)
   worker-interface.js    Child process spawning (structured vs shell modes)
   policy-engine.js       Risk evaluation, trust classification, binary/env/path analysis
@@ -50,7 +51,7 @@ src/
   marketplace.js         Recipe discovery, publishing, usage tracking
   incident-hooks.js      Incident response triggers + actions
   shared.js              Utilities (deep equality, atomic writes, env building, subprocess execution)
-  recipe-runner.js       Recipe resolution by ID, input validation, execution orchestration
+  recipe-runner.js       Recipe resolution by ID, input validation, dry-run orchestration
   recipe-install.js      Local registry management, install from path/URL, trusted sources
   verify.js              Self-verification checks (core imports, signing, safe defaults, risk)
   demo-scenarios.js      Demo pack: recipe, trust, blocked scenarios
@@ -71,7 +72,7 @@ tests/
   test-bucket1.js              Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening
   test-bucket2.js              Bucket 2 coverage: rollback, idempotency, negotiation, delta, escalation
   test-bucket3.js              Bucket 3 coverage: fingerprint, audit chain, tamper, time policy, locks
-  test-integration-runtime.js  Integration: runtime policy + audit wired into all 3 supervisors
+  test-integration-runtime.js  Integration: runtime policy + audit wired into command/workflow/template/recipe supervisors
   test-recipe.js               Recipe packaging: schema, inputs, steps, guardrails, hash, pack/unpack
   test-recipe-system.js        Recipe system: categories, tags, index, channel, executor, dry-run
   test-bucket5.js              Bucket 5: resource bounds, learning, profiles, policy, metrics, identity
@@ -92,7 +93,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~14,000 lines of source, ~13,200 lines of tests, 824 passing tests, 0 dependencies.
+**Stats:** ~14,000 lines of source, ~13,000+ lines of tests, full suite currently passing, 0 dependencies.
 
 ---
 
@@ -157,7 +158,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | Input type system | Done | string (pattern/enum), integer (min/max), boolean; bare strings rejected |
 | Input validation pipeline | Done | Stage 1 (type), Stage 2 (constraint), Stage 3 (injection scan) |
 | Interpolation engine | Done | `{{inputs.x}}` → single arg element, resolved after validation |
-| Environment handshake | Done | requires_env intersection caller allow, secret pattern warnings |
+| Environment handshake | Done | explicit caller allow-list required for any `requires_env`, secret pattern warnings |
 | Cryptographic provenance | Done | SHA-256(template + inputs + env), drift detection on re-run |
 | Template manifest | Done | Per-template approval at `.guardrail/templates/<name>.approved.json` |
 | Template lint (8 checks) | Done | Bare strings, structured mode, interpolation, rollback, ReDoS, risk, secrets |
@@ -197,7 +198,8 @@ docs/                    Product requirements, specs, invariants, implementation
 | Verified recipe channel | Done | Mock HMAC-SHA256 signatures, trust classification, enforcement |
 | Channel enforcement | Done | Unverified blocked by default, `--allow-unverified` override |
 | Static analysis | Done | 5 checks: structured mode, guardrails, risk, description, input constraints |
-| Native executor | Done | Step-by-step execution with runtime guardrail enforcement |
+| Recipe supervisor | Done | Manifest-backed approval, drift detection, non-interactive acknowledgement enforcement |
+| Native executor | Done | Step-by-step execution with runtime guardrail enforcement (separate from template supervisor) |
 | Dangerous command blocking | Done | rm -rf /, chmod 777, sudo rm, dd, mkfs, fork bomb detection |
 | Scope restriction | Done | Path-based scope enforcement, blocks out-of-scope file access |
 | Dry-run mode | Done | Full simulation: interpolation, danger check, scope check, no execution |
@@ -215,7 +217,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | Resource bounds | Done | max_execution_time, max_files_touched, max_network_calls, max_cost; runtime tracker with violations |
 | Learning mode | Done | --learning flag: step/recipe/block explanations with risk context |
 | Profiles | Done | cautious-dev, fast-ci, prod-safe builtins; `guardrail profile create/use/list/show` |
-| Safe defaults | Done | Dangerous pattern blocking, dry-run for high-risk, --force with warnings |
+| Safe defaults | Done | Dangerous pattern blocking, dry-run for high-risk, approval required for widening or production-like operations |
 | Policy CLI commands | Done | `guardrail policy list/inspect/validate`; allowed actions, restricted scopes, required approvals |
 | Metrics and events | Done | Structured JSONL events, per-type/actor/recipe aggregation, `guardrail metrics` |
 | Agent identity and governance | Done | Actor/origin tracking, scoped permissions, audit-ready identity model |
@@ -242,10 +244,12 @@ docs/                    Product requirements, specs, invariants, implementation
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Recipe execution via CLI | Done | `guardrail run --recipe <id> --input k=v [--dry-run]` |
+| Recipe execution via CLI | Done | `guardrail run --recipe <id[@ver]> --input k=v [--dry-run]` |
 | Recipe input validation | Done | Type coercion, pattern/enum/range checks, unknown input rejection |
+| Recipe manifest reuse + drift | Done | Real execution uses `.guardrail/recipes/<id>.approved.json`; dry-run stays approval-free |
+| Concurrency lock model | Done | Lock is per manifest hash; same approved execution is single-flight, different hashes can run concurrently |
 | Recipe install (local) | Done | `guardrail recipe install <path>` to `~/.guardrail/recipes/` |
-| Recipe install (remote) | Done | `guardrail recipe install <url>` with trusted source check |
+| Recipe install (remote) | Done | `guardrail recipe install <url>` with fail-closed trusted source enforcement |
 | Local recipe registry | Done | `~/.guardrail/recipes/`, duplicate/version conflict handling |
 | Trusted source config | Done | `~/.guardrail/config.json` with `trusted_sources` array |
 | Self-verification | Done | `guardrail verify` — 7 checks: modules, validation, signing, safe defaults, risk, dangerous, recipes |
@@ -287,6 +291,7 @@ docs/                    Product requirements, specs, invariants, implementation
 
 | Feature | Status | Priority |
 |---------|--------|----------|
+| Bounded parameter approvals | Not started | High — schemas constrain values, but manifest reuse still binds to exact resolved inputs |
 | Remote template pinning (SHA + URI) | Not started | Medium — `github://org/repo/file.json@SHA` |
 | Template composition / imports | Deferred | Intentionally out of v1 scope |
 | Trusted registries config | Not started | Needed for remote templates |
@@ -303,8 +308,9 @@ docs/                    Product requirements, specs, invariants, implementation
 
 | Feature | Status | Priority |
 |---------|--------|----------|
+| Range-based recipe approvals | Not started | High — recipe inputs are schema-validated, but approval reuse is still exact-value based |
 | Recipe execution via `guardrail run <recipe-id>` | Done | `run --recipe <id> --input k=v [--dry-run]` |
-| Recipe install (local + remote) | Done | `recipe install <path\|url>` with trusted source config |
+| Recipe install (local + remote) | Done | `recipe install <path\|url>` with trusted source config; remote install blocked when config is missing or unmatched |
 | Recipe registry / remote publishing | Partial | Local registry done; remote publishing deferred to SaaS |
 
 ---
@@ -317,14 +323,14 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Workflow engine (Bucket 2 MVP)
 - [x] Template system (individual + workflow templates)
 - [x] Adversarial test suite
-- [x] 266 passing tests, 0 dependencies
+- [x] Initial MVP closed; current full suite is 891 passing tests, 0 dependencies
 
 ### Phase 2 — Hardening
 
 - [x] File provenance enforcement (fileHash SHA-256 verification)
 - [x] Anti-interactive execution detection (stderr pattern scan)
 - [x] Formal ReDoS regex rejection at manifest approval time
-- [x] Bucket 1 test coverage requirements (58 tests)
+- [x] Bucket 1 test coverage requirements satisfied
 - [ ] TOCTOU mitigation (fd-based exec — requires native addon, documented limitation)
 - [ ] Remote template pinning (SHA-locked URI)
 - [ ] Executable PATH resolution to absolute
@@ -341,7 +347,7 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Round limits (I-W8): hard ceiling, NEGOTIATION_EXHAUSTED on exceed
 - [x] Human escalation package (full trace, all rounds, blocking reason, recommendation)
 - [x] Hard blocks: SIGNING_ATTEMPT, ROLLBACK_MUTATION, PTY_ADDITION, IDEMPOTENT_ADDITION, etc.
-- [x] Bucket 2 test coverage requirements (61 tests)
+- [x] Bucket 2 test coverage requirements satisfied
 
 ### Phase 4 — Observability & Audit
 
@@ -355,8 +361,8 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Concurrency locks (I-A4): O_EXCL, TTL expiry, dead-PID reclaim
 - [x] Cryptographic separation (I-A1): execution path cannot access signing functions
 - [x] Risk traits (I-A2): handles_secrets, targets_production in evaluateRisk result
-- [x] Bucket 3 test coverage requirements (40 tests)
-- [x] Runtime policy wired into all 3 supervisors (time, locks, audit — 12 integration tests)
+- [x] Bucket 3 test coverage requirements satisfied
+- [x] Runtime policy wired into all 3 supervisors (time, locks, audit — covered by integration runtime suite)
 
 ### Phase 5 — Recipe System & Distribution
 
@@ -372,19 +378,19 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] OpenClaw wrapper recipe (scope enforcement, output verification)
 - [x] 6 example recipes: npm-publish, git-branch-cleanup, github-pr-merge, dep-upgrade, infra-deploy, openclaw-wrapper
 - [x] CLI: `guardrail list`, `guardrail create`, `guardrail pack`, `guardrail recipe validate/inspect`
-- [x] 98 recipe tests across 2 test files
+- [x] Recipe system covered by dedicated recipe and gap-closure suites
 
 ### Phase 6 — Policy, UX, Adoption (Bucket 5)
 
 - [x] Resource bounds (max_execution_time, max_files, max_network, max_cost + runtime tracker)
 - [x] Learning mode (--learning: step/recipe/block explanations with risk, safety, and what-could-go-wrong)
 - [x] Profiles (3 builtins: cautious-dev, fast-ci, prod-safe; profile create/use/list/show CLI)
-- [x] Safe defaults (dangerous pattern blocking, dry-run for high-risk, --force with warnings)
+- [x] Safe defaults (dangerous pattern blocking, dry-run for high-risk, approval required for widening or production-like operations)
 - [x] Policy system (schema, CRUD, enforcement: allowed actions, restricted scopes, required approvals)
 - [x] Metrics + events (structured JSONL, aggregation by type/actor/recipe, guardrail metrics CLI)
 - [x] Agent identity + governance (actor/origin, scoped permissions, audit-ready)
 - [x] Agent strict mode (approved recipe list, scope enforcement, dynamic command blocking)
-- [x] 49 Bucket 5 tests
+- [x] Bucket 5 coverage satisfied
 
 ### Phase 7 — Enterprise (Bucket 6)
 
@@ -403,10 +409,11 @@ docs/                    Product requirements, specs, invariants, implementation
 
 ### Phase 8 — Gap Closure (Pre-SaaS Readiness)
 
-- [x] Recipe execution via CLI (`run --recipe <id> --input k=v [--dry-run] [--allow-unverified]`)
+- [x] Recipe execution via CLI (`run --recipe <id[@ver]> --input k=v [--dry-run] [--allow-unverified]`)
 - [x] Recipe input validation pipeline (type coercion, pattern/enum/range, unknown rejection)
+- [x] Recipe supervisor: manifest-backed approval, drift detection, acknowledged-risk reuse in non-interactive mode
 - [x] Recipe install from local path (`recipe install <path> [--overwrite]`)
-- [x] Recipe install from URL (`recipe install <url>`) with trusted source enforcement
+- [x] Recipe install from URL (`recipe install <url>`) with fail-closed trusted source enforcement
 - [x] Local recipe registry (`~/.guardrail/recipes/`, duplicate/version handling)
 - [x] Trusted source configuration (`~/.guardrail/config.json` with `trusted_sources`)
 - [x] Self-verification command (`guardrail verify [--json]` — 7 async checks)
@@ -493,7 +500,7 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 9. **Environment handshake** — Templates cannot silently harvest env vars.
 10. **Verified channel default-deny** — Community recipes blocked unless explicitly opted in.
 11. **Recipe immutability** — Content hash computed at pack time; tampered content detected on inspect.
-12. **Safe by default** — Dangerous patterns blocked, dry-run for high-risk, approval for production. Override requires explicit --force.
+12. **Safe by default** — Dangerous patterns blocked, dry-run for high-risk, approval required for widening or production-like operations.
 13. **Strict mode for agents** — Agents restricted to approved recipes and declared scope; dynamic commands blocked.
 14. **Org policy overrides local** — Policy hierarchy: org > team > user. Forbidden operations accumulate; allowed actions restrict.
 15. **Encrypted key storage** — AES-256-GCM with scoped access. Secrets never appear in logs (redact interface).
@@ -542,8 +549,8 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 | test-bucket1.js | 65 | Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening, anti-interactive, cross-supervisor parity |
 | test-bucket2.js | 61 | Bucket 2 coverage: rollback, idempotency, negotiation, delta engine, issue codes, escalation, cumulative drift |
 | test-bucket3.js | 40 | Bucket 3 coverage: fingerprint, audit chain, tamper detection, time policy, counters, locks, I-A1/I-A2 |
-| test-integration-runtime.js | 12 | Integration: runtime policy + audit wired into all 3 supervisors end-to-end |
-| test-recipe.js | 43 | Recipe packaging: schema validation, inputs, steps, guardrails, hashing, pack/unpack |
+| test-integration-runtime.js | 18 | Integration: runtime policy + audit wired into command/workflow/template/recipe supervisors end-to-end |
+| test-recipe.js | 46 | Recipe packaging: schema validation, inputs, steps, guardrails, hashing, pack/unpack, recipe manifest semantics |
 | test-recipe-system.js | 55 | Recipe system: categories, tags, index, fuzzy search, channel, executor, dry-run |
 | test-bucket5.js | 49 | Bucket 5: resource bounds, learning mode, profiles, safe defaults, policy, metrics, identity, strict mode |
 | test-bucket6.js | 54 | Bucket 6: shared manifests, approval queue, RBAC, key mgmt, env separation, marketplace, incidents |
@@ -551,7 +558,8 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 | test-policy-scenarios.js | 30 | Declarative policy scenarios: 20 risk classification (GREEN/YELLOW/RED), workflow risk, channel enforcement, strict mode, safe defaults decisions |
 | test-golden-demos.js | 31 | Golden demo regressions: accidental rm -rf, broken PR bulk merge, dep upgrade major bump, infra rollout targeting prod, OpenClaw beyond scope, recipe tamper detection, version swap detection |
 | test-adversarial-e2e.js | 37 | Adversarial e2e: path traversal (5 vectors), wildcard deletes, hidden destructive flags, misleading recipe descriptions, agent outside approved recipe, dev-targeting-prod, version swap attacks, audit log tampering, resource bounds exhaustion, schema bypass attempts |
-| test-gap-closure.js | 39 | Gap closure: recipe runner, install, verify, demo scenarios, versioned storage, version resolution, runbook |
-| **Total** | **824** | |
+| test-gap-closure.js | 43 | Gap closure: recipe runner, install, verify, demo scenarios, versioned storage, version resolution, runbook |
+| test-feature-acceptance.js | 54 | README-derived acceptance coverage, including recipe non-interactive enforcement |
+| **Total** | **891** | |
 
-Run: `npm test` (all 824), `npm run test:e2e` (179 verification/e2e tests), `npm run test:core` (645 original tests only)
+Run: `npm test` (all 891), `npm run test:e2e` (verification/e2e/adversarial suites), `npm run test:core` (core unit/integration suites)

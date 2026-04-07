@@ -24,7 +24,7 @@ Tracked issues found during development, testing, and demo runs. Each entry reco
 4. Added RED condition: destructive binary + system path args → RED (redundant but explicit)
 
 **Files changed:** `src/policy-engine.js`
-**Status:** Resolved — all 813 tests pass
+**Status:** Resolved — current full suite passes
 
 ---
 
@@ -145,14 +145,86 @@ The CLI entry point handles argument parsing and dispatch for 23+ commands. Addi
 
 ---
 
-### ISSUE-009: Remote recipe install not tested end-to-end
+### ISSUE-009: Remote recipe install trusted-source path was not exercised end-to-end
 
-**Severity:** Low — `installFromUrl` exists but only unit-tested with mocks
+**Found:** 2026-04-07, during review against README trusted-source claims
+**Severity:** Medium — README claimed enforcement, but tests did not prove the real HTTP path
 
-**Description:**
-`recipe install <url>` calls `loadRemoteRecipe` which uses `node:http/https`. This is tested via unit tests but not via a real HTTP fetch in the test suite (no test server).
+**Problem:**
+`recipe install <url>` used `node:http/https`, but the test suite only covered helper functions. A regression in the trusted-source gate or install path could silently break remote install while still leaving unit tests green.
 
-**Proposed fix:** Add integration test with `file://` URL or local HTTP server in a future test batch.
+**Fix:**
+1. Added an `installFromUrl()` integration test that exercises the trusted-source gate and install path without requiring a live socket
+2. Verified trusted-source allow-list matching against the requested URL prefix
+3. Verified the remotely loaded recipe is persisted into the local versioned registry
+
+**Files changed:** `tests/test-gap-closure.js`
+**Status:** Resolved
+
+---
+
+### ISSUE-014: Template env handshake implicitly allowed all required env vars
+
+**Found:** 2026-04-07, during review against README environment-handshake claims
+**Severity:** High — code was weaker than the documented security model
+
+**Problem:**
+If a template declared `requires_env`, the template supervisor silently treated that list as caller-approved when no `--env-allow` was provided. That meant templates could inherit required env vars without an explicit caller-side handshake.
+
+**Root cause:**
+`template-supervisor.js` defaulted the caller allow-list to `def.requires_env` instead of requiring the caller to declare an allow-list.
+
+**Fix:**
+1. Template runs now fail closed when `requires_env` is non-empty and no explicit `--env-allow` list is supplied
+2. Template runs also fail when the explicit allow-list omits any required vars
+3. Added integration tests for missing, partial, and complete allow-lists
+
+**Files changed:** `src/template-supervisor.js`, `tests/test-integration-runtime.js`
+**Status:** Resolved
+
+---
+
+### ISSUE-015: Remote recipe install allowed any URL when trusted source config was missing
+
+**Found:** 2026-04-07, during review against README and technical-status trusted-source claims
+**Severity:** High — remote install did not fail closed
+
+**Problem:**
+If `~/.guardrail/config.json` was missing or had an empty `trusted_sources` array, `installFromUrl()` allowed any URL. The error message also misleadingly suggested `--overwrite` could bypass trust checks, which was false.
+
+**Root cause:**
+`checkTrustedSource()` treated an empty trusted-source list as allow-all, and `installFromUrl()` surfaced an inaccurate remediation message.
+
+**Fix:**
+1. Remote install now fails closed when no trusted sources are configured
+2. Empty trusted-source lists no longer imply allow-all
+3. Error messaging now tells the user to add a matching prefix to `~/.guardrail/config.json`
+4. Added integration coverage for the trusted-source gate and remote loader handoff without relying on a sandbox-permitted local HTTP listener
+
+**Files changed:** `src/recipe-install.js`, `tests/test-gap-closure.js`
+**Status:** Resolved
+
+---
+
+### ISSUE-016: Recipe execution bypassed manifest-backed approval and drift control
+
+**Found:** 2026-04-07, during review against README approval/drift expectations
+**Severity:** High — recipe mode had runtime guardrails but not reusable Guardrail approval semantics
+
+**Problem:**
+`guardrail run --recipe ...` executed through the recipe runner directly. That meant real recipe execution skipped manifest-backed approval reuse, drift detection, and non-interactive acknowledgement enforcement. Only the recipe executor's runtime checks applied.
+
+**Root cause:**
+The CLI routed recipe execution to `runRecipeById()` / `executeRecipe()` without a supervisor layer comparable to command, workflow, or template mode.
+
+**Fix:**
+1. Added `recipe-supervisor.js` for manifest-backed recipe approval, drift detection, non-interactive acknowledgement checks, and runtime policy wiring
+2. Added recipe manifest helpers for comparing requested version, resolved version, inputs, provenance, risk, and allow-unverified state
+3. Routed real `run --recipe` execution through the recipe supervisor while keeping `--dry-run` as an approval-free preview path
+4. Added tests for recipe manifest semantics, non-interactive reuse, audit manifest hashes, and pinned-vs-latest version behavior
+
+**Files changed:** `src/recipe-supervisor.js`, `src/recipe.js`, `src/recipe-executor.js`, `src/cli.js`, `tests/test-recipe.js`, `tests/test-integration-runtime.js`, `tests/test-gap-closure.js`, `tests/test-feature-acceptance.js`
+**Status:** Resolved — current full suite passes
 
 ---
 
@@ -177,7 +249,7 @@ Original `recipe-install.js` used flat file naming without version encoding.
 7. `buildIndex()` and `buildVersionIndex()` support versioned + legacy layouts
 
 **Files changed:** `src/recipe-install.js`, `src/recipe-index.js`
-**Status:** Resolved — 824 tests pass
+**Status:** Resolved — current full suite passes
 
 ---
 

@@ -141,6 +141,22 @@ describe('README Feature: Template Mode', () => {
     assert.ok(r.stdout.includes('hello'), 'Should show resolved args');
   });
 
+  it('templates with requires_env fail closed unless caller supplies --env-allow', () => {
+    const dir = tmpDir();
+    const tmpl = {
+      version: 1, kind: 'template', name: 'env-handshake-test',
+      description: 'Test explicit env handshake',
+      trust_class: 'reviewed_internal', risk: 'green', risk_reasons: [],
+      requires_env: ['NPM_TOKEN'],
+      inputs: { msg: { type: 'string', pattern: '^[a-z]+$', description: 'message' } },
+      run: { command: 'echo', args: ['{{inputs.msg}}'], mode: 'structured' },
+    };
+    writeFileSync(join(dir, 'tmpl.json'), JSON.stringify(tmpl, null, 2));
+    const r = run(`${CLI} run --template ${join(dir, 'tmpl.json')} --input msg=hello`);
+    assert.ok(r.exitCode !== 0);
+    assert.ok((r.stdout || '').includes('--env-allow') || (r.stdout || '').includes('Required variables'));
+  });
+
   it('templates reject bare strings (no pattern or enum)', () => {
     const dir = tmpDir();
     const tmpl = {
@@ -323,6 +339,16 @@ describe('README Feature: Non-Interactive / CI Mode', () => {
     };
     writeFileSync(join(dir, 'wf.json'), JSON.stringify(def, null, 2));
     const r = run(`${CLI} workflow run --definition ${join(dir, 'wf.json')} --non-interactive`);
+    assert.equal(r.exitCode, 10);
+  });
+
+  it('recipe --non-interactive without manifest → exit 10', () => {
+    const r = run(`${CLI} run --recipe git-branch-cleanup --input repo_path=. --non-interactive`);
+    assert.equal(r.exitCode, 10);
+  });
+
+  it('recipe --non-interactive with missing manifest → fail closed before execution', () => {
+    const r = run(`${CLI} run --recipe git-branch-cleanup --input repo_path=. --non-interactive --approved-manifest /nonexistent/recipe-approved.json`);
     assert.equal(r.exitCode, 10);
   });
 });

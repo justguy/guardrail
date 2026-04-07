@@ -7,7 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 
 import { resolveRecipeById, resolveInputs, runRecipeById, parseRecipeSpecifier, runRunbook } from '../src/recipe-runner.js';
-import { ensureRegistryDir, installFromPath, listInstalled, listVersions, loadConfig, checkTrustedSource } from '../src/recipe-install.js';
+import { ensureRegistryDir, installFromPath, installFromUrl, listInstalled, listVersions, loadConfig, checkTrustedSource } from '../src/recipe-install.js';
+import { runRecipeSupervisor } from '../src/recipe-supervisor.js';
+import { createRecipeManifest, hashRecipe } from '../src/recipe.js';
+import { saveManifest } from '../src/manifest.js';
+import { signRecipe } from '../src/recipe-channel.js';
 import { runFullVerification } from '../src/verify.js';
 import { listScenarios } from '../src/demo-scenarios.js';
 
@@ -24,7 +28,7 @@ function writeRecipe(dir, recipe) {
 }
 
 function makeRecipe(overrides = {}) {
-  return {
+  const recipe = {
     id: 'test-recipe', name: 'Test Recipe', description: 'A test recipe',
     version: '1.0.0', author: 'tester', category: 'custom',
     tags: ['test'], channel: 'community',
@@ -34,6 +38,10 @@ function makeRecipe(overrides = {}) {
     approval_required: false, risk_level: 'low',
     ...overrides,
   };
+  if (recipe.channel === 'verified' && !recipe.signature) {
+    recipe.signature = signRecipe(recipe);
+  }
+  return recipe;
 }
 
 // ===========================================================================
@@ -282,13 +290,47 @@ describe('Recipe Install: Trusted Sources', () => {
     assert.deepEqual(config.trusted_sources, ['https://safe.dev']);
   });
 
-  it('checkTrustedSource: empty list allows all', () => {
-    assert.equal(checkTrustedSource('https://any.dev/recipe.json', []), true);
+  it('checkTrustedSource: empty list rejects all remote sources', () => {
+    assert.equal(checkTrustedSource('https://any.dev/recipe.json', []), false);
   });
 
   it('checkTrustedSource: matches prefix', () => {
     assert.equal(checkTrustedSource('https://safe.dev/recipes/a.json', ['https://safe.dev']), true);
     assert.equal(checkTrustedSource('https://evil.dev/recipes/a.json', ['https://safe.dev']), false);
+  });
+
+  it('installFromUrl rejects when no trusted sources are configured', async () => {
+    await assert.rejects(
+      () => installFromUrl('https://safe.dev/recipes/a.json', {
+        configPath: '/nonexistent/config.json',
+        registryDir: join(tmpDir(), 'registry'),
+      }),
+      /No trusted sources configured/,
+    );
+  });
+
+  it('installFromUrl fetches and installs from a trusted source via the remote loader', async () => {
+    const recipe = makeRecipe({ id: 'remote-recipe' });
+    const registryDir = join(tmpDir(), 'registry');
+    const configDir = tmpDir();
+    const configPath = join(configDir, 'config.json');
+    const baseUrl = 'https://safe.dev';
+    let requestedUrl = null;
+    writeFileSync(configPath, JSON.stringify({ trusted_sources: [baseUrl] }));
+
+    const result = await installFromUrl(`${baseUrl}/recipes/remote-recipe.recipe.json`, {
+      configPath,
+      registryDir,
+      loadRemoteRecipe: async (url) => {
+        requestedUrl = url;
+        return recipe;
+      },
+    });
+
+    assert.equal(requestedUrl, `${baseUrl}/recipes/remote-recipe.recipe.json`);
+    assert.equal(result.installed, true);
+    assert.equal(result.id, 'remote-recipe');
+    assert.ok(existsSync(result.path));
   });
 });
 
@@ -450,6 +492,98 @@ describe('Recipe Version Resolution', () => {
       (err) => err.message.includes('version 9.9.9 not found'),
     );
   });
+
+  it('recipe supervisor drifts when latest version changes for an unpinned specifier', async () => {
+    const sourceDir = tmpDir();
+    const registryDir = join(tmpDir(), 'registry');
+    const manifestDir = join(tmpDir(), '.guardrail', 'recipes');
+    mkdirSync(manifestDir, { recursive: true });
+    const manifestPath = join(manifestDir, 'latest-test.approved.json');
+
+    const v1 = makeRecipe({ id: 'latest-test', version: '1.0.0', channel: 'verified' });
+    const v1Path = writeRecipe(sourceDir, v1);
+    installFromPath(v1Path, { registryDir });
+    const { recipe: resolvedV1, sourcePath: installedV1Path } = resolveRecipeById('latest-test', [registryDir]);
+
+    const manifest = createRecipeManifest(
+      resolvedV1,
+      hashRecipe(resolvedV1),
+      { trustClass: 'pinned_external', riskLevel: 'green', reasons: ['recipe declares low risk'] },
+      { target: 'hello' },
+      {
+        cwd: registryDir,
+        projectRoot: registryDir,
+        sourcePath: installedV1Path,
+        requestedVersion: null,
+        allowUnverified: false,
+      },
+    );
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    saveManifest(manifest, manifestPath);
+
+    writeRecipe(sourceDir, makeRecipe({ id: 'latest-test', version: '2.0.0', channel: 'verified' }));
+    installFromPath(join(sourceDir, 'latest-test.recipe.json'), { registryDir });
+
+    const result = await runRecipeSupervisor({
+      specifier: 'latest-test',
+      inputs: { target: 'hello' },
+      cwd: registryDir,
+      searchDirs: [registryDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'drift_detected');
+    assert.equal(result.recipeVersion, '2.0.0');
+  });
+
+  it('recipe supervisor keeps a pinned version stable when newer versions appear', async () => {
+    const sourceDir = tmpDir();
+    const registryDir = join(tmpDir(), 'registry');
+    const manifestDir = join(tmpDir(), '.guardrail', 'recipes');
+    mkdirSync(manifestDir, { recursive: true });
+    const manifestPath = join(manifestDir, 'pin-stable.approved.json');
+
+    const v1 = makeRecipe({ id: 'pin-stable', version: '1.0.0', channel: 'verified' });
+    const v1Path = writeRecipe(sourceDir, v1);
+    installFromPath(v1Path, { registryDir });
+    const { recipe: resolvedV1, sourcePath: installedV1Path } = resolveRecipeById('pin-stable@1.0.0', [registryDir]);
+
+    const manifest = createRecipeManifest(
+      resolvedV1,
+      hashRecipe(resolvedV1),
+      { trustClass: 'pinned_external', riskLevel: 'green', reasons: ['recipe declares low risk'] },
+      { target: 'hello' },
+      {
+        cwd: registryDir,
+        projectRoot: registryDir,
+        sourcePath: installedV1Path,
+        requestedVersion: '1.0.0',
+        allowUnverified: false,
+      },
+    );
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    saveManifest(manifest, manifestPath);
+
+    writeRecipe(sourceDir, makeRecipe({ id: 'pin-stable', version: '2.0.0', channel: 'verified' }));
+    installFromPath(join(sourceDir, 'pin-stable.recipe.json'), { registryDir });
+
+    const result = await runRecipeSupervisor({
+      specifier: 'pin-stable@1.0.0',
+      inputs: { target: 'hello' },
+      cwd: registryDir,
+      searchDirs: [registryDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'success');
+    assert.equal(result.recipeVersion, '1.0.0');
+  });
 });
 
 // ===========================================================================
@@ -497,4 +631,3 @@ function require_runner() {
   // We already imported at the top — just re-export the needed functions
   return { parseRecipeSpecifier, resolveRecipeById, runRunbook };
 }
-

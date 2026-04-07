@@ -320,13 +320,23 @@ export async function runTemplateSupervisor(options) {
     }
 
     // ---- Environment handshake ---------------------------------------------
-    // Default: allow all requires_env (user approves the full list at approval time).
-    // If caller passes explicit --env-allow, use that as the restriction.
-    const callerAllow = envAllow.length > 0 ? envAllow : (def.requires_env || []);
-    const envResult = computeEnvIntersection(def.requires_env || [], callerAllow);
+    // Templates require an explicit caller allow-list for any required env.
+    const requiredEnv = def.requires_env || [];
+    if (requiredEnv.length > 0 && envAllow.length === 0) {
+      const msg = [
+        'Template requires explicit --env-allow for environment access.',
+        `Required variables: ${requiredEnv.join(', ')}`,
+      ].join('\n');
+      logger.error('env_handshake_missing_allow', { required: requiredEnv });
+      if (!jsonOutput) {
+        printResult({ success: false, exitCode: 1, message: msg });
+      }
+      return buildResult(runId, 'policy_violation', resultOpts);
+    }
 
-    if (envResult.denied.length > 0 && envAllow.length > 0) {
-      // Caller explicitly restricted env and some required vars are denied
+    const envResult = computeEnvIntersection(requiredEnv, envAllow);
+
+    if (envResult.denied.length > 0) {
       const msg = envResult.denied.map(v =>
         `Template requires ${v} but your env allow list does not include it.`
       ).join('\n');

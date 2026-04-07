@@ -61,7 +61,7 @@ export function loadConfig(configPath) {
  * Check if a source URL is trusted.
  */
 export function checkTrustedSource(source, trustedSources) {
-  if (!trustedSources || trustedSources.length === 0) return true;
+  if (!trustedSources || trustedSources.length === 0) return false;
   return trustedSources.some(ts => source.startsWith(ts));
 }
 
@@ -123,13 +123,20 @@ export function installFromPath(filePath, opts = {}) {
  */
 export async function installFromUrl(url, opts = {}) {
   const config = loadConfig(opts.configPath);
+  if (!config.trusted_sources || config.trusted_sources.length === 0) {
+    throw new Error(
+      'No trusted sources configured for remote recipe install. ' +
+      'Add a trusted_sources array to ~/.guardrail/config.json first.'
+    );
+  }
   if (!checkTrustedSource(url, config.trusted_sources)) {
     throw new Error(
       `Source "${url}" is not in trusted sources. ` +
-      'Add it to ~/.guardrail/config.json or use --overwrite.'
+      'Add a matching prefix to ~/.guardrail/config.json.'
     );
   }
-  const recipe = await loadRemoteRecipe(url);
+  const remoteLoader = opts.loadRemoteRecipe ?? loadRemoteRecipe;
+  const recipe = await remoteLoader(url);
   return installRecipe(recipe, opts);
 }
 

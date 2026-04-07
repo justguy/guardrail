@@ -130,25 +130,30 @@ export function dryRun(recipe, resolvedInputs, opts = {}) {
  * @returns {Promise<object>} Execution result.
  */
 export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
-  const runId = generateRunId();
+  const runId = opts.traceId || generateRunId();
   const cwd = resolve(opts.cwd || process.cwd());
   const stateDir = resolve(opts.stateDir || '.guardrail');
-  const auditLog = createAuditLog(resolve(stateDir, 'audit.jsonl'));
+  const auditLog = opts.auditLog || createAuditLog(resolve(stateDir, 'audit.jsonl'));
+  const auditContext = {
+    trace_id: runId,
+    recipe_id: recipe.id,
+    manifest_hash: opts.manifestHash ?? null,
+  };
 
   // Channel enforcement
   const channelCheck = enforceChannel(recipe, { allowUnverified: opts.allowUnverified });
   if (!channelCheck.allowed) {
-    auditLog.append({ event: 'recipe_blocked', trace_id: runId, recipe_id: recipe.id, reason: channelCheck.reason });
+    auditLog.append({ event: 'recipe_blocked', ...auditContext, reason: channelCheck.reason });
     return { status: 'blocked', reason: channelCheck.reason, trust: channelCheck.trust, stepsExecuted: 0 };
   }
 
   // Approval check
   if (recipe.approval_required && !opts.approved) {
-    auditLog.append({ event: 'recipe_approval_required', trace_id: runId, recipe_id: recipe.id });
+    auditLog.append({ event: 'recipe_approval_required', ...auditContext });
     return { status: 'approval_required', reason: 'Recipe requires explicit approval', stepsExecuted: 0 };
   }
 
-  auditLog.append({ event: 'recipe_execution_start', trace_id: runId, recipe_id: recipe.id, version: recipe.version });
+  auditLog.append({ event: 'recipe_execution_start', ...auditContext, version: recipe.version });
 
   const results = [];
   let stepsExecuted = 0;
@@ -160,7 +165,7 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
     // Runtime guardrail: dangerous command check
     const dangerCheck = checkDangerous(command, args);
     if (!dangerCheck.safe) {
-      auditLog.append({ event: 'step_blocked', trace_id: runId, step_id: step.id, reason: dangerCheck.reason });
+      auditLog.append({ event: 'step_blocked', ...auditContext, step_id: step.id, reason: dangerCheck.reason });
       return {
         status: 'blocked',
         reason: `Step "${step.id}" blocked: ${dangerCheck.reason}`,
@@ -172,7 +177,7 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
     // Runtime guardrail: scope check
     const scopeCheck = checkScope(args, opts.allowedPaths);
     if (!scopeCheck.inScope) {
-      auditLog.append({ event: 'step_blocked', trace_id: runId, step_id: step.id, reason: scopeCheck.violations.join('; ') });
+      auditLog.append({ event: 'step_blocked', ...auditContext, step_id: step.id, reason: scopeCheck.violations.join('; ') });
       return {
         status: 'blocked',
         reason: `Step "${step.id}" blocked: ${scopeCheck.violations.join('; ')}`,
@@ -189,7 +194,7 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
       workerResult = await launchWorker(contract, { timeoutMs: step.run?.timeoutMs || 60000, validatorMode: 'exit_code' });
     } catch (err) {
       results.push({ step: step.id, success: false, error: err.message });
-      auditLog.append({ event: 'step_failed', trace_id: runId, step_id: step.id, error: err.message });
+      auditLog.append({ event: 'step_failed', ...auditContext, step_id: step.id, error: err.message });
       return { status: 'failed', reason: `Step "${step.id}" failed: ${err.message}`, stepsExecuted, results };
     }
 
@@ -203,14 +208,14 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
     });
 
     if (!validation.valid) {
-      auditLog.append({ event: 'step_failed', trace_id: runId, step_id: step.id, exitCode: validation.exitCode });
+      auditLog.append({ event: 'step_failed', ...auditContext, step_id: step.id, exitCode: validation.exitCode });
       return { status: 'failed', reason: `Step "${step.id}" failed with exit code ${validation.exitCode}`, stepsExecuted, results };
     }
 
-    auditLog.append({ event: 'step_completed', trace_id: runId, step_id: step.id });
+    auditLog.append({ event: 'step_completed', ...auditContext, step_id: step.id });
   }
 
-  auditLog.append({ event: 'recipe_execution_end', trace_id: runId, recipe_id: recipe.id, status: 'success' });
+  auditLog.append({ event: 'recipe_execution_end', ...auditContext, status: 'success' });
   return { status: 'success', stepsExecuted, results };
 }
 

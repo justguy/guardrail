@@ -8,6 +8,8 @@ Use this guide when another coding agent needs to execute commands or workflows 
 2. Do not bypass Guardrail by running the underlying command or workflow steps directly unless the user explicitly says to.
 3. Guardrail is not a sandbox. It enforces approval boundaries and highlights risk, but the user remains responsible for what they approve.
 4. In non-interactive mode, only a previously approved Guardrail manifest counts as reusable approval.
+5. Approval reuse is exact-value based today. If an input value changes, treat it as drift even when the template or recipe schema would allow the new value.
+6. Guardrail locks execution per manifest hash. Different manifests can run concurrently; the same approved execution cannot run twice at once.
 
 ## Local CLI Entry Point
 
@@ -46,6 +48,35 @@ Non-interactive reuse:
 ```bash
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow run --definition <workflow-definition-path> --non-interactive --approved-manifest <approved-workflow-manifest-path>
 ```
+
+## Recipe Mode
+
+Interactive approval:
+
+```bash
+cd /Users/adilevinshtein/Documents/dev/Guardian
+node src/cli.js run --recipe <recipe-id[@version]> --input key=value --manifest <approved-recipe-manifest-path>
+```
+
+Non-interactive reuse:
+
+```bash
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --recipe <recipe-id[@version]> --input key=value --non-interactive --approved-manifest <approved-recipe-manifest-path>
+```
+
+Default recipe manifest path:
+
+```text
+.guardrail/recipes/<recipe-id>.approved.json
+```
+
+Recipe version rules:
+
+- If the recipe specifier includes `@version`, Guardrail uses exactly that installed version or fails.
+- If the recipe specifier omits `@version`, Guardrail resolves the latest installed version.
+- An approval for an unpinned recipe binds to the resolved latest version at approval time. If a newer version later becomes latest, Guardrail treats that as drift and stops for re-approval.
+- Recipe dry-run remains a preview path and does not require an approved manifest.
+- Recipe input constraints validate what values are allowed, but approval reuse still binds to the exact resolved input values saved in the manifest.
 
 ## Workflow Authoring Note
 
@@ -172,6 +203,7 @@ Do not keep searching for a separate generic "mark failed" endpoint. Model the t
 ## What the Agent Must Have
 
 - the exact command or workflow definition path
+- the exact recipe specifier when using recipe mode
 - the exact approved manifest path
 - confirmation that the manifest was created by an interactive Guardrail approval run
 
@@ -184,6 +216,8 @@ If Guardrail returns any of these statuses, stop and report them:
 - `approval_required`
 - `approval_denied`
 - `drift_detected`
+- `validation_failed`
+- `policy_violation`
 - `update_denied`
 - `unsupported`
 - `protocol_error`
@@ -218,7 +252,10 @@ node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --non-interacti
 If this is workflow mode, run:
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow run --definition <WORKFLOW_DEFINITION_PATH> --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH>
 
-If the manifest is missing, or Guardrail returns approval_required, approval_denied, drift_detected, update_denied, unsupported, protocol_error, or internal_error, stop and report it.
+If this is recipe mode, run:
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --recipe <RECIPE_ID[@VERSION]> --input key=value --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH>
+
+If the manifest is missing, or Guardrail returns approval_required, approval_denied, drift_detected, validation_failed, policy_violation, update_denied, unsupported, protocol_error, or internal_error, stop and report it.
 
 If sandboxing blocks Guardrail from writing under .guardrail/, rerun the same Guardrail command with escalated permissions. Do not bypass Guardrail.
 ```

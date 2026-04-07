@@ -7,10 +7,13 @@ import { tmpdir } from 'node:os';
 import { runSupervisor, STATUS_EXIT_CODES } from '../src/supervisor.js';
 import { runWorkflowSupervisor } from '../src/workflow-supervisor.js';
 import { runTemplateSupervisor } from '../src/template-supervisor.js';
+import { runRecipeSupervisor } from '../src/recipe-supervisor.js';
 import { verifyAuditChain, queryAuditLog } from '../src/audit.js';
 import { createContract, hashContract } from '../src/contract.js';
 import { createManifest, saveManifest } from '../src/manifest.js';
 import { evaluateRisk } from '../src/policy-engine.js';
+import { createRecipeManifest, hashRecipe } from '../src/recipe.js';
+import { signRecipe } from '../src/recipe-channel.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -71,6 +74,70 @@ function makeTemplate() {
     inputs: { name: { type: 'string', pattern: '^[a-z]+$' } },
     run: { command: 'echo', args: ['{{inputs.name}}'], mode: 'structured' },
   };
+}
+
+function makeRecipe(overrides = {}) {
+  const recipe = {
+    id: 'runtime-recipe',
+    name: 'Runtime Recipe',
+    description: 'runtime integration recipe',
+    version: '1.0.0',
+    author: 'test',
+    category: 'custom',
+    channel: 'verified',
+    inputs: { target: { type: 'string', pattern: '^[a-z]+$' } },
+    steps: [
+      {
+        id: 'step-1',
+        description: 'echo target',
+        run: { command: 'echo', args: ['{{inputs.target}}'], mode: 'structured', timeoutMs: 5000 },
+      },
+    ],
+    guardrails: { constraints: ['structured'], invariants: ['no shell'] },
+    approval_required: false,
+    risk_level: 'low',
+    ...overrides,
+  };
+
+  if (recipe.channel === 'verified' && !recipe.signature) {
+    recipe.signature = signRecipe(recipe);
+  }
+  return recipe;
+}
+
+function writeRecipeFile(dir, recipe, filename = `${recipe.id}.recipe.json`) {
+  const filePath = join(dir, filename);
+  writeFileSync(filePath, JSON.stringify(recipe, null, 2), 'utf8');
+  return filePath;
+}
+
+function createApprovedRecipeManifest(recipe, cwd, manifestPath, sourcePath, options = {}) {
+  const manifest = createRecipeManifest(
+    recipe,
+    hashRecipe(recipe),
+    options.riskAssessment ?? {
+      trustClass: 'pinned_external',
+      riskLevel: 'green',
+      reasons: ['recipe declares low risk'],
+      requiresStrongConfirmation: false,
+    },
+    options.resolvedInputs ?? { target: 'hello' },
+    {
+      cwd: resolve(cwd),
+      projectRoot: resolve(cwd),
+      sourcePath,
+      requestedVersion: options.requestedVersion ?? null,
+      allowUnverified: options.allowUnverified ?? false,
+    },
+  );
+
+  if (options.acknowledged !== false) {
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+  }
+
+  saveManifest(manifest, manifestPath);
+  return manifest;
 }
 
 // ===========================================================================
@@ -261,6 +328,65 @@ describe('Integration: Workflow Supervisor Runtime Policy', () => {
 // ===========================================================================
 
 describe('Integration: Template Supervisor Runtime Policy', () => {
+  it('requires explicit env allow-list when template declares requires_env', async () => {
+    const dir = tmpDir();
+    const tmplPath = join(dir, 'tmpl.json');
+    const tmpl = {
+      ...makeTemplate(),
+      requires_env: ['NPM_TOKEN'],
+    };
+    writeFileSync(tmplPath, JSON.stringify(tmpl));
+
+    const result = await runTemplateSupervisor({
+      templatePath: tmplPath,
+      inputs: { name: 'hello' },
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'policy_violation');
+  });
+
+  it('rejects templates when explicit env allow-list omits required vars', async () => {
+    const dir = tmpDir();
+    const tmplPath = join(dir, 'tmpl.json');
+    const tmpl = {
+      ...makeTemplate(),
+      requires_env: ['NPM_TOKEN', 'CI'],
+    };
+    writeFileSync(tmplPath, JSON.stringify(tmpl));
+
+    const result = await runTemplateSupervisor({
+      templatePath: tmplPath,
+      inputs: { name: 'hello' },
+      nonInteractive: true,
+      jsonOutput: true,
+      envAllow: ['CI'],
+    });
+
+    assert.equal(result.status, 'policy_violation');
+  });
+
+  it('accepts explicit env allow-list when it covers required vars', async () => {
+    const dir = tmpDir();
+    const tmplPath = join(dir, 'tmpl.json');
+    const tmpl = {
+      ...makeTemplate(),
+      requires_env: ['NPM_TOKEN'],
+    };
+    writeFileSync(tmplPath, JSON.stringify(tmpl));
+
+    const result = await runTemplateSupervisor({
+      templatePath: tmplPath,
+      inputs: { name: 'hello' },
+      nonInteractive: true,
+      jsonOutput: true,
+      envAllow: ['NPM_TOKEN'],
+    });
+
+    assert.notEqual(result.status, 'policy_violation');
+  });
+
   it('time policy blocks template execution', async () => {
     const dir = tmpDir();
     const tmplPath = join(dir, 'tmpl.json');
@@ -322,7 +448,93 @@ describe('Integration: Template Supervisor Runtime Policy', () => {
 });
 
 // ===========================================================================
-// 4. Cross-supervisor: audit chain integrity maintained
+// 4. Recipe supervisor: runtime policy integration
+// ===========================================================================
+
+describe('Integration: Recipe Supervisor Runtime Policy', () => {
+  it('requires acknowledged risk assessment before non-interactive reuse', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    const recipe = makeRecipe();
+    const sourcePath = writeRecipeFile(recipesDir, recipe);
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+
+    createApprovedRecipeManifest(recipe, dir, manifestPath, sourcePath, { acknowledged: false });
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { target: 'hello' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'approval_required');
+  });
+
+  it('time policy blocks recipe execution with an approved manifest', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    const recipe = makeRecipe();
+    const sourcePath = writeRecipeFile(recipesDir, recipe);
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+
+    createApprovedRecipeManifest(recipe, dir, manifestPath, sourcePath);
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { target: 'hello' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      runtimeLimits: { validUntil: '2020-01-01T00:00:00Z' },
+    });
+
+    assert.equal(result.status, 'time_policy_violated');
+    assert.equal(result.exitCode, STATUS_EXIT_CODES.time_policy_violated);
+  });
+
+  it('audit log includes manifest hash for recipe execution', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    const recipe = makeRecipe();
+    const sourcePath = writeRecipeFile(recipesDir, recipe);
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+
+    const manifest = createApprovedRecipeManifest(recipe, dir, manifestPath, sourcePath);
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { target: 'hello' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'success');
+
+    const auditPath = join(dir, '.guardrail', 'audit.jsonl');
+    assert.ok(existsSync(auditPath));
+    const entries = queryAuditLog(auditPath, {});
+    assert.ok(entries.some(e => e.event === 'recipe_execution_start'));
+    assert.ok(entries.every(e => e.manifest_hash === manifest.recipeHash));
+  });
+});
+
+// ===========================================================================
+// 5. Cross-supervisor: audit chain integrity maintained
 // ===========================================================================
 
 describe('Integration: Audit Chain Integrity Across Runs', () => {
@@ -357,7 +569,7 @@ describe('Integration: Audit Chain Integrity Across Runs', () => {
 });
 
 // ===========================================================================
-// 5. Exit code consistency
+// 6. Exit code consistency
 // ===========================================================================
 
 describe('Integration: Runtime Policy Exit Codes', () => {

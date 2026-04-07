@@ -1436,29 +1436,51 @@ async function main() {
   // --- run --recipe ---------------------------------------------------------
 
   if (parsed.subcommand === 'run' && parsed.recipeId) {
-    const { runRecipeById } = await import('./recipe-runner.js');
     try {
-      const result = await runRecipeById(parsed.recipeId, {
+      if (parsed.dryRunOnly) {
+        const { runRecipeById } = await import('./recipe-runner.js');
+        const result = await runRecipeById(parsed.recipeId, {
+          inputs: parsed.inputs,
+          allowUnverified: parsed.allowUnverified || false,
+          dryRunOnly: true,
+          cwd: process.cwd(),
+        });
+        if (parsed.json) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          console.log(`Recipe: ${result.recipe.name} v${result.recipe.version}`);
+          console.log(`  Steps: ${result.steps.length}`);
+          console.log(`  Safe:  ${result.safe ? 'YES' : 'NO — blocked steps detected'}`);
+          for (const step of result.steps) {
+            const icon = step.dangerous || !step.inScope ? '✗' : '✓';
+            console.log(`  ${icon} ${step.id}: ${step.command} ${step.args.join(' ')}`);
+          }
+        }
+        process.exit(result.status === 'dry_run' ? 0 : 1);
+      }
+
+      if (parsed.nonInteractive && parsed.manifest === null) {
+        console.error('Error: --non-interactive requires --approved-manifest <path>');
+        process.exit(10);
+      }
+
+      const { runRecipeSupervisor } = await import('./recipe-supervisor.js');
+      const result = await runRecipeSupervisor({
+        specifier: parsed.recipeId,
         inputs: parsed.inputs,
         allowUnverified: parsed.allowUnverified || false,
-        dryRunOnly: parsed.dryRunOnly || false,
         cwd: process.cwd(),
+        manifestPath: parsed.manifest || null,
+        nonInteractive: parsed.nonInteractive,
+        jsonOutput: parsed.json,
+        trustClass: parsed.trust,
       });
+
       if (parsed.json) {
         console.log(JSON.stringify(result, null, 2));
-      } else if (result.status === 'dry_run') {
-        console.log(`Recipe: ${result.recipe.name} v${result.recipe.version}`);
-        console.log(`  Steps: ${result.steps.length}`);
-        console.log(`  Safe:  ${result.safe ? 'YES' : 'NO — blocked steps detected'}`);
-        for (const step of result.steps) {
-          const icon = step.dangerous || !step.inScope ? '✗' : '✓';
-          console.log(`  ${icon} ${step.id}: ${step.command} ${step.args.join(' ')}`);
-        }
-      } else {
-        console.log(`Recipe execution: ${result.status} (${result.stepsExecuted} steps)`);
-        if (result.reason) console.log(`  Reason: ${result.reason}`);
       }
-      process.exit(result.status === 'success' || result.status === 'dry_run' ? 0 : 1);
+      const exitCode = STATUS_EXIT_CODES[result.status] ?? 1;
+      process.exit(exitCode);
     } catch (err) {
       console.error(err.message);
       process.exit(1);

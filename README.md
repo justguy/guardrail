@@ -54,7 +54,7 @@ Nothing runs past that point. Every command is checked against what you already 
 
 ## How It Works
 
-**Contract-locked execution.** Every command, workflow, or template is normalized, hashed, and stored as an approved manifest. The same approved shape produces the same hash. Anything else is a new approval unit.
+**Contract-locked execution.** Every command, workflow, template, and non-dry-run recipe execution is normalized or hashed and stored as an approved manifest. The same approved shape produces the same hash. Anything else is a new approval unit.
 
 **Drift detection.** Changes to command name, arguments, scope, or risk level block execution immediately. No silent pass-through.
 
@@ -70,7 +70,11 @@ Risk levels come with human-readable reasons so you know *why* something was fla
 
 Secret detection scans both `envPolicy.inject` keys and `envPolicy.allow` lists for patterns like `SECRET`, `TOKEN`, `PASSWORD`, `API_KEY`, `CREDENTIAL`, `AUTH`, and `PRIVATE_KEY`. Secrets combined with shell mode or production targets escalate to Red.
 
-**Manifest reuse.** Once you approve a manifest, it's saved. The same command or workflow runs without re-prompting until something changes. Out-of-scope update proposals are halted and require a new approval record; Guardrail does not grant one-off in-session overrides.
+**Manifest reuse.** Once you approve a manifest, it's saved. The same command, workflow, template, or recipe execution runs without re-prompting until something changes. Out-of-scope update proposals are halted and require a new approval record; Guardrail does not grant one-off in-session overrides.
+
+**Approval granularity.** Template and recipe schemas can constrain inputs, but the approved manifest still binds to the exact resolved input values for that run. If `port=3001` was approved, later running `port=3002` is drift today even if the schema allows both values.
+
+**Concurrency model.** Guardrail locks execution per approved manifest hash. Different workflows or manifests can run at the same time. The same approved execution cannot run twice concurrently.
 
 ---
 
@@ -126,6 +130,8 @@ Templates support two kinds:
 
 Templates enforce structured mode only (no shell), require constrained inputs (pattern or enum for strings), and use an explicit environment handshake so templates cannot silently harvest env vars.
 
+Template inputs are constrained by schema, but approval reuse is still exact-value based on the resolved input set recorded in the manifest.
+
 ---
 
 ## Trust and Risk
@@ -173,7 +179,7 @@ For the full template specification, see [docs/guardrail-template-implementation
 
 **A library of safe, pre-approved execution patterns for real-world developer and AI workflows.**
 
-Guardrail Recipes are not a template gallery or a config repo. Each recipe is a packaged, contract-locked workflow -- validated inputs, enforced environment handshake, cryptographic hash, and rollback where needed. Install a recipe and run it knowing the execution surface is exactly what was reviewed.
+Guardrail Recipes are not a template gallery or a config repo. Each recipe is a packaged execution bundle with typed inputs, versioned artifacts, manifest-backed approval for real execution, and runtime guardrails around danger, scope, and provenance.
 
 ### Browse the Recipe Library
 
@@ -190,7 +196,7 @@ Guardrail Recipes are not a template gallery or a config repo. Each recipe is a 
 # Install a recipe from a file
 guardrail recipe install ./my-recipe.recipe.json
 
-# Install from a URL (trusted sources enforced)
+# Install from a URL (trusted sources required in ~/.guardrail/config.json)
 guardrail recipe install https://registry.example.com/recipes/deploy.recipe.json
 
 # List available recipes
@@ -202,22 +208,44 @@ guardrail run --recipe git-branch-cleanup --input repo_path=. --dry-run
 # Pin to a specific version
 guardrail run --recipe git-branch-cleanup@1.0.0 --input repo_path=. --dry-run
 
+# Execute a recipe interactively (stores approval manifest)
+guardrail run --recipe git-branch-cleanup --input repo_path=.
+
+# Reuse a previously approved recipe manifest in CI
+guardrail run --recipe git-branch-cleanup \
+  --input repo_path=. \
+  --non-interactive \
+  --approved-manifest .guardrail/recipes/git-branch-cleanup.approved.json
+
 # List installed versions
 guardrail recipe versions git-branch-cleanup
 
-# Inspect before running (template-based)
-guardrail template explain --template recipes/open_pr.json
-guardrail template lint --template recipes/open_pr.json
+# Inspect or validate before running
+guardrail recipe inspect ./packed-recipe.json
+guardrail recipe validate ./my-recipe.recipe.json
 ```
 
 ### How Recipes Work
 
-Every recipe is a Guardrail template under the hood:
+Recipes are packaged execution bundles with:
 
-- **`kind: "template"`** -- single-command recipe (e.g., `npm_install_safe`)
-- **`kind: "workflow_template"`** -- multi-step recipe with rollback (e.g., `safe_deploy`)
+- typed input validation
+- channel enforcement (`verified` vs `community`)
+- version pinning and immutable install artifacts
+- dry-run previews
+- manifest-backed approval and drift detection for real execution
+- runtime dangerous-command and scope checks
+- optional recipe metadata that can request extra approval sensitivity
 
-The same contract enforcement applies: typed inputs, environment handshake, canonical hashing, and drift detection. A recipe that changes requires re-approval -- no silent updates.
+Recipe execution uses a recipe-specific supervisor in front of the native recipe executor. Dry-runs stay approval-free previews. Real execution stores and reuses a recipe manifest the same way command, workflow, and template mode do.
+
+Version resolution works like this:
+
+- If you run `guardrail run --recipe name@1.2.3`, Guardrail uses exactly `1.2.3` or fails if that version is not installed.
+- If you run `guardrail run --recipe name`, Guardrail resolves to the latest installed version.
+- An approval for an unpinned recipe binds to the resolved version at approval time. If a newer version later becomes the latest, Guardrail detects drift and requires re-approval.
+
+Recipe inputs are validated by schema, but approval reuse is still exact-value based on the resolved inputs recorded in the recipe manifest.
 
 ### Guardrail Cloud (Coming Soon)
 
@@ -239,8 +267,9 @@ Each mode stores its approval separately:
 - Command manifest: `.guardrail/approved.json`
 - Workflow manifest: `.guardrail/workflows/default.approved.json`
 - Template manifest: `.guardrail/templates/<template-name>.approved.json`
+- Recipe manifest: `.guardrail/recipes/<recipe-id>.approved.json`
 
-A command manifest does not also approve a workflow or template. Each is an independent approval unit.
+A command manifest does not also approve a workflow, template, or recipe. Each is an independent approval unit.
 
 ---
 
@@ -252,7 +281,7 @@ Guardrail controls what environment variables reach each process.
 
 **Workflow steps** default to `inherit: true` -- the full parent environment is passed. Workflow adapter scripts typically need the caller's env vars to function.
 
-**Template steps** use an explicit handshake -- only variables in both `requires_env` (template) and the caller's allow list are passed.
+**Template steps** use an explicit handshake -- when a template declares `requires_env`, the caller must provide `--env-allow` entries, and only the intersection is passed.
 
 Both modes support explicit control:
 
@@ -288,6 +317,12 @@ guardrail run --non-interactive \
   --approved-manifest .guardrail/templates/npm-publish.approved.json \
   --template ./templates/npm-publish.json \
   --input package_dir=packages/my-lib --input tag=latest
+
+# Recipe mode
+guardrail run --recipe git-branch-cleanup \
+  --input repo_path=. \
+  --non-interactive \
+  --approved-manifest .guardrail/recipes/git-branch-cleanup.approved.json
 ```
 
 JSON output for structured logging and CI integration:
@@ -355,12 +390,12 @@ guardrail demo blocked
 
 ## Testing
 
-824 tests, zero dependencies. Node.js built-in test runner only.
+The suite is currently 891 tests, all passing, with zero dependencies. Node.js built-in test runner only.
 
 ```bash
-npm test              # all 824 tests
-npm run test:e2e      # 179 verification/e2e/adversarial tests
-npm run test:core     # 645 original unit/integration tests
+npm test              # full suite
+npm run test:e2e      # verification/e2e/adversarial suites
+npm run test:core     # core unit/integration suites
 ```
 
 Tests are organized in five levels:

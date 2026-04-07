@@ -9,6 +9,8 @@ import {
   RecipeValidationError,
   loadRecipe,
   hashRecipe,
+  createRecipeManifest,
+  compareRecipeManifests,
   packRecipe,
   writePackedRecipe,
   loadPackedRecipe,
@@ -413,5 +415,77 @@ describe('Recipe: Error Structure', () => {
       // Missing id, name, description, version, author, approval_required, risk_level, inputs, steps, guardrails
       assert.ok(err.errors.length >= 5, `Expected many errors, got ${err.errors.length}`);
     }
+  });
+});
+
+// ===========================================================================
+// 9. Recipe Manifest Semantics
+// ===========================================================================
+
+describe('Recipe: Manifest Semantics', () => {
+  it('stores requestedVersion and resolutionMode for pinned executions', () => {
+    const recipe = makeRecipe({ version: '2.1.0', channel: 'verified' });
+    const manifest = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'pinned_external', riskLevel: 'green', reasons: ['recipe declares low risk'] },
+      { target: 'hello' },
+      {
+        cwd: '/repo',
+        projectRoot: '/repo',
+        sourcePath: '/repo/recipes/test-recipe.recipe.json',
+        requestedVersion: '2.1.0',
+        allowUnverified: false,
+      },
+    );
+
+    assert.equal(manifest.kind, 'recipe');
+    assert.equal(manifest.recipe.requestedVersion, '2.1.0');
+    assert.equal(manifest.recipe.resolutionMode, 'pinned');
+  });
+
+  it('treats resolved input changes as drift', () => {
+    const recipe = makeRecipe();
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello' },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'world' },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const comparison = compareRecipeManifests(changed, base);
+    assert.equal(comparison.matches, false);
+    assert.ok(comparison.diffs.some(d => d.includes('input "target"')));
+  });
+
+  it('treats pinned-vs-latest resolution mode as drift even for same resolved version', () => {
+    const recipe = makeRecipe({ version: '1.0.0' });
+    const latestManifest = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello' },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+    const pinnedManifest = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello' },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json', requestedVersion: '1.0.0' },
+    );
+
+    const comparison = compareRecipeManifests(pinnedManifest, latestManifest);
+    assert.equal(comparison.matches, false);
+    assert.ok(comparison.diffs.some(d => d.includes('resolutionMode')));
   });
 });

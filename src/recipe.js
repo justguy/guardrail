@@ -2,6 +2,7 @@ import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve, extname } from 'node:path';
 import { serializeStable } from './contract.js';
+import { deepEqual, pretty } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -14,6 +15,7 @@ const VALID_INPUT_TYPES = new Set(['string', 'integer', 'boolean']);
 export const VALID_CATEGORIES = new Set(['git', 'github', 'infra', 'packages', 'openclaw', 'custom']);
 export const VALID_CHANNELS = new Set(['verified', 'community']);
 const RECIPE_SCHEMA_VERSION = 1;
+const RECIPE_MANIFEST_VERSION = 1;
 
 // ---------------------------------------------------------------------------
 // Validation error
@@ -377,4 +379,93 @@ export function loadPackedRecipe(filePath) {
     computedHash: computed,
     packedAt:    packed.packed_at,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Recipe manifests
+// ---------------------------------------------------------------------------
+
+export function createRecipeManifest(recipe, recipeHash, riskAssessment, resolvedInputs, options = {}) {
+  const requestedVersion = options.requestedVersion ?? null;
+  const resolutionMode = requestedVersion ? 'pinned' : 'latest';
+
+  return {
+    version: RECIPE_MANIFEST_VERSION,
+    tool: 'guardrail',
+    kind: 'recipe',
+    approvedAt: new Date().toISOString(),
+    projectRoot: options.projectRoot ?? resolve(options.cwd ?? process.cwd()),
+    cwd: options.cwd ?? process.cwd(),
+    recipeHash,
+    recipe: {
+      id: recipe.id,
+      name: recipe.name,
+      version: recipe.version,
+      channel: recipe.channel ?? 'community',
+      sourcePath: options.sourcePath ?? null,
+      requestedVersion,
+      resolutionMode,
+      allowUnverified: options.allowUnverified ?? false,
+    },
+    resolvedInputs,
+    riskAssessment: {
+      trustClass:                 riskAssessment.trustClass   ?? 'unknown',
+      riskLevel:                  riskAssessment.riskLevel    ?? 'red',
+      reasons:                    riskAssessment.reasons      ?? [],
+      requiresStrongConfirmation: riskAssessment.requiresStrongConfirmation ?? false,
+      acknowledgedBy:             riskAssessment.acknowledgedBy ?? null,
+      acknowledgedAt:             riskAssessment.acknowledgedAt ?? null,
+    },
+  };
+}
+
+export function diffRecipeManifests(candidate, approved) {
+  const diffs = [];
+  const cRecipe = candidate.recipe ?? {};
+  const aRecipe = approved.recipe ?? {};
+  const cRisk = candidate.riskAssessment ?? {};
+  const aRisk = approved.riskAssessment ?? {};
+
+  if (!deepEqual(candidate.projectRoot, approved.projectRoot)) {
+    diffs.push(`~ projectRoot: ${pretty(approved.projectRoot)} -> ${pretty(candidate.projectRoot)}`);
+  }
+  if (!deepEqual(candidate.cwd, approved.cwd)) {
+    diffs.push(`~ cwd: ${pretty(approved.cwd)} -> ${pretty(candidate.cwd)}`);
+  }
+
+  for (const field of ['id', 'name', 'version', 'channel', 'sourcePath', 'requestedVersion', 'resolutionMode', 'allowUnverified']) {
+    if (!deepEqual(cRecipe[field], aRecipe[field])) {
+      diffs.push(`~ recipe.${field}: ${pretty(aRecipe[field])} -> ${pretty(cRecipe[field])}`);
+    }
+  }
+
+  const allInputs = new Set([
+    ...Object.keys(candidate.resolvedInputs ?? {}),
+    ...Object.keys(approved.resolvedInputs ?? {}),
+  ]);
+
+  for (const key of allInputs) {
+    const cVal = candidate.resolvedInputs?.[key];
+    const aVal = approved.resolvedInputs?.[key];
+    if (!deepEqual(cVal, aVal)) {
+      diffs.push(`~ input "${key}": ${pretty(aVal)} -> ${pretty(cVal)}`);
+    }
+  }
+
+  for (const field of ['trustClass', 'riskLevel', 'reasons', 'requiresStrongConfirmation']) {
+    if (!deepEqual(cRisk[field], aRisk[field])) {
+      diffs.push(`~ riskAssessment.${field}: ${pretty(aRisk[field])} -> ${pretty(cRisk[field])}`);
+    }
+  }
+
+  if (!deepEqual(candidate.recipeHash, approved.recipeHash)) {
+    diffs.push(`~ recipeHash: ${pretty(approved.recipeHash)} -> ${pretty(candidate.recipeHash)}`);
+  }
+
+  return diffs;
+}
+
+export function compareRecipeManifests(candidate, approved) {
+  const diffs = diffRecipeManifests(candidate, approved);
+  return { matches: diffs.length === 0, diffs };
 }
