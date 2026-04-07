@@ -1,6 +1,6 @@
 # Guardrail — Technical Status & Roadmap
 
-**Last updated:** 2026-04-06
+**Last updated:** 2026-04-07
 
 ---
 
@@ -33,13 +33,25 @@ src/
   runtime-policy.js      Time policy, counter persistence, concurrency locks
   shared.js              Utilities (deep equality, atomic writes, env building, subprocess execution)
 
+recipes/
+  npm-publish            Packages: build, test, publish NPM package (verified, high)
+  git-branch-cleanup     Git: safe merged branch deletion with preview (verified, medium)
+  github-pr-merge        GitHub: batch merge approved PRs with CI gating (verified, high)
+  dep-upgrade            Packages: dependency upgrade within patch/minor scope (community, medium)
+  infra-deploy           Infra: Terraform validate/plan/apply scoped to env (verified, high)
+  openclaw-wrapper       OpenClaw: wrapped flow with scope enforcement (community, high)
+
 tests/
-  test-core.js           Contract, manifest, risk, approval, drift, validator, logger tests
-  test-workflow.js        Workflow parsing, hashing, drift, risk, normalization, lint tests
-  test-adversarial.js    Sneaky allow-list, fake success trap, trojan step, tamper detection
-  test-template.js       Template validation, lint, inputs, interpolation, env, hash, manifest tests
-  test-bucket1.js        Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening
-  test-bucket2.js        Bucket 2 coverage: rollback, idempotency, negotiation, delta, escalation
+  test-core.js                Contract, manifest, risk, approval, drift, validator, logger tests
+  test-workflow.js             Workflow parsing, hashing, drift, risk, normalization, lint tests
+  test-adversarial.js          Sneaky allow-list, fake success trap, trojan step, tamper detection
+  test-template.js             Template validation, lint, inputs, interpolation, env, hash, manifest tests
+  test-bucket1.js              Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening
+  test-bucket2.js              Bucket 2 coverage: rollback, idempotency, negotiation, delta, escalation
+  test-bucket3.js              Bucket 3 coverage: fingerprint, audit chain, tamper, time policy, locks
+  test-integration-runtime.js  Integration: runtime policy + audit wired into all 3 supervisors
+  test-recipe.js               Recipe packaging: schema, inputs, steps, guardrails, hash, pack/unpack
+  test-recipe-system.js        Recipe system: categories, tags, index, channel, executor, dry-run
 
 docs/                    Product requirements, specs, invariants, implementation guides
 .guardrail/              Runtime state (approved manifests, logs, state files)
@@ -205,25 +217,41 @@ docs/                    Product requirements, specs, invariants, implementation
 | Manifest cryptographic signing | Not started | Medium — entry_hash chain exists, but no external signature |
 | Explainability UX for Bucket 3 blocks | Not started | Low — template explain exists, need generic block explanation |
 
-### Bucket 4 — Recipe System & OpenClaw Integration
+### Bucket 4 Gaps
 
 | Feature | Status | Priority |
 |---------|--------|----------|
-| All features | Not started | Deferred until core stabilizes |
+| Recipe execution via `guardrail run <recipe-id>` | Not started | Medium — executor exists, CLI wiring pending |
+| Recipe registry / remote publishing | Not started | Medium — local pack/inspect done |
+| Recipe versioning conflict detection | Not started | Low — hash immutability enforced, no registry dedup |
 
 ### Bucket 5 — Policy, UX, Adoption
 
 | Feature | Status | Priority |
 |---------|--------|----------|
+| Resource bounds | Not started | Medium |
 | Learning mode | Not started | Medium |
 | Profiles | Not started | Low |
 | Safe defaults | Partial | Defaults exist but not configurable |
+| Policy CLI commands | Not started | Medium |
+| Metrics and events | Not started | Low |
+| Agent identity and governance | Not started | Medium |
+| Agent strict mode | Not started | Medium |
 
 ### Bucket 6 — Enterprise & Team Features
 
 | Feature | Status | Priority |
 |---------|--------|----------|
-| All features | Not started | Future |
+| Shared manifests | Not started | Future |
+| Approval queue | Not started | Future |
+| Org policy engine | Not started | Future |
+| Identity and access control | Not started | Future |
+| Centralized audit | Not started | Future |
+| Hosted key management | Not started | Future |
+| Notifications and integrations | Not started | Future |
+| Deployment modes | Not started | Future |
+| Compliance exports | Not started | Future |
+| Multi-stage approval policies | Not started | Future |
 
 ---
 
@@ -247,7 +275,7 @@ docs/                    Product requirements, specs, invariants, implementation
 - [ ] Remote template pinning (SHA-locked URI)
 - [ ] Executable PATH resolution to absolute
 
-### Phase 3 (Current) — Negotiation Engine
+### Phase 3 — Negotiation Engine
 
 - [x] Rollback guarantees for workflows (I-W2): pre-approved rollback, auto-execute on failure
 - [x] Idempotency enforcement (I-W4): steps default false, non-idempotent failure → rollback+abort
@@ -260,9 +288,8 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Human escalation package (full trace, all rounds, blocking reason, recommendation)
 - [x] Hard blocks: SIGNING_ATTEMPT, ROLLBACK_MUTATION, PTY_ADDITION, IDEMPOTENT_ADDITION, etc.
 - [x] Bucket 2 test coverage requirements (61 tests)
-- [ ] CLI negotiate command (agent round-trip via CLI)
 
-### Phase 4 (Current) — Observability & Audit
+### Phase 4 — Observability & Audit
 
 - [x] Environment fingerprinting (OS, arch, hostname, Node version, env var names, cwd)
 - [x] Hash-chained audit log (I-A5) with prev_hash/entry_hash chain
@@ -276,22 +303,39 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Risk traits (I-A2): handles_secrets, targets_production in evaluateRisk result
 - [x] Bucket 3 test coverage requirements (40 tests)
 - [x] Runtime policy wired into all 3 supervisors (time, locks, audit — 12 integration tests)
-- [ ] Manifest cryptographic signing
 
 ### Phase 5 — Recipe System & Distribution
 
-- [ ] Recipe packaging format
-- [ ] Verified recipe channel
-- [ ] OpenClaw wrapper integration
-- [ ] GitHub/package/git/infra recipes
+- [x] Recipe packaging format (JSON schema, semver versioning, SHA-256 content hash)
+- [x] Categories (6): git, github, infra, packages, openclaw, custom
+- [x] Tagging: multiple tags per recipe, filterable
+- [x] Recipe indexing + fuzzy search (directory scanning, relevance scoring)
+- [x] Verified recipe channel (HMAC-SHA256 mock signatures, trust classification)
+- [x] Channel enforcement (unverified blocked by default, --allow-unverified override)
+- [x] Static analysis (5 checks: structured mode, guardrails, risk, description, inputs)
+- [x] Native executor with runtime guardrails (dangerous command blocking, scope restriction)
+- [x] Dry-run simulation (interpolation, danger/scope checks, no execution)
+- [x] OpenClaw wrapper recipe (scope enforcement, output verification)
+- [x] 6 example recipes: npm-publish, git-branch-cleanup, github-pr-merge, dep-upgrade, infra-deploy, openclaw-wrapper
+- [x] CLI: `guardrail list`, `guardrail create`, `guardrail pack`, `guardrail recipe validate/inspect`
+- [x] 98 recipe tests across 2 test files
 
-### Phase 6 — Enterprise
+### Phase 6 — Policy, UX, Adoption (Bucket 5)
 
-- [ ] Shared manifests
+- [ ] Resource bounds
+- [ ] Learning mode
+- [ ] Profiles + safe defaults
+- [ ] Agent identity, governance, strict mode
+- [ ] Policy CLI commands
+- [ ] Metrics and events
+
+### Phase 7 — Enterprise (Bucket 6)
+
+- [ ] Shared manifests + approval queue
 - [ ] Org policy engine
 - [ ] Multi-stage approval
-- [ ] Centralized audit
-- [ ] Compliance exports
+- [ ] Centralized audit + compliance exports
+- [ ] Identity and access control
 
 ---
 
@@ -306,6 +350,8 @@ docs/                    Product requirements, specs, invariants, implementation
 7. **No sandbox** — Contract layer, not a security boundary.
 8. **Per-invocation template approval** — Hash includes template + inputs + env.
 9. **Environment handshake** — Templates cannot silently harvest env vars.
+10. **Verified channel default-deny** — Community recipes blocked unless explicitly opted in.
+11. **Recipe immutability** — Content hash computed at pack time; tampered content detected on inspect.
 
 ---
 
