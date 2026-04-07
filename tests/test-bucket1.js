@@ -691,9 +691,9 @@ describe('Bucket 1: Exit Code Mapping', () => {
   it('exit 13 = validation_failed', () => assert.equal(STATUS_EXIT_CODES.validation_failed, 13));
   it('exit 16 = policy_violation', () => assert.equal(STATUS_EXIT_CODES.policy_violation, 16));
 
-  it('all exit codes are in range 0 or 10-19', () => {
+  it('all exit codes are in range 0 or 10-29', () => {
     for (const [, code] of Object.entries(STATUS_EXIT_CODES)) {
-      assert.ok(code === 0 || (code >= 10 && code <= 19), `Exit code ${code} is out of range`);
+      assert.ok(code === 0 || (code >= 10 && code <= 29), `Exit code ${code} is out of range`);
     }
   });
 });

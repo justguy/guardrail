@@ -621,10 +621,10 @@ describe('Exit Code Mapping', () => {
     assert.equal(STATUS_EXIT_CODES.internal_error, 19);
   });
 
-  it('all codes are in the range 0 or 10-19', () => {
+  it('all codes are in the range 0 or 10-29', () => {
     for (const [status, code] of Object.entries(STATUS_EXIT_CODES)) {
       assert.ok(
-        code === 0 || (code >= 10 && code <= 19),
+        code === 0 || (code >= 10 && code <= 29),
         `Status "${status}" has out-of-range exit code: ${code}`,
       );
     }

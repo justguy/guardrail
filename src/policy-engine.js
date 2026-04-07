@@ -349,11 +349,18 @@ export function evaluateRisk(contract, options = {}) {
     contract,
   });
 
+  // I-A2: Formal scope vector traits for audit/observability
+  const traits = {
+    handles_secrets:    hasSecretInjection,
+    targets_production: hasProdTarget,
+  };
+
   return {
     trustClass,
     riskLevel,
     reasons,
     requiresStrongConfirmation: requiresStrongConfirmation(riskLevel),
+    traits,
   };
 }
 

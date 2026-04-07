@@ -24,6 +24,9 @@ src/
   service-registry.js    Service lifecycle management (start/stop/restart)
   logger.js              NDJSON structured logging, terminal output formatting
   negotiation.js         Negotiation engine: issue codes, request generation, delta application, escalation
+  audit.js               Hash-chained audit log, chain verification, query surface
+  fingerprint.js         Environment fingerprinting (OS, arch, hostname, Node version, env vars)
+  runtime-policy.js      Time policy, counter persistence, concurrency locks
   shared.js              Utilities (deep equality, atomic writes, env building, subprocess execution)
 
 tests/
@@ -38,7 +41,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~7,700 lines of source, ~4,800 lines of tests, 392 passing tests, 0 dependencies.
+**Stats:** ~8,200 lines of source, ~5,400 lines of tests, 432 passing tests, 0 dependencies.
 
 ---
 
@@ -115,6 +118,23 @@ docs/                    Product requirements, specs, invariants, implementation
 | Rollback support | Done | Automatic for non-idempotent step failures |
 | CLI (template lint/explain/schema/simulate/diff, run --template) | Done | Full command surface per spec |
 
+### Bucket 3 — Audit, Observability, Runtime Integrity
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Environment fingerprinting | Done | OS, arch, hostname, Node version, env var names, cwd — included in audit entries |
+| Secret detection (formal traits) | Done | `traits.handles_secrets` in risk evaluation result (I-A2) |
+| Production-like target detection (formal traits) | Done | `traits.targets_production` in risk evaluation result (I-A2) |
+| Time policy enforcement (I-A3) | Done | validUntil, allowedWindow, maxRuns, maxExecutionsPerMinute |
+| Counter persistence | Done | Atomic read/increment/write, corrupt = fail closed, missing = initialize to 0 |
+| Concurrency locks (I-A4) | Done | O_EXCL creation, TTL expiry, dead-PID reclaim, corrupt = fail closed |
+| Hash-chained audit log (I-A5) | Done | NDJSON with prev_hash/entry_hash chain, fingerprint per entry |
+| Tamper resistance | Done | Chain verification detects tampered/deleted/inserted entries |
+| Audit query surface | Done | Filter by trace_id, manifest_hash, event, time range |
+| Audit CLI commands | Done | `guardrail audit verify`, `guardrail audit query` with filters |
+| Cryptographic separation (I-A1) | Done | Execution path (worker) cannot access signing/approval functions |
+| Exit codes (20/21/22) | Done | time_policy_violated, concurrent_blocked, audit_chain_broken |
+
 ### Adversarial Testing
 
 | Scenario | Status | Notes |
@@ -152,17 +172,13 @@ docs/                    Product requirements, specs, invariants, implementation
 | Trusted registries config | Not started | Needed for remote templates |
 | `mode: shell` in templates | Rejected | Intentionally forbidden in v1 |
 
-### Bucket 3 — Audit, Observability, Runtime Integrity
+### Bucket 3 Gaps
 
 | Feature | Status | Priority |
 |---------|--------|----------|
-| NDJSON audit log | Done | Per-run log files in `.guardrail/logs/` |
-| Environment fingerprinting | Not started | Medium |
-| Time policy enforcement | Not started | Low |
-| Counter persistence | Not started | Low |
-| Concurrency locks | Not started | Low |
-| Tamper resistance | Partial | Atomic writes, but no manifest signing |
-| Audit query surface | Not started | Low |
+| Manifest cryptographic signing | Not started | Medium — entry_hash chain exists, but no external signature |
+| Wire runtime policy into supervisors | Not started | Medium — checkTimePolicy/acquireLock available but not called from supervisors yet |
+| Explainability UX for Bucket 3 blocks | Not started | Low — template explain exists, need generic block explanation |
 
 ### Bucket 4 — Recipe System & OpenClaw Integration
 
@@ -221,12 +237,21 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Bucket 2 test coverage requirements (61 tests)
 - [ ] CLI negotiate command (agent round-trip via CLI)
 
-### Phase 4 — Observability & Audit
+### Phase 4 (Current) — Observability & Audit
 
-- [ ] Environment fingerprinting
-- [ ] Audit query surface
-- [ ] Tamper-resistant manifest signing
-- [ ] Time policy enforcement
+- [x] Environment fingerprinting (OS, arch, hostname, Node version, env var names, cwd)
+- [x] Hash-chained audit log (I-A5) with prev_hash/entry_hash chain
+- [x] Tamper resistance: chain verification detects tampered/deleted/inserted entries
+- [x] Audit query surface: filter by trace_id, manifest_hash, event, time range
+- [x] Audit CLI: `guardrail audit verify`, `guardrail audit query`
+- [x] Time policy enforcement (I-A3): validUntil, allowedWindow, maxRuns, rate limiting
+- [x] Counter persistence: atomic increment, corrupt=fail closed, missing=init to 0
+- [x] Concurrency locks (I-A4): O_EXCL, TTL expiry, dead-PID reclaim
+- [x] Cryptographic separation (I-A1): execution path cannot access signing functions
+- [x] Risk traits (I-A2): handles_secrets, targets_production in evaluateRisk result
+- [x] Bucket 3 test coverage requirements (40 tests)
+- [ ] Wire runtime policy into supervisors (checkTimePolicy/acquireLock before execution)
+- [ ] Manifest cryptographic signing
 
 ### Phase 5 — Recipe System & Distribution
 
@@ -269,6 +294,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | test-template.js | 75 | Template validation, lint, inputs, interpolation, env, hash |
 | test-bucket1.js | 65 | Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening, anti-interactive, cross-supervisor parity |
 | test-bucket2.js | 61 | Bucket 2 coverage: rollback, idempotency, negotiation, delta engine, issue codes, escalation, cumulative drift |
-| **Total** | **392** | |
+| test-bucket3.js | 40 | Bucket 3 coverage: fingerprint, audit chain, tamper detection, time policy, counters, locks, I-A1/I-A2 |
+| **Total** | **432** | |
 
 Run: `npm test`

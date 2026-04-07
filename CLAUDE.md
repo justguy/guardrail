@@ -13,6 +13,9 @@ src/manifest.js             Manifest CRUD (atomic writes), diff, comparison
 src/workflow.js             Workflow definition loading, validation, linting, hashing
 src/workflow-supervisor.js  Workflow execution orchestrator (state machine, rollback, negotiation)
 src/negotiation.js          Negotiation engine: issue codes, delta application, escalation
+src/audit.js                Hash-chained audit log, chain verification, query surface
+src/fingerprint.js          Environment fingerprinting for audit entries
+src/runtime-policy.js       Time policy, counter persistence, concurrency locks
 src/template.js             Template engine: validate, lint, interpolate, hash, explain, simulate
 src/template-supervisor.js  Template execution supervisor with rollback
 src/supervisor.js           Single-command execution orchestrator
@@ -28,6 +31,7 @@ tests/test-adversarial.js   Security edge case tests
 tests/test-template.js      Template validation, lint, inputs, interpolation tests
 tests/test-bucket1.js       Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, anti-interactive
 tests/test-bucket2.js       Bucket 2 coverage: rollback, idempotency, negotiation, delta, escalation
+tests/test-bucket3.js       Bucket 3 coverage: fingerprint, audit chain, tamper, time policy, locks
 docs/technical-status.md    Current implementation status and roadmap
 ```
 
@@ -37,7 +41,7 @@ docs/technical-status.md    Current implementation status and roadmap
 npm test
 ```
 
-All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 392 tests, all passing.
+All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 432 tests, all passing.
 
 ## Key Patterns
 
@@ -82,7 +86,7 @@ Hash: `SHA256(canonical(template_def) + canonical(resolved_inputs) + canonical(e
 ## When Updating This Project
 
 - Update `docs/technical-status.md` when adding features, fixing bugs, or changing the roadmap status.
-- Run `npm test` after changes — all 392+ tests must pass.
+- Run `npm test` after changes — all 432+ tests must pass.
 - Follow existing patterns: pure validation functions return error arrays, supervisors handle approval flow, workers handle process spawning.
 - Keep zero dependencies. Only Node.js built-ins.
 - The test pattern uses `node:test` with `describe/it/assert`. Fixtures are built with helper functions (e.g., `makeIndividualTemplate()`).

@@ -14,17 +14,20 @@ import { persistStateSafe, executeSubprocess } from './shared.js';
 // ---------------------------------------------------------------------------
 
 export const STATUS_EXIT_CODES = {
-  success:             0,
-  approval_required:  10,
-  approval_denied:    11,
-  drift_detected:     12,
-  validation_failed:  13,
-  update_denied:      14,
-  timeout:            15,
-  policy_violation:   16,
-  unsupported:        17,
-  protocol_error:     18,
-  internal_error:     19,
+  success:                 0,
+  approval_required:      10,
+  approval_denied:        11,
+  drift_detected:         12,
+  validation_failed:      13,
+  update_denied:          14,
+  timeout:                15,
+  policy_violation:       16,
+  unsupported:            17,
+  protocol_error:         18,
+  internal_error:         19,
+  time_policy_violated:   20,
+  concurrent_blocked:     21,
+  audit_chain_broken:     22,
 };
 
 // ---------------------------------------------------------------------------

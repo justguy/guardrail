@@ -36,6 +36,8 @@ Commands:
   template schema --template <path>     Show template input schema
   template simulate --template <path>   Simulate a template run (no execution)
   template diff --template <path>       Show diff from approved hash
+  audit verify [--path <file>]           Verify audit log chain integrity
+  audit query [--trace-id X] [filters]  Query audit log entries
   demo drift                            Run the built-in drift demo
 
 Flags:
@@ -262,6 +264,31 @@ function parseArgs(argv) {
   }
 
   result.subcommand = sub;
+
+  // --- audit subcommand -----------------------------------------------------
+
+  if (sub === 'audit') {
+    if (i >= argv.length || !['verify', 'query'].includes(argv[i])) {
+      return { error: 'usage' };
+    }
+    const auditAction = argv[i++];
+    result.subcommand = `audit-${auditAction}`;
+    result.auditFilters = {};
+
+    while (i < argv.length) {
+      const arg = argv[i];
+      if (arg === '--help') return { help: true };
+      if (arg === '--path') { i++; result.auditPath = argv[i++]; continue; }
+      if (arg === '--trace-id') { i++; result.auditFilters.trace_id = argv[i++]; continue; }
+      if (arg === '--manifest-hash') { i++; result.auditFilters.manifest_hash = argv[i++]; continue; }
+      if (arg === '--event') { i++; result.auditFilters.event = argv[i++]; continue; }
+      if (arg === '--after') { i++; result.auditFilters.after = argv[i++]; continue; }
+      if (arg === '--before') { i++; result.auditFilters.before = argv[i++]; continue; }
+      if (arg === '--json') { result.json = true; i++; continue; }
+      return { error: 'usage' };
+    }
+    return result;
+  }
 
   // --- demo subcommand ------------------------------------------------------
 
@@ -659,6 +686,52 @@ async function main() {
       console.log(`  ${diff}`);
     }
     process.exit(12);
+  }
+
+  // --- audit verify ----------------------------------------------------------
+
+  if (parsed.subcommand === 'audit-verify') {
+    const auditPath = parsed.auditPath || '.guardrail/audit.jsonl';
+    const { verifyAuditChain } = await import('./audit.js');
+
+    const result = verifyAuditChain(auditPath);
+
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.valid) {
+      console.log(`Audit chain verified: ${result.entries} entries, no tampering detected.`);
+    } else {
+      console.error(`Audit chain broken: ${result.error}`);
+    }
+    process.exit(result.valid ? 0 : STATUS_EXIT_CODES.audit_chain_broken);
+  }
+
+  // --- audit query -----------------------------------------------------------
+
+  if (parsed.subcommand === 'audit-query') {
+    const auditPath = parsed.auditPath || '.guardrail/audit.jsonl';
+    const { queryAuditLog, verifyAuditChain } = await import('./audit.js');
+
+    // Verify chain first
+    const chainResult = verifyAuditChain(auditPath);
+    const entries = queryAuditLog(auditPath, parsed.auditFilters);
+
+    if (parsed.json) {
+      console.log(JSON.stringify({ chainValid: chainResult.valid, entries }, null, 2));
+    } else {
+      if (!chainResult.valid) {
+        console.error(`Warning: audit chain is broken — ${chainResult.error}\n`);
+      }
+      if (entries.length === 0) {
+        console.log('No matching entries.');
+      } else {
+        for (const entry of entries) {
+          console.log(`${entry.timestamp} [${entry.event}] trace=${entry.trace_id ?? '-'} manifest=${entry.manifest_hash?.slice(0, 12) ?? '-'}...`);
+        }
+        console.log(`\n${entries.length} entries found.`);
+      }
+    }
+    process.exit(0);
   }
 
   // --- workflow lint --------------------------------------------------------
