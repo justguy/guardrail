@@ -267,7 +267,7 @@ function parseArgs(argv) {
     return result;
   }
 
-  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics') {
+  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace') {
     return { error: 'usage' };
   }
 
@@ -323,6 +323,47 @@ function parseArgs(argv) {
       if (argv[i] === '--name') { i++; result.policyOpts.name = argv[i++]; continue; }
       if (argv[i] === '--json') { result.json = true; i++; continue; }
       if (!argv[i].startsWith('--')) { result.policyOpts.name = argv[i++]; continue; }
+      return { error: 'usage' };
+    }
+    return result;
+  }
+
+  // --- approve subcommand ----------------------------------------------------
+
+  if (sub === 'approve') {
+    result.subcommand = 'approve';
+    result.approveOpts = {};
+    if (i < argv.length && argv[i] === 'list') { result.subcommand = 'approve-list'; i++; }
+    else if (i < argv.length && !argv[i].startsWith('--')) { result.approveOpts.id = argv[i++]; }
+    while (i < argv.length) {
+      if (argv[i] === '--reject') { result.approveOpts.action = 'reject'; i++; continue; }
+      if (argv[i] === '--json') { result.json = true; i++; continue; }
+      return { error: 'usage' };
+    }
+    return result;
+  }
+
+  // --- export subcommand -----------------------------------------------------
+
+  if (sub === 'export') {
+    result.subcommand = 'export';
+    result.exportOpts = { format: 'json' };
+    while (i < argv.length) {
+      if (argv[i] === '--format') { i++; result.exportOpts.format = argv[i++]; continue; }
+      if (argv[i] === '--path') { i++; result.exportOpts.path = argv[i++]; continue; }
+      if (argv[i] === '--output') { i++; result.outputPath = argv[i++]; continue; }
+      return { error: 'usage' };
+    }
+    return result;
+  }
+
+  // --- marketplace subcommand ------------------------------------------------
+
+  if (sub === 'marketplace') {
+    if (i < argv.length && argv[i] === 'list') { result.subcommand = 'marketplace-list'; i++; }
+    else { result.subcommand = 'marketplace-list'; }
+    while (i < argv.length) {
+      if (argv[i] === '--json') { result.json = true; i++; continue; }
       return { error: 'usage' };
     }
     return result;
@@ -1002,6 +1043,62 @@ async function main() {
     const metricsPath = parsed.metricsOpts?.path || '.guardrail/metrics.jsonl';
     const metrics = aggregateMetrics(metricsPath);
     console.log(parsed.json ? JSON.stringify(metrics, null, 2) : formatMetrics(metrics));
+    process.exit(0);
+  }
+
+  // --- approve commands ------------------------------------------------------
+
+  if (parsed.subcommand === 'approve-list') {
+    const { listRequests, formatRequest } = await import('./approval-queue.js');
+    const requests = listRequests('.guardrail');
+    if (parsed.json) { console.log(JSON.stringify(requests, null, 2)); }
+    else if (requests.length === 0) { console.log('No pending approvals.'); }
+    else { for (const r of requests) { console.log(formatRequest(r)); console.log(); } }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'approve' && parsed.approveOpts?.id) {
+    const { loadRequest, saveRequest, approveRequest, rejectRequest } = await import('./approval-queue.js');
+    try {
+      const req = loadRequest(parsed.approveOpts.id, '.guardrail');
+      const result = parsed.approveOpts.action === 'reject'
+        ? rejectRequest(req, process.env.USER || 'cli-user', 'Rejected via CLI')
+        : approveRequest(req, process.env.USER || 'cli-user');
+      saveRequest(req, '.guardrail');
+      console.log(`${result.status === 'approved' ? 'Approved' : result.status === 'rejected' ? 'Rejected' : 'Advanced'}: ${req.id}`);
+      if (result.nextStage) console.log(`  Next stage: ${result.nextStage}`);
+    } catch (err) { console.error(err.message); process.exit(1); }
+    process.exit(0);
+  }
+
+  // --- export ----------------------------------------------------------------
+
+  if (parsed.subcommand === 'export') {
+    const { exportAuditLog } = await import('./compliance.js');
+    const auditPath = parsed.exportOpts?.path || '.guardrail/audit.jsonl';
+    const output = exportAuditLog(auditPath, { format: parsed.exportOpts?.format || 'json' });
+    if (parsed.outputPath) {
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(parsed.outputPath, output, 'utf8');
+      console.log(`Exported to ${parsed.outputPath}`);
+    } else {
+      console.log(output);
+    }
+    process.exit(0);
+  }
+
+  // --- marketplace -----------------------------------------------------------
+
+  if (parsed.subcommand === 'marketplace-list') {
+    const { buildMarketplaceIndex, formatMarketplace } = await import('./marketplace.js');
+    const entries = buildMarketplaceIndex('recipes');
+    if (parsed.json) { console.log(JSON.stringify(entries, null, 2)); }
+    else {
+      console.log(`  ${'ID'.padEnd(25)} ${'VERSION'.padEnd(9)} ${'CHANNEL'.padEnd(12)} AUTHOR`);
+      console.log(`  ${'─'.repeat(25)} ${'─'.repeat(9)} ${'─'.repeat(12)} ${'─'.repeat(20)}`);
+      console.log(formatMarketplace(entries));
+      console.log(`\n  ${entries.length} recipe(s) in marketplace.`);
+    }
     process.exit(0);
   }
 

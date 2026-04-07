@@ -38,6 +38,17 @@ src/
   policy.js              Policy schema, CRUD, enforcement
   metrics.js             Structured event tracking + aggregation
   identity.js            Agent identity model + strict mode
+  shared-manifest.js     Shared manifest sync, versioning, pin
+  approval-queue.js      Approval queue, multi-stage chains, state machine
+  org-policy.js          Org-wide policy engine, hierarchy resolution
+  rbac.js                Role-based access control, 4 roles, 9 permissions
+  key-management.js      AES-256-GCM encrypted key storage, scoped access
+  notifications.js       Webhook/Slack/email/log notification adapters
+  deployment-mode.js     local/team/enterprise mode config + feature flags
+  compliance.js          JSON + CSV compliance exports, summary reports
+  environment.js         dev/staging/prod isolation, cross-env enforcement
+  marketplace.js         Recipe discovery, publishing, usage tracking
+  incident-hooks.js      Incident response triggers + actions
   shared.js              Utilities (deep equality, atomic writes, env building, subprocess execution)
 
 recipes/
@@ -65,7 +76,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~11,400 lines of source, ~9,200 lines of tests, 591 passing tests, 0 dependencies.
+**Stats:** ~13,100 lines of source, ~11,000 lines of tests, 645 passing tests, 0 dependencies.
 
 ---
 
@@ -194,6 +205,23 @@ docs/                    Product requirements, specs, invariants, implementation
 | Agent identity and governance | Done | Actor/origin tracking, scoped permissions, audit-ready identity model |
 | Agent strict mode | Done | Approved recipe list, scope enforcement, dynamic command blocking |
 
+### Bucket 6 — Enterprise & Team Features
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Shared manifests | Done | Team-level recipe/policy/profile sync, versioned, pin, conflict detection |
+| Approval queue | Done | Pending/approved/rejected/changes_requested state machine, persistence |
+| Multi-stage approval | Done | Sequential chains (dev → lead → security), conditional routing |
+| Org policy engine | Done | Org-wide enforcement overrides local; forbidden ops, allowed actions |
+| RBAC | Done | 4 roles (admin/approver/developer/viewer), 9 permissions, enforcement |
+| Key management | Done | AES-256-GCM encrypted storage, scoped access, redact for logging |
+| Notifications | Done | Webhook/Slack/email/log adapters, event-driven dispatch |
+| Deployment modes | Done | local/team/enterprise with per-mode feature flags |
+| Compliance exports | Done | JSON + CSV export of audit logs, compliance summary reports |
+| Environment separation | Done | dev/staging/prod isolation, cross-env access blocked (dev ✗ prod) |
+| Marketplace | Done | Recipe discovery, publishing, version conflict detection, usage stats |
+| Incident response hooks | Done | Trigger on violations/failures; alert/halt/escalate/log actions |
+
 ### Adversarial Testing
 
 | Scenario | Status | Notes |
@@ -206,7 +234,7 @@ docs/                    Product requirements, specs, invariants, implementation
 
 ---
 
-## What's Not Working / Not Yet Implemented
+## Remaining Gaps
 
 ### Bucket 1 Gaps
 
@@ -244,22 +272,6 @@ docs/                    Product requirements, specs, invariants, implementation
 |---------|--------|----------|
 | Recipe execution via `guardrail run <recipe-id>` | Not started | Medium — executor exists, CLI wiring pending |
 | Recipe registry / remote publishing | Not started | Medium — local pack/inspect done |
-| Recipe versioning conflict detection | Not started | Low — hash immutability enforced, no registry dedup |
-
-### Bucket 6 — Enterprise & Team Features
-
-| Feature | Status | Priority |
-|---------|--------|----------|
-| Shared manifests | Not started | Future |
-| Approval queue | Not started | Future |
-| Org policy engine | Not started | Future |
-| Identity and access control | Not started | Future |
-| Centralized audit | Not started | Future |
-| Hosted key management | Not started | Future |
-| Notifications and integrations | Not started | Future |
-| Deployment modes | Not started | Future |
-| Compliance exports | Not started | Future |
-| Multi-stage approval policies | Not started | Future |
 
 ---
 
@@ -342,11 +354,18 @@ docs/                    Product requirements, specs, invariants, implementation
 
 ### Phase 7 — Enterprise (Bucket 6)
 
-- [ ] Shared manifests + approval queue
-- [ ] Org policy engine
-- [ ] Multi-stage approval
-- [ ] Centralized audit + compliance exports
-- [ ] Identity and access control
+- [x] Shared manifests (sync, versioning, pin, conflict detection)
+- [x] Approval queue + multi-stage chains (dev → lead → security)
+- [x] Org policy engine (hierarchy: org > team > user, forbidden ops override)
+- [x] RBAC (admin/approver/developer/viewer, 9 permissions)
+- [x] Key management (AES-256-GCM encrypted, scoped access, redact)
+- [x] Notifications (webhook/slack/email/log adapters)
+- [x] Deployment modes (local/team/enterprise feature flags)
+- [x] Compliance exports (JSON + CSV, summary reports)
+- [x] Environment separation (dev/staging/prod isolation)
+- [x] Marketplace (publish, version conflict detection, usage stats)
+- [x] Incident response hooks (alert/halt/escalate/log on violations)
+- [x] 54 Bucket 6 tests
 
 ---
 
@@ -365,6 +384,8 @@ docs/                    Product requirements, specs, invariants, implementation
 11. **Recipe immutability** — Content hash computed at pack time; tampered content detected on inspect.
 12. **Safe by default** — Dangerous patterns blocked, dry-run for high-risk, approval for production. Override requires explicit --force.
 13. **Strict mode for agents** — Agents restricted to approved recipes and declared scope; dynamic commands blocked.
+14. **Org policy overrides local** — Policy hierarchy: org > team > user. Forbidden operations accumulate; allowed actions restrict.
+15. **Encrypted key storage** — AES-256-GCM with scoped access. Secrets never appear in logs (redact interface).
 
 ---
 
@@ -383,6 +404,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | test-recipe.js | 43 | Recipe packaging: schema validation, inputs, steps, guardrails, hashing, pack/unpack |
 | test-recipe-system.js | 55 | Recipe system: categories, tags, index, fuzzy search, channel, executor, dry-run |
 | test-bucket5.js | 49 | Bucket 5: resource bounds, learning mode, profiles, safe defaults, policy, metrics, identity, strict mode |
-| **Total** | **591** | |
+| test-bucket6.js | 54 | Bucket 6: shared manifests, approval queue, RBAC, key mgmt, env separation, marketplace, incidents |
+| **Total** | **645** | |
 
 Run: `npm test`
