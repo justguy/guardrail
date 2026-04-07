@@ -104,8 +104,10 @@ function validateInputs(inputs) {
       continue;
     }
     if (schema.type === 'string') {
-      if (!schema.pattern && !schema.enum) {
-        errors.push(`${p}: string inputs must have "pattern" or "enum" constraint`);
+      // approval_mode overrides the pattern/enum requirement
+      const MODES_WITHOUT_PATTERN = new Set(['exact', 'path_policy', 'list', 'review_each_time', 'template_slots']);
+      if (!schema.pattern && !schema.enum && !MODES_WITHOUT_PATTERN.has(schema.approval_mode)) {
+        errors.push(`${p}: string inputs must have "pattern", "enum", or "approval_mode" constraint`);
       }
       if (schema.pattern) {
         try { new RegExp(schema.pattern); } catch (e) {

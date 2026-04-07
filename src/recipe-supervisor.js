@@ -217,7 +217,8 @@ export async function runRecipeSupervisor(options) {
 
     let resolvedInputs;
     try {
-      resolvedInputs = resolveInputs(recipe, inputs);
+      const inputResult = resolveInputs(recipe, inputs);
+      resolvedInputs = inputResult.resolved;
     } catch (err) {
       if (!jsonOutput) {
         printResult({ success: false, exitCode: 1, message: err.message });

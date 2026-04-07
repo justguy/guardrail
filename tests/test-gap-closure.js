@@ -92,7 +92,7 @@ describe('Recipe Runner: resolveRecipeById', () => {
 describe('Recipe Runner: resolveInputs', () => {
   it('validates and resolves string inputs', () => {
     const recipe = makeRecipe();
-    const resolved = resolveInputs(recipe, { target: 'hello' });
+    const { resolved } = resolveInputs(recipe, { target: 'hello' });
     assert.equal(resolved.target, 'hello');
   });
 
@@ -100,7 +100,7 @@ describe('Recipe Runner: resolveInputs', () => {
     const recipe = makeRecipe();
     assert.throws(
       () => resolveInputs(recipe, { target: 'INVALID!' }),
-      (err) => err.message.includes('does not match pattern'),
+      (err) => err.message.includes('Does not match pattern') || err.message.includes('does not match'),
     );
   });
 
@@ -124,15 +124,17 @@ describe('Recipe Runner: resolveInputs', () => {
     const recipe = makeRecipe({
       inputs: { env: { type: 'string', enum: ['dev', 'staging'] } },
     });
-    assert.equal(resolveInputs(recipe, { env: 'dev' }).env, 'dev');
-    assert.throws(() => resolveInputs(recipe, { env: 'production' }));
+    const { resolved } = resolveInputs(recipe, { env: 'dev' });
+    assert.equal(resolved.env, 'dev');
+    assert.throws(() => resolveInputs(recipe, { env: 'invalid' }));
   });
 
   it('validates integer inputs with range', () => {
     const recipe = makeRecipe({
       inputs: { count: { type: 'integer', min: 1, max: 10 } },
     });
-    assert.equal(resolveInputs(recipe, { count: '5' }).count, 5);
+    const { resolved } = resolveInputs(recipe, { count: '5' });
+    assert.equal(resolved.count, 5);
     assert.throws(() => resolveInputs(recipe, { count: '0' }));
     assert.throws(() => resolveInputs(recipe, { count: '11' }));
   });
@@ -141,8 +143,10 @@ describe('Recipe Runner: resolveInputs', () => {
     const recipe = makeRecipe({
       inputs: { verbose: { type: 'boolean' } },
     });
-    assert.equal(resolveInputs(recipe, { verbose: 'true' }).verbose, true);
-    assert.equal(resolveInputs(recipe, { verbose: 'false' }).verbose, false);
+    const { resolved: r1 } = resolveInputs(recipe, { verbose: 'true' });
+    assert.equal(r1.verbose, true);
+    const { resolved: r2 } = resolveInputs(recipe, { verbose: 'false' });
+    assert.equal(r2.verbose, false);
     assert.throws(() => resolveInputs(recipe, { verbose: 'maybe' }));
   });
 });

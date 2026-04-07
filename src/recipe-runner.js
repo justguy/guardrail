@@ -4,6 +4,8 @@ import { existsSync } from 'node:fs';
 import { buildIndex, buildVersionIndex, deduplicateLatest } from './recipe-index.js';
 import { executeRecipe, dryRun } from './recipe-executor.js';
 import { hashRecipe } from './recipe.js';
+import { validateInputValue, inferApprovalMode } from './input-validator.js';
+import { classifyBucket, summarizeCapabilities, escalateTraits } from './risk-traits.js';
 
 // ---------------------------------------------------------------------------
 // Default search directories for recipe resolution
@@ -84,49 +86,75 @@ export function resolveRecipeById(specifier, dirs) {
 
 /**
  * Validate CLI-provided inputs against recipe input schema.
+ * Returns { resolved, flagged, errors } — flagged inputs require approval.
+ *
+ * @param {object} recipe     - Validated recipe.
+ * @param {object} cliInputs  - { key: value } from --input flags.
+ * @param {object} [opts]     - { execution_shape }.
+ * @returns {{ resolved: object, flagged: object[], errors: string[] }}
  */
-export function resolveInputs(recipe, cliInputs = {}) {
+export function resolveInputs(recipe, cliInputs = {}, opts = {}) {
   const resolved = {};
+  const flagged = [];
   const errors = [];
 
   for (const [key, schema] of Object.entries(recipe.inputs || {})) {
-    const value = cliInputs[key] ?? schema.default;
+    const raw = cliInputs[key] ?? schema.default;
 
-    if (value === undefined) {
+    if (raw === undefined) {
       if (schema.required !== false) {
         errors.push(`Missing required input: "${key}"`);
       }
       continue;
     }
 
-    if (schema.type === 'boolean') {
-      if (value === 'true' || value === true) resolved[key] = true;
-      else if (value === 'false' || value === false) resolved[key] = false;
-      else errors.push(`Input "${key}" must be a boolean, got "${value}"`);
-    } else if (schema.type === 'integer') {
-      const n = Number(value);
-      if (!Number.isInteger(n)) {
-        errors.push(`Input "${key}" must be an integer, got "${value}"`);
+    // Run typed validation
+    const result = validateInputValue(raw, schema, {
+      execution_shape: opts.execution_shape,
+    });
+
+    if (!result.valid) {
+      const bucket = classifyBucket(result.risk_traits);
+      if (bucket === 'block') {
+        errors.push(`Input "${key}" blocked: ${result.reasons.join(', ')}`);
       } else {
-        if (schema.min !== undefined && n < schema.min) errors.push(`Input "${key}" must be >= ${schema.min}`);
-        if (schema.max !== undefined && n > schema.max) errors.push(`Input "${key}" must be <= ${schema.max}`);
-        resolved[key] = n;
+        errors.push(`Input "${key}": ${result.reasons.join(', ')}`);
       }
-    } else {
-      const str = String(value);
-      if (schema.pattern && !new RegExp(schema.pattern).test(str)) {
-        errors.push(`Input "${key}" does not match pattern ${schema.pattern}: "${str}"`);
-      }
-      if (schema.enum && !schema.enum.includes(str)) {
-        errors.push(`Input "${key}" must be one of [${schema.enum.join(', ')}], got "${str}"`);
-      }
-      resolved[key] = str;
+      continue;
+    }
+
+    resolved[key] = result.normalized ?? raw;
+
+    if (result.risk_traits.length > 0 || result.never_reuse) {
+      flagged.push({
+        key, value: raw, normalized: result.normalized,
+        traits: result.risk_traits, reasons: result.reasons,
+        capabilities: summarizeCapabilities(result.risk_traits),
+        parsed_shape: result.parsed_shape,
+        never_reuse: result.never_reuse || false,
+      });
     }
   }
 
+  // Unknown inputs
   for (const key of Object.keys(cliInputs)) {
     if (!recipe.inputs || !(key in recipe.inputs)) {
       errors.push(`Unknown input: "${key}"`);
+    }
+  }
+
+  // Cross-parameter escalation
+  if (flagged.length > 0) {
+    const allTraits = flagged.flatMap(f => f.traits);
+    const escalated = escalateTraits(allTraits);
+    const newTraits = escalated.filter(t => !allTraits.includes(t));
+    if (newTraits.length > 0) {
+      flagged.push({
+        key: '_cross_parameter', value: null, normalized: null,
+        traits: newTraits,
+        reasons: newTraits.map(t => `Cross-parameter escalation: ${t}`),
+        capabilities: summarizeCapabilities(newTraits),
+      });
     }
   }
 
@@ -134,7 +162,7 @@ export function resolveInputs(recipe, cliInputs = {}) {
     throw new Error(`Input validation failed:\n  - ${errors.join('\n  - ')}`);
   }
 
-  return resolved;
+  return { resolved, flagged };
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +178,9 @@ export function resolveInputs(recipe, cliInputs = {}) {
  */
 export async function runRecipeById(specifier, opts = {}) {
   const { recipe, sourcePath, version } = resolveRecipeById(specifier, opts.searchDirs);
-  const resolved = resolveInputs(recipe, opts.inputs || {});
+  const { resolved, flagged } = resolveInputs(recipe, opts.inputs || {}, {
+    execution_shape: opts.execution_shape,
+  });
 
   // Verify content hash if expected hash provided
   if (opts.expectedHash) {
@@ -162,13 +192,29 @@ export async function runRecipeById(specifier, opts = {}) {
     }
   }
 
+  // Check for blocked inputs
+  const blocked = flagged.filter(f => classifyBucket(f.traits) === 'block');
+  if (blocked.length > 0) {
+    const reasons = blocked.map(b => `Input "${b.key}": ${b.reasons.join(', ')}`);
+    throw new Error(`Execution blocked:\n  - ${reasons.join('\n  - ')}`);
+  }
+
   if (opts.dryRunOnly) {
     return {
       status: 'dry_run',
       recipe: { id: recipe.id, name: recipe.name, version },
-      sourcePath,
+      sourcePath, flagged,
       ...dryRun(recipe, resolved, { allowedPaths: opts.allowedPaths }),
     };
+  }
+
+  // In non-interactive, flagged inputs fail closed
+  if (opts.nonInteractive && flagged.length > 0) {
+    const caps = flagged.flatMap(f => f.capabilities);
+    throw new Error(
+      `Execution paused — approval required for:\n  - ${caps.join('\n  - ')}\n` +
+      'Run interactively to approve, or use a manifest with approved values.'
+    );
   }
 
   return executeRecipe(recipe, resolved, {

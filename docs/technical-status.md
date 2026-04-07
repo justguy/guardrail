@@ -93,7 +93,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~14,000 lines of source, ~13,000+ lines of tests, full suite currently passing, 0 dependencies.
+**Stats:** ~14,500 lines of source, ~14,000 lines of tests, 957 passing tests, 0 dependencies.
 
 ---
 
@@ -430,6 +430,39 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] `deduplicateLatest()` for `list` command
 - [x] Backward compatibility with legacy flat recipe files
 - [x] 39 gap closure + versioning tests
+
+---
+
+## Product Roadmap — What to Build Next
+
+Three product phases, each with its own go-to-market motion.
+
+### Open Source Launch (ship with v1)
+
+| # | Feature | Unlocks | Status |
+|---|---------|---------|--------|
+| 1 | `guardrail init` learning mode | Individual retention | In code (learning-mode.js), needs CLI init flow |
+| 2 | Free tier definition + offline guarantee | Word of mouth | Architecture supports (0 deps, local-only mode) |
+
+### Paid Tier (team adoption)
+
+| # | Feature | Unlocks | Status |
+|---|---------|---------|--------|
+| 3 | Shared manifest registry (minimal backend) | Team adoption | Local sync done (shared-manifest.js), needs backend |
+| 4 | Slack/email approval notifications | Team RED workflows | Adapters done (notifications.js), needs live integration |
+| 5 | GitHub OAuth / Google SSO | Team login | Not started |
+| 6 | Usage dashboard | Manager buy-in | Metrics collection done (metrics.js), needs UI |
+| 7 | Private recipe namespace | Business stickiness | Marketplace done (marketplace.js), needs auth |
+
+### Enterprise
+
+| # | Feature | Unlocks | Status |
+|---|---------|---------|--------|
+| 8 | RBAC four roles | Enterprise security review | Done (rbac.js) — needs backend enforcement |
+| 9 | SAML / SCIM | Enterprise IT approval | Not started |
+| 10 | Audit log shipping + retention | Enterprise compliance | Local audit done (audit.js), needs remote shipping |
+| 11 | VPC / on-prem deployment | Regulated industries | Deployment modes done (deployment-mode.js), needs packaging |
+| 12 | SOC 2 Type II | Large enterprise contracts | Compliance exports done (compliance.js), needs process |
 
 ---
 
