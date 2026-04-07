@@ -41,6 +41,9 @@ Commands:
   recipe validate <recipe.json>         Validate a recipe file
   recipe inspect <packed.json>          Inspect a packaged recipe (verify hash)
   create --name <n> --category <c>      Generate a recipe skeleton
+  profile create|use|list|show          Manage user profiles
+  policy list|inspect|validate          Manage and enforce policies
+  metrics [--path <file>]               View execution metrics
   audit verify [--path <file>]           Verify audit log chain integrity
   audit query [--trace-id X] [filters]  Query audit log entries
   demo drift                            Run the built-in drift demo
@@ -264,7 +267,7 @@ function parseArgs(argv) {
     return result;
   }
 
-  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create') {
+  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics') {
     return { error: 'usage' };
   }
 
@@ -281,6 +284,57 @@ function parseArgs(argv) {
       if (argv[i] === '--search') { i++; result.listFilters.search = argv[i++]; continue; }
       if (argv[i] === '--risk') { i++; result.listFilters.risk_level = argv[i++]; continue; }
       if (argv[i] === '--channel') { i++; result.listFilters.channel = argv[i++]; continue; }
+      if (argv[i] === '--json') { result.json = true; i++; continue; }
+      return { error: 'usage' };
+    }
+    return result;
+  }
+
+  // --- profile subcommand ----------------------------------------------------
+
+  if (sub === 'profile') {
+    if (i >= argv.length || !['create', 'use', 'list', 'show'].includes(argv[i])) {
+      return { error: 'usage' };
+    }
+    const action = argv[i++];
+    result.subcommand = `profile-${action}`;
+    result.profileOpts = {};
+    while (i < argv.length) {
+      if (argv[i] === '--name') { i++; result.profileOpts.name = argv[i++]; continue; }
+      if (argv[i] === '--risk') { i++; result.profileOpts.risk = argv[i++]; continue; }
+      if (argv[i] === '--env') { i++; result.profileOpts.env = argv[i++]; continue; }
+      if (argv[i] === '--json') { result.json = true; i++; continue; }
+      if (!argv[i].startsWith('--')) { result.profileOpts.name = argv[i++]; continue; }
+      return { error: 'usage' };
+    }
+    return result;
+  }
+
+  // --- policy subcommand -----------------------------------------------------
+
+  if (sub === 'policy') {
+    if (i >= argv.length || !['list', 'inspect', 'validate'].includes(argv[i])) {
+      return { error: 'usage' };
+    }
+    const action = argv[i++];
+    result.subcommand = `policy-${action}`;
+    result.policyOpts = {};
+    while (i < argv.length) {
+      if (argv[i] === '--name') { i++; result.policyOpts.name = argv[i++]; continue; }
+      if (argv[i] === '--json') { result.json = true; i++; continue; }
+      if (!argv[i].startsWith('--')) { result.policyOpts.name = argv[i++]; continue; }
+      return { error: 'usage' };
+    }
+    return result;
+  }
+
+  // --- metrics subcommand ----------------------------------------------------
+
+  if (sub === 'metrics') {
+    result.subcommand = 'metrics';
+    result.metricsOpts = {};
+    while (i < argv.length) {
+      if (argv[i] === '--path') { i++; result.metricsOpts.path = argv[i++]; continue; }
       if (argv[i] === '--json') { result.json = true; i++; continue; }
       return { error: 'usage' };
     }
@@ -845,6 +899,109 @@ async function main() {
     } else {
       console.log(JSON.stringify({ created: outputPath, id, category, risk }));
     }
+    process.exit(0);
+  }
+
+  // --- profile commands ------------------------------------------------------
+
+  if (parsed.subcommand === 'profile-create') {
+    const { saveProfile, BUILTIN_PROFILES } = await import('./profile.js');
+    const opts = parsed.profileOpts || {};
+    const name = opts.name;
+    if (!name) { console.error('Error: profile name required'); process.exit(1); }
+
+    // Check if it's a builtin
+    const builtin = BUILTIN_PROFILES[name];
+    const profile = builtin || {
+      name,
+      description: `Custom profile: ${name}`,
+      risk_tolerance: opts.risk || 'medium',
+      environment: opts.env || 'dev',
+      approval_rules: { require_for_high_risk: true, require_for_prod: true, auto_approve_low_risk: opts.risk === 'high' },
+    };
+
+    const path = saveProfile(profile);
+    console.log(`Profile "${name}" saved to ${path}`);
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'profile-use') {
+    const { setActiveProfile } = await import('./profile.js');
+    const name = parsed.profileOpts?.name;
+    if (!name) { console.error('Error: profile name required'); process.exit(1); }
+    try { setActiveProfile(name); console.log(`Active profile set to "${name}"`); }
+    catch (err) { console.error(err.message); process.exit(1); }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'profile-list') {
+    const { listProfiles, getActiveProfile } = await import('./profile.js');
+    const profiles = listProfiles();
+    const active = getActiveProfile();
+    if (parsed.json) {
+      console.log(JSON.stringify({ profiles, active: active?.name ?? null }, null, 2));
+    } else {
+      if (profiles.length === 0) { console.log('No profiles found. Create one with `guardrail profile create <name>`.'); }
+      else {
+        for (const p of profiles) {
+          const marker = active?.name === p.name ? ' (active)' : '';
+          console.log(`  ${p.name.padEnd(20)} ${p.environment.padEnd(10)} risk: ${p.risk_tolerance}${marker}`);
+        }
+      }
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'profile-show') {
+    const { loadProfile, getActiveProfile } = await import('./profile.js');
+    const name = parsed.profileOpts?.name;
+    const profile = name ? loadProfile(name) : getActiveProfile();
+    if (!profile) { console.error('No profile found. Specify --name or set active profile.'); process.exit(1); }
+    console.log(JSON.stringify(profile, null, 2));
+    process.exit(0);
+  }
+
+  // --- policy commands -------------------------------------------------------
+
+  if (parsed.subcommand === 'policy-list') {
+    const { listPolicies, formatPolicy } = await import('./policy.js');
+    const policies = listPolicies('.guardrail');
+    if (parsed.json) { console.log(JSON.stringify(policies, null, 2)); }
+    else if (policies.length === 0) { console.log('No policies found.'); }
+    else { for (const p of policies) { console.log(formatPolicy(p)); console.log(); } }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'policy-inspect') {
+    const { loadPolicy, formatPolicy } = await import('./policy.js');
+    const name = parsed.policyOpts?.name;
+    if (!name) { console.error('Error: policy name required'); process.exit(1); }
+    try {
+      const policy = loadPolicy(name, '.guardrail');
+      console.log(parsed.json ? JSON.stringify(policy, null, 2) : formatPolicy(policy));
+    } catch (err) { console.error(err.message); process.exit(1); }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'policy-validate') {
+    const { loadPolicy, validatePolicy } = await import('./policy.js');
+    const name = parsed.policyOpts?.name;
+    if (!name) { console.error('Error: policy name required'); process.exit(1); }
+    try {
+      const policy = loadPolicy(name, '.guardrail');
+      const errors = validatePolicy(policy);
+      if (errors.length === 0) { console.log(`Policy "${name}" is valid.`); process.exit(0); }
+      else { console.error(`Policy "${name}" has errors:\n  - ${errors.join('\n  - ')}`); process.exit(1); }
+    } catch (err) { console.error(err.message); process.exit(1); }
+  }
+
+  // --- metrics ---------------------------------------------------------------
+
+  if (parsed.subcommand === 'metrics') {
+    const { aggregateMetrics, formatMetrics } = await import('./metrics.js');
+    const metricsPath = parsed.metricsOpts?.path || '.guardrail/metrics.jsonl';
+    const metrics = aggregateMetrics(metricsPath);
+    console.log(parsed.json ? JSON.stringify(metrics, null, 2) : formatMetrics(metrics));
     process.exit(0);
   }
 

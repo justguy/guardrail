@@ -31,6 +31,13 @@ src/
   audit.js               Hash-chained audit log, chain verification, query surface
   fingerprint.js         Environment fingerprinting (OS, arch, hostname, Node version, env vars)
   runtime-policy.js      Time policy, counter persistence, concurrency locks
+  resource-bounds.js     Resource constraint schema + runtime enforcement
+  learning-mode.js       Step-by-step explanation engine
+  profile.js             User/environment profiles with persistence
+  safe-defaults.js       Global safe default policy layer
+  policy.js              Policy schema, CRUD, enforcement
+  metrics.js             Structured event tracking + aggregation
+  identity.js            Agent identity model + strict mode
   shared.js              Utilities (deep equality, atomic writes, env building, subprocess execution)
 
 recipes/
@@ -57,7 +64,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~10,200 lines of source, ~8,000 lines of tests, 542 passing tests, 0 dependencies.
+**Stats:** ~11,400 lines of source, ~9,200 lines of tests, 591 passing tests, 0 dependencies.
 
 ---
 
@@ -227,16 +234,16 @@ docs/                    Product requirements, specs, invariants, implementation
 
 ### Bucket 5 — Policy, UX, Adoption
 
-| Feature | Status | Priority |
-|---------|--------|----------|
-| Resource bounds | Not started | Medium |
-| Learning mode | Not started | Medium |
-| Profiles | Not started | Low |
-| Safe defaults | Partial | Defaults exist but not configurable |
-| Policy CLI commands | Not started | Medium |
-| Metrics and events | Not started | Low |
-| Agent identity and governance | Not started | Medium |
-| Agent strict mode | Not started | Medium |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Resource bounds | Done | max_execution_time, max_files_touched, max_network_calls, max_cost; runtime tracker with violations |
+| Learning mode | Done | --learning flag: step/recipe/block explanations with risk context |
+| Profiles | Done | cautious-dev, fast-ci, prod-safe builtins; `guardrail profile create/use/list/show` |
+| Safe defaults | Done | Dangerous pattern blocking, dry-run for high-risk, --force with warnings |
+| Policy CLI commands | Done | `guardrail policy list/inspect/validate`; allowed actions, restricted scopes, required approvals |
+| Metrics and events | Done | Structured JSONL events, per-type/actor/recipe aggregation, `guardrail metrics` |
+| Agent identity and governance | Done | Actor/origin tracking, scoped permissions, audit-ready identity model |
+| Agent strict mode | Done | Approved recipe list, scope enforcement, dynamic command blocking |
 
 ### Bucket 6 — Enterprise & Team Features
 
@@ -322,12 +329,15 @@ docs/                    Product requirements, specs, invariants, implementation
 
 ### Phase 6 — Policy, UX, Adoption (Bucket 5)
 
-- [ ] Resource bounds
-- [ ] Learning mode
-- [ ] Profiles + safe defaults
-- [ ] Agent identity, governance, strict mode
-- [ ] Policy CLI commands
-- [ ] Metrics and events
+- [x] Resource bounds (max_execution_time, max_files, max_network, max_cost + runtime tracker)
+- [x] Learning mode (--learning: step/recipe/block explanations with risk, safety, and what-could-go-wrong)
+- [x] Profiles (3 builtins: cautious-dev, fast-ci, prod-safe; profile create/use/list/show CLI)
+- [x] Safe defaults (dangerous pattern blocking, dry-run for high-risk, --force with warnings)
+- [x] Policy system (schema, CRUD, enforcement: allowed actions, restricted scopes, required approvals)
+- [x] Metrics + events (structured JSONL, aggregation by type/actor/recipe, guardrail metrics CLI)
+- [x] Agent identity + governance (actor/origin, scoped permissions, audit-ready)
+- [x] Agent strict mode (approved recipe list, scope enforcement, dynamic command blocking)
+- [x] 49 Bucket 5 tests
 
 ### Phase 7 — Enterprise (Bucket 6)
 
@@ -369,6 +379,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | test-integration-runtime.js | 12 | Integration: runtime policy + audit wired into all 3 supervisors end-to-end |
 | test-recipe.js | 43 | Recipe packaging: schema validation, inputs, steps, guardrails, hashing, pack/unpack |
 | test-recipe-system.js | 55 | Recipe system: categories, tags, index, fuzzy search, channel, executor, dry-run |
-| **Total** | **542** | |
+| test-bucket5.js | 49 | Bucket 5: resource bounds, learning mode, profiles, safe defaults, policy, metrics, identity, strict mode |
+| **Total** | **591** | |
 
 Run: `npm test`

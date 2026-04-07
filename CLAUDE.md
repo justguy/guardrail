@@ -17,6 +17,13 @@ src/recipe.js               Recipe packaging: schema validation, parsing, hashin
 src/recipe-index.js         Recipe indexing, category filtering, fuzzy search
 src/recipe-channel.js       Verified/community trust model, signature mock, enforcement
 src/recipe-executor.js      Native recipe execution, runtime guardrails, dry-run
+src/resource-bounds.js      Resource constraint schema + runtime enforcement
+src/learning-mode.js        Step-by-step explanation engine for learning mode
+src/profile.js              User/environment profiles with persistence
+src/safe-defaults.js        Global safe default policy layer
+src/policy.js               Policy schema, CRUD, enforcement, CLI
+src/metrics.js              Structured event tracking + metrics aggregation
+src/identity.js             Agent identity model + strict mode enforcement
 src/audit.js                Hash-chained audit log, chain verification, query surface
 src/fingerprint.js          Environment fingerprinting for audit entries
 src/runtime-policy.js       Time policy, counter persistence, concurrency locks
@@ -38,6 +45,7 @@ tests/test-bucket2.js       Bucket 2 coverage: rollback, idempotency, negotiatio
 tests/test-bucket3.js       Bucket 3 coverage: fingerprint, audit chain, tamper, time policy, locks
 tests/test-recipe.js        Recipe packaging: schema, inputs, steps, guardrails, hash, pack/unpack
 tests/test-recipe-system.js Recipe system: categories, tags, index, channel, executor, dry-run
+tests/test-bucket5.js       Bucket 5: resource bounds, learning mode, profiles, safe defaults, policy, metrics, identity, strict mode
 docs/technical-status.md    Current implementation status and roadmap
 ```
 
@@ -47,7 +55,7 @@ docs/technical-status.md    Current implementation status and roadmap
 npm test
 ```
 
-All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 542 tests, all passing.
+All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 591 tests, all passing.
 
 ## Key Patterns
 
@@ -92,7 +100,7 @@ Hash: `SHA256(canonical(template_def) + canonical(resolved_inputs) + canonical(e
 ## When Updating This Project
 
 - Update `docs/technical-status.md` when adding features, fixing bugs, or changing the roadmap status.
-- Run `npm test` after changes — all 542+ tests must pass.
+- Run `npm test` after changes — all 591+ tests must pass.
 - Follow existing patterns: pure validation functions return error arrays, supervisors handle approval flow, workers handle process spawning.
 - Keep zero dependencies. Only Node.js built-ins.
 - The test pattern uses `node:test` with `describe/it/assert`. Fixtures are built with helper functions (e.g., `makeIndividualTemplate()`).
