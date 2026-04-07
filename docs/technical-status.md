@@ -36,7 +36,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~7,200 lines of source, ~3,900 lines of tests, 324 passing tests, 0 dependencies.
+**Stats:** ~7,260 lines of source, ~4,190 lines of tests, 331 passing tests, 0 dependencies.
 
 ---
 
@@ -61,9 +61,10 @@ docs/                    Product requirements, specs, invariants, implementation
 | NDJSON protocol validation | Done | Real-time parsing, protocol message extraction |
 | Output validator engine | Done | exit_code + ndjson modes with update proposal support |
 | Convergence tracker | Done | Detects repeated signatures, no-progress loops, retry limits |
-| File provenance enforcement (fileHash) | Done | SHA-256 verification before execution, blocks on mismatch |
-| Anti-interactive detection | Done | Stderr pattern scan for password/prompt patterns, exit 13 |
-| Formal ReDoS rejection | Done | Blocks manifest save for unsafe regex (not just advisory lint) |
+| File provenance enforcement (fileHash) | Done | SHA-256 verification before execution, blocks on mismatch. All 3 supervisors. |
+| Anti-interactive detection | Done | Stderr pattern scan for password/prompt patterns. All 3 supervisors. |
+| Formal ReDoS rejection | Done | Blocks manifest save for unsafe regex in contracts, workflows, and templates |
+| Cross-supervisor parity | Done | file hash, anti-interactive, regex validators enforced in command/workflow/template modes |
 | CLI (run, demo drift) | Done | Structured + shell + shorthand string modes |
 
 ### Bucket 2 — Workflow Engine
@@ -252,7 +253,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | test-workflow.js | 56 | Workflow parsing, hashing, drift, risk, normalization, lint |
 | test-adversarial.js | 15 | Security edge cases, sneaky escalation, tamper detection |
 | test-template.js | 75 | Template validation, lint, inputs, interpolation, env, hash |
-| test-bucket1.js | 58 | Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening, anti-interactive |
-| **Total** | **324** | |
+| test-bucket1.js | 65 | Bucket 1 coverage: symlinks, file hash, TOCTOU, ReDoS, drift, widening, anti-interactive, cross-supervisor parity |
+| **Total** | **331** | |
 
 Run: `npm test`

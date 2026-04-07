@@ -35,7 +35,7 @@ docs/technical-status.md    Current implementation status and roadmap
 npm test
 ```
 
-All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 324 tests, all passing.
+All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 331 tests, all passing.
 
 ## Key Patterns
 
@@ -84,3 +84,54 @@ Hash: `SHA256(canonical(template_def) + canonical(resolved_inputs) + canonical(e
 - Follow existing patterns: pure validation functions return error arrays, supervisors handle approval flow, workers handle process spawning.
 - Keep zero dependencies. Only Node.js built-ins.
 - The test pattern uses `node:test` with `describe/it/assert`. Fixtures are built with helper functions (e.g., `makeIndividualTemplate()`).
+
+## tpf — MANDATORY
+
+tpf saves 40-90% tokens on file reads and command output. **Failure to use tpf is a bug.**
+
+**Reading files:** Use `fullscope_context` or `fullscope_skeleton` (MCP tools) for ALL file reads. Use `Read` ONLY when the next action is `Edit` on that same file. If you catch yourself using `Read` to "understand" a file, stop and use `fullscope_context` instead. Subagents (Explore, Plan) don't have MCP access — they use `Read`, that's expected.
+
+**Running commands:** Prefix with `TPF_LLM_TOOL=codex tpf`: `TPF_LLM_TOOL=codex tpf git status`, `TPF_LLM_TOOL=codex tpf npm test`, `TPF_LLM_TOOL=codex tpf ls -la`.
+Never prefix: cd, echo, cat, head, tail, rm, cp, mv, mkdir, pwd, export, source.
+Don't prefix redirections (>, <), ||, &, $(), backticks.
+
+**Self-check:** Before every `Read` call, ask: "Am I about to `Edit` this file?" If no → `fullscope_context`.
+
+
+## Workflow
+
+**The Invariant Method:** `TRACE` → `REPORT` → `FIX` → `PROVE`
+
+1. **Trace:** Map the full data path (A → B → C), not the isolated change point.
+2. **Disprove:** Assume the fix will fail. Identify the weakest link before writing code.
+3. **Round-Trip:** `write` → `read` → `confirm` before committing.
+4. **Scope:** Do not modify files outside the current task. Every new file needs a purpose; every new function needs a caller.
+5. **Reflect:** Before every commit, state: 2 assumptions, the weakest link, confidence (0-1).
+
+## Adversarial Self-Review — MANDATORY before committing plans or code
+
+1. **For every code sketch:** State 3 inputs that produce wrong output or silent failure. Fix them before committing. No empty-string returns, no unhandled nulls, no "it probably works."
+2. **For every plan:** Before declaring done, list 5 ways it fails silently. If you can't find 5, you haven't looked. At least 2 must be structural (wrong ordering, scaling broken signal, missing feedback loop), not edge cases (null input, empty string). Check: missing fallbacks, wrong assumptions about return shapes, state drift between systems, capacity growth, false resolution/deprecation.
+3. **For every classification/routing:** What happens on misclassification? If wrong scope → wrong route → wrong consumer, what's the blast radius? If it's "noise in SWE context" that's acceptable. If it's "constraint deleted" that's not.
+4. **Verify actual return shapes.** Read the actual code, not the plan's assumption. If a plan says "returns `invariant_tested`" — grep for it. Claims about what code returns are wrong until verified.
+5. **Don't scale broken signal.** Before building infrastructure (dedup, persistence, escalation) on a data source, verify the source is correct. Building on wrong signal scales noise.
+
+## Architecture Laws
+
+1. **300-line file limit.** Split before adding.
+2. **No ambient state.** Functions receive data as parameters. Pipeline handlers receive explicit params via `deps`.
+3. **Named exports, not default exports.**
+4. **Single source of truth.** If data exists in one place, derive everywhere else.
+5. **Zero dead code.** Delete commented-out code, unreachable branches, unused imports.
+6. **Deletion over configuration.** Don't add `if` or `.env` flags to toggle features.
+7. **One mechanism per concern.** Two things doing the same job = delete one.
+8. **Provider-specific logic stays in the provider adapter.** Agents never branch on provider type.
+9. **Keep architecture docs current.** Changes to states, agent context, data flow, or transitions → update `docs/PHALANX_ARCHITECTURE.md` + `ARCHITECTURE_CHANGELOG.md` in same commit.
+10. **Verification is LLM review, not string matching.** No file.includes(), no grep-based checks, no literal string matching on generated code.
+11. **Dependency direction.** Imports flow downward only: `routes → pipeline → agents → core → utils → config`. No upward imports. If a lower layer needs something from above, extract the shared piece down to the appropriate level.
+
+## Prompt Authoring
+
+1. **Context only, never directives.** Agent prompts describe the situation. Never tell the agent which commands to run, which files to create, or which tools to use.
+2. **Abstract, never specific.** Prompts never name specific shell commands, file paths, or tool names.
+3. **Fix the prompt, not the output.** Never add runtime workarounds to compensate for a bad prompt.
