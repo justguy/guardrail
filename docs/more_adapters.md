@@ -6,6 +6,9 @@ This document is GTM and adapter strategy, not a security guarantee. Every adapt
 - Guardrail does not sandbox hostile code or certify third-party integrations as safe.
 - Open-source adapters should prefer small, explicit, maintainable integration surfaces over adapter-specific magic.
 - Any adapter claim about CI, IDEs, or orchestration frameworks should be backed by the same structured logging, fail-closed behavior, and approval semantics as core Guardrail.
+- The open-source build shape should stay consistent: rich supervisor result -> `adapter-result/v1` translation -> pure-data public profile.
+- Public GitHub profiles should be SHA-pinned, locally validated, and treated as untrusted data until they pass Guardrail validation.
+- Any stdout/stderr surfaced through adapters should be clipped and logged as bounded summaries, not dumped verbatim into audit logs.
 
 If OpenClaw is your wedge into consumer AI, here are the three adapters you should ship to capture the rest of the ecosystem.
 
@@ -14,30 +17,31 @@ Right now, the fastest-growing segment of AI engineering isn't standalone bots; 
 
 The Problem: These tools request permission to run terminal commands to test the code they just wrote. Developers blindly click "Approve" 50 times an hour, completely defeating the purpose of a human-in-the-loop. It’s a massive vector for accidental system damage.
 
-The Adapter: You ship a guardrail-cline-mcp (Model Context Protocol) server or an Aider configuration script.
+The Adapter: You ship an Aider `env-shim` profile first, plus a Cline-oriented profile that is versioned for the future MCP transport. In Phase 1, Guardrail should execute `stdin-json` and `env-shim` adapters only; `mcp` can be recognized in profile metadata but blocked at runtime until the transport exists.
 
-The Pitch: Instead of giving the IDE agent raw bash access, you give it Guardrail. The developer approves the boundaries once (e.g., "You can run npm run * and edit files in src/, but nothing else"). The agent can then iterate rapidly within that Green zone without prompting the human, but hits a hard wall (Exit 12) if it tries to install a new package without permission.
+The Pitch: Instead of giving the IDE agent raw bash access, you give it Guardrail. The developer approves the boundaries once (e.g., "You can run npm run * and edit files in src/, but nothing else"). The agent can then iterate rapidly within that Green zone without prompting the human, but hits a hard wall (Exit 12) if it tries to install a new package without permission. Public profiles for these tools should stay declarative and target the same versioned `adapter-result/v1` contract.
 
 2. The Enterprise Gatekeeper: GitHub Actions (guardrail-action)
 If Guardrail is a contract layer, GitHub Actions is where contracts are actually signed in the real world. This is your pure B2B play.
 
 The Problem: "Supply Chain Attacks." A junior dev imports a cool open-source GitHub Action, or writes a messy run: script. That script gets compromised upstream and starts exfiltrating the NPM_TOKEN during the CI build.
 
-The Adapter: A native GitHub Action published to the marketplace.
+The Adapter: A native GitHub Action published to the marketplace, or a pinned action wrapper that shells into `guardrail adapter run` with a declarative profile checked into the repo.
 
-YAMLO ,
+```yaml
 - uses: phalanx/guardrail-action@v1
   with:
     manifest: .guardrail/ci-build.approved.json
     command: npm run build
-The Pitch: "Stop silent CI drift." If an updated package post-install script tries to spawn an unauthorized binary or reach out to the network, Guardrail catches it natively in the runner and fails the build with a beautifully formatted GitHub PR comment detailing the exact drift.
+```
+The Pitch: "Stop silent CI drift." If an updated package post-install script tries to spawn an unauthorized binary or reach out to the network, Guardrail catches it natively in the runner and fails the build with a structured, reviewable explanation of the exact drift. If the profile is sourced externally, it should be SHA-pinned the same way community recipes are.
 
 3. The Builder Ecosystem: LangChain / Vercel AI SDK
 While OpenClaw is a finished product, thousands of companies are building their own internal versions of Project Phalanx. They are using orchestration frameworks like LangChain, LlamaIndex, or Vercel's AI SDK.
 
 The Problem: When developers want to give their custom LangChain agents the ability to run code, they have to use dangerous built-in tools like LangChain's BashProcess or Python REPLs, which are walking security nightmares.
 
-The Adapter: Ship NPM packages: @guardrail/langchain-tools and @guardrail/vercel-ai-tools.
+The Adapter: Ship NPM packages such as `@guardrail/langchain-tools` and `@guardrail/vercel-ai-tools`, but keep their execution surface thin: they should either invoke Guardrail's native executor directly or compile down to the same adapter engine and public schema, not re-implement drift logic in each package.
 
 The Pitch: You provide a drop-in replacement for the framework's native shell tools. Developers just import GuardrailTool, point it to a recipe manifest, and suddenly their custom LangChain agent is perfectly bounded by your Phase 1 & 2 taxonomy engine.
 

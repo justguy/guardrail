@@ -251,6 +251,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | Recipe install (local) | Done | `guardrail recipe install <path>` to `~/.guardrail/recipes/` |
 | Recipe install (remote) | Done | `guardrail recipe install <url>` with fail-closed trusted source enforcement |
 | GitHub recipe distribution (`github://`, public publish flow) | Not started | Design only today — see `docs/github-recipe-distribution.md` |
+| Adapter system (`adapter run`, profile install, shim flow) | Not started | Design only today — see `docs/adapter-implementation-plan.md` |
 | Local recipe registry | Done | `~/.guardrail/recipes/`, duplicate/version conflict handling |
 | Trusted source config | Done | `~/.guardrail/config.json` with `trusted_sources` array |
 | Self-verification | Done | `guardrail verify` — 7 checks: modules, validation, signing, safe defaults, risk, dangerous, recipes |
@@ -483,11 +484,21 @@ Three product phases, each with its own go-to-market motion.
 
 | # | Feature | Target | Unlocks | Status |
 |---|---------|--------|---------|--------|
-| D0a | GitHub SHA-pinned install (`github://owner/repo/path@sha`) | v0.2 | Immutable community recipes | Not started — spec in docs/github-recipe-distribution.md. Fetches from raw.githubusercontent.com, pins content hash in .pin.json sidecar, re-verifies on run. |
-| D0b | Recipe publish (`guardrail recipe publish`) | v0.2 | One-command community contribution | Not started — spec in docs/github-recipe-distribution.md. Lint → scrub → fork → PR against guardrail-dev/recipes. RED blocked from public registry. |
-| D0c | Template → recipe bridge (`template create --from-manifest`, `template publish`, `template list`, trust hash comparison) | v0.2 | Local-first authoring flow | Not started — spec in docs/github-recipe-distribution.md. Templates live in `.guardrail/templates/`, become recipes via publish. Modified templates lose source trust. |
+| D0a | GitHub SHA-pinned install (`github://owner/repo/path@sha`) | v0.2 | Immutable community recipes | Not started — spec in docs/github-recipe-distribution.md. Fetches from GitHub, requires full commit pinning, stores remote metadata in `.pins/<version>.json`, and re-verifies source hash on run. |
+| D0b | Recipe publish (`guardrail recipe publish`) | v0.2 | One-command community contribution | Not started — spec in docs/github-recipe-distribution.md. Lint → scrub metadata only → fork → PR against guardrail-dev/recipes. Shell manifests are rejected; RED is blocked from public registry. |
+| D0c | Template → recipe bridge (`template create --from-manifest`, `template publish`, `template list`, trust hash comparison) | v0.2 | Local-first authoring flow | Not started — spec in docs/github-recipe-distribution.md. Templates live in `.guardrail/templates/`, become recipes via publish, and modified templates lose source trust via definition-hash comparison. |
 | D1 | npm registry (`@guardrail/recipes`) | v0.3 | Developer ergonomics | Not started — convenience layer on top of GitHub repo, not a replacement. npm versions are immutable once published; content hash is stable. Requires publish pipeline. Ship after GitHub-based distribution is proven. |
 | D2 | Self-hosted recipe registry (JSON API) | v0.5 | Enterprise air-gap | Not started — thin static API: `GET /v1/recipes`, `GET /v1/recipes/{category}/{name}`, `GET /v1/recipes/{category}/{name}/versions`. Simplest impl is S3+CloudFront or R2, write-once, no database. Becomes `registry.guardrail.dev`; enterprise customers run on-prem instances declared in org policy `trusted_registries`. |
+
+### Adapter System (v0.2–v0.3)
+
+| # | Feature | Target | Unlocks | Status |
+|---|---------|--------|---------|--------|
+| A0a | Rich command supervisor context | v0.2 | Stable agent/tool integrations | Not started — spec in docs/adapter-implementation-plan.md. `runSupervisor()` returns bounded worker output, drift diffs, reason, and telemetry instead of a minimal pass/fail summary. |
+| A0b | `adapter-result/v1` translation layer + declarative profiles | v0.2 | Public open-source profile ecosystem | Not started — spec in docs/adapter-implementation-plan.md. Public profiles target a versioned schema, declare `schema_target`, and remain pure-data mappings. |
+| A0c | Adapter CLI + Phase 1 protocols (`stdin-json`, `env-shim`) | v0.2 | OpenClaw/Aider integration | Not started — spec in docs/adapter-implementation-plan.md. `mcp` profiles are recognized but blocked until runtime support exists. |
+| A0d | GitHub SHA-pinned adapter profile install | v0.2 | Safe public profile sharing | Not started — spec in docs/adapter-implementation-plan.md. Uses `github://owner/repo/path@sha`, trusted source enforcement, immutable installs, and `.pins/<version>.json` metadata. |
+| A1 | Signed index + bare-name profile install | v0.3 | Discovery and easier onboarding | Not started — deferred until a signed index exists. Bare-name install should not ship before public-key verification is in place. |
 
 ---
 

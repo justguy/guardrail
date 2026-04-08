@@ -412,12 +412,18 @@ Here’s the clean version: a **build-oriented feature list** organized so you c
 * Run OpenClaw through Guardrail wrapper
 * Intercept proposed executions
 * Enforce manifest before spawn
+* Phase 1 protocols: `stdin-json` and `env-shim`
+* Recognize `mcp` profiles but block runtime use until transport support exists
 
 ## 49. Native executor integration
 
 * Guardrail as execution backend for agent tasks
 * Structured negotiation exchange
 * Agent identity capture
+* Rich supervisor execution context for command-mode integrations
+* Versioned public adapter result schema
+* Translation layer between Guardrail internals and public tool contracts
+* Declarative adapter profile schema with explicit schema target
 
 ## 50. Agent identity and governance
 
@@ -427,6 +433,8 @@ Here’s the clean version: a **build-oriented feature list** organized so you c
 * Per-agent risk cap
 * Per-agent metrics
 * Per-agent revocation
+* Adapter profile provenance and source hash capture
+* Structured adapter log and audit events
 
 ## 51. Agent strict mode
 

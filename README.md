@@ -335,6 +335,23 @@ guardrail run --json --non-interactive --approved-manifest .guardrail/approved.j
 
 ---
 
+## Planned Adapter System
+
+Guardrail's next open-source integration layer is an **adapter system** for agent tools and local wrappers. The goal is to let tools like OpenClaw and Aider route execution through the same Guardrail enforcement pipeline without scraping terminal output or inventing adapter-specific drift logic.
+
+Planned architecture:
+
+- **Rich supervisor result**: `runSupervisor()` returns bounded machine-readable context including native status, drift diffs, clipped stdout/stderr, and telemetry
+- **Stable public schema**: the adapter engine translates that internal result into a versioned public contract: `adapter-result/v1`
+- **Pure-data profiles**: public profiles declare a `schema_target`, map fields from `adapter-result/v1`, and cannot execute arbitrary code
+- **Pinned distribution**: Phase 1 public profiles install from SHA-pinned GitHub URLs, not from bare names
+- **Protocol limits**: Phase 1 supports `stdin-json` and `env-shim`; `mcp` profiles may exist but runtime support is deferred
+- **Logging and audit**: adapter runs emit structured log/audit events, and any stdout/stderr exposed to adapters is clipped to bounded sizes
+
+This is planned work, not part of the current shipped CLI surface. See [docs/adapter-implementation-plan.md](docs/adapter-implementation-plan.md) for the build plan.
+
+---
+
 ## When to Use It
 
 - **Repo-local build, test, lint commands** -- lock down what your dev scripts actually run
