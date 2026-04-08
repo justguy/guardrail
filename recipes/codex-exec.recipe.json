@@ -1,0 +1,231 @@
+{
+  "id": "codex-exec",
+  "name": "Codex Exec",
+  "description": "Run codex exec through a Guardrail-managed wrapper with inline prompts, prompt files, and injected file content.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "guardrail_repo": {
+      "type": "string",
+      "description": "Path to the Guardrail checkout that contains the Codex wrapper helper",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 8
+      }
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Inline prompt text to send to Codex. Fresh approval is required each time.",
+      "approval_mode": "review_each_time",
+      "required": false
+    },
+    "prompt_file": {
+      "type": "string",
+      "description": "Relative file path whose contents become part of the prompt payload",
+      "approval_mode": "path_policy",
+      "required": false,
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "inject_files": {
+      "type": "string",
+      "description": "Comma-separated relative file paths to inject into the prompt as tagged file blocks",
+      "approval_mode": "list",
+      "required": false,
+      "item_validator": {
+        "type": "string",
+        "approval_mode": "path_policy",
+        "rules": {
+          "must_be_relative": true,
+          "deny_segments": [".."],
+          "max_depth": 12
+        }
+      }
+    },
+    "model": {
+      "type": "string",
+      "description": "Optional Codex model name",
+      "pattern": "^[A-Za-z0-9._:-]{1,80}$",
+      "required": false
+    },
+    "profile": {
+      "type": "string",
+      "description": "Optional Codex profile from config.toml",
+      "pattern": "^[A-Za-z0-9._-]{1,80}$",
+      "required": false
+    },
+    "sandbox": {
+      "type": "string",
+      "description": "Sandbox mode for Codex shell commands",
+      "enum": ["read-only", "workspace-write", "danger-full-access"],
+      "required": false
+    },
+    "working_dir": {
+      "type": "string",
+      "description": "Relative working directory Codex should use as its root",
+      "approval_mode": "path_policy",
+      "required": false,
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "add_dirs": {
+      "type": "string",
+      "description": "Comma-separated extra writable directories for Codex",
+      "approval_mode": "list",
+      "required": false,
+      "item_validator": {
+        "type": "string",
+        "approval_mode": "path_policy",
+        "rules": {
+          "must_be_relative": true,
+          "deny_segments": [".."],
+          "max_depth": 12
+        }
+      }
+    },
+    "image_files": {
+      "type": "string",
+      "description": "Comma-separated relative image paths to attach to the initial prompt",
+      "approval_mode": "list",
+      "required": false,
+      "item_validator": {
+        "type": "string",
+        "approval_mode": "path_policy",
+        "rules": {
+          "must_be_relative": true,
+          "deny_segments": [".."],
+          "max_depth": 12,
+          "allowed_extensions": [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+        }
+      }
+    },
+    "json": {
+      "type": "boolean",
+      "description": "Emit Codex events as JSONL",
+      "default": false,
+      "required": false
+    },
+    "output_last_message_file": {
+      "type": "string",
+      "description": "Relative path where Codex should write the final assistant message",
+      "approval_mode": "path_policy",
+      "required": false,
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "output_schema_file": {
+      "type": "string",
+      "description": "Relative path to a JSON Schema file for structured final output",
+      "approval_mode": "path_policy",
+      "required": false,
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "color": {
+      "type": "string",
+      "description": "Color behavior for Codex output",
+      "enum": ["always", "never", "auto"],
+      "required": false
+    },
+    "oss": {
+      "type": "boolean",
+      "description": "Use the configured local OSS provider",
+      "default": false,
+      "required": false
+    },
+    "local_provider": {
+      "type": "string",
+      "description": "Local OSS provider to use when oss=true",
+      "enum": ["lmstudio", "ollama"],
+      "required": false
+    },
+    "skip_git_repo_check": {
+      "type": "boolean",
+      "description": "Allow Codex to run outside a git repository",
+      "default": false,
+      "required": false
+    },
+    "ephemeral": {
+      "type": "boolean",
+      "description": "Run Codex without persisting session files to disk",
+      "default": false,
+      "required": false
+    },
+    "full_auto": {
+      "type": "boolean",
+      "description": "Use Codex full-auto mode. Leave sandbox empty when enabled.",
+      "default": false,
+      "required": false
+    }
+  },
+  "steps": [
+    {
+      "id": "run-codex-exec",
+      "description": "Build the final prompt payload from inline text, prompt file content, and injected files, then invoke codex exec",
+      "run": {
+        "command": "node",
+        "args": [
+          "{{inputs.guardrail_repo}}/src/codex-exec-wrapper.js",
+          "--prompt", "{{inputs.prompt}}",
+          "--prompt-file", "{{inputs.prompt_file}}",
+          "--inject-files", "{{inputs.inject_files}}",
+          "--model", "{{inputs.model}}",
+          "--profile", "{{inputs.profile}}",
+          "--sandbox", "{{inputs.sandbox}}",
+          "--working-dir", "{{inputs.working_dir}}",
+          "--add-dirs", "{{inputs.add_dirs}}",
+          "--image-files", "{{inputs.image_files}}",
+          "--json", "{{inputs.json}}",
+          "--output-last-message-file", "{{inputs.output_last_message_file}}",
+          "--output-schema-file", "{{inputs.output_schema_file}}",
+          "--color", "{{inputs.color}}",
+          "--oss", "{{inputs.oss}}",
+          "--local-provider", "{{inputs.local_provider}}",
+          "--skip-git-repo-check", "{{inputs.skip_git_repo_check}}",
+          "--ephemeral", "{{inputs.ephemeral}}",
+          "--full-auto", "{{inputs.full_auto}}"
+        ],
+        "mode": "structured"
+      },
+      "idempotent": true
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Never pass --dangerously-bypass-approvals-and-sandbox",
+      "Prompt-bearing file inputs are limited to approved relative paths",
+      "Injected files are appended as explicit tagged blocks so the prompt boundary is visible",
+      "The wrapper only forwards supported codex exec flags and drops unset parameters"
+    ],
+    "invariants": [
+      "mode: structured",
+      "At least one prompt source must be present before Codex runs",
+      "full_auto cannot be combined with an explicit sandbox value",
+      "local_provider is only allowed when oss=true"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "custom",
+  "tags": ["codex", "agent", "prompt", "files"],
+  "channel": "community",
+  "signature": null
+}

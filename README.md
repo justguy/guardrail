@@ -216,6 +216,12 @@ guardrail run --recipe git-branch-cleanup@1.0.0 --input repo_path=. --dry-run
 # Execute a recipe interactively (stores approval manifest)
 guardrail run --recipe git-branch-cleanup --input repo_path=.
 
+# Run Codex with an inline prompt plus injected file context
+guardrail run --recipe codex-exec \
+  --input working_dir=. \
+  --input prompt="Review this change for security issues." \
+  --input inject_files=src/recipe-install.js,src/recipe-runner.js
+
 # Reuse a previously approved recipe manifest in CI
 guardrail run --recipe git-branch-cleanup \
   --input repo_path=. \
@@ -247,6 +253,15 @@ Recipes are packaged execution bundles with:
 - optional recipe metadata that can request extra approval sensitivity
 
 Recipe execution uses a recipe-specific supervisor in front of the native recipe executor. Dry-runs stay approval-free previews. Real execution stores and reuses a recipe manifest the same way command, workflow, and template mode do.
+
+The bundled `codex-exec` recipe is a Guardrail-managed wrapper around `codex exec`. It supports:
+
+- inline prompt text
+- prompt files
+- injected file content blocks
+- model, profile, sandbox, workspace, JSON output, and schema/output file flags
+
+Important caveat: recipe approval reuse binds to the approved file paths, not the contents of prompt-bearing files. If the contents of `prompt_file` or `inject_files` matter to the approval decision, use a fresh approval run or inline the prompt text for that execution.
 
 For public recipe distribution:
 
@@ -425,7 +440,7 @@ guardrail demo blocked
 
 ## Testing
 
-1044 tests, all passing, zero dependencies. Node.js built-in test runner only.
+1048 tests, all passing, zero dependencies. Node.js built-in test runner only.
 
 ```bash
 npm test              # full suite

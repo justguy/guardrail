@@ -323,3 +323,29 @@ In the `list` command dispatch in `cli.js`, `existsSync` was imported from `node
 
 **Fix:** Changed import to `const { existsSync } = await import('node:fs');`
 **Status:** Resolved
+
+---
+
+### ISSUE-018: claude-cli-invoke recipe v1.0.0 had 4 unwired inputs and ambiguous branching
+
+**Found:** 2026-04-07, during recipe review
+**Severity:** Medium — recipe would execute but with phantom capabilities
+
+**Problem:**
+The v1.0.0 recipe declared `system_prompt`, `allowed_tools`, `working_dir`, and `max_budget_usd` as inputs but none appeared in any step's args. The description claimed those capabilities. Two invoke steps (inline vs file) existed with no branching metadata — the recipe system has no conditional routing, so it was unclear how step selection would work. The file-based step used `sh -c` piping, which is a weaker execution shape than structured mode.
+
+**Root cause:**
+Recipe was drafted with aspirational inputs and two mutually-exclusive steps in a system that only supports sequential execution. No self-review caught the mismatch between declared inputs and actual args.
+
+**Fix:**
+1. Collapsed to single step, single execution shape — no branching, no shell
+2. Wired all 10 inputs directly into the `claude` CLI args
+3. Replaced `working_dir` with `add_dir` (wired to `--add-dir`, the correct Claude CLI mechanism)
+4. Added `session_name` (wired to `--name`) for repeatable invocation tracking
+5. Removed `auto` from permission mode enum (bypasses approvals, conflicts with guardrail intent)
+6. Made all inputs required — no optional inputs means no phantom features
+7. Rewrote description to match actual behavior
+8. Bumped version to 2.0.0
+
+**Files changed:** `recipes/claude-cli-invoke.recipe.json`
+**Status:** Resolved

@@ -79,6 +79,24 @@ Recipe version rules:
 - Recipe dry-run remains a preview path and does not require an approved manifest.
 - Recipe input constraints validate what values are allowed, but approval reuse still binds to the exact resolved input values saved in the manifest.
 
+Bundled Codex recipe:
+
+- `recipes/codex-exec.recipe.json` wraps `codex exec` through `src/codex-exec-wrapper.js`
+- supports inline prompt text, prompt files, injected file-content blocks, model/profile selection, sandbox selection, workspace roots, JSON output, and schema/output file flags
+- use it when an agent needs a bounded, repeatable Codex invocation instead of calling `codex exec` directly
+- prompt-bearing file paths are approved as paths, not content hashes; if prompt file contents changed, use a fresh approval run
+
+Example interactive run:
+
+```bash
+cd /Users/adilevinshtein/Documents/dev/Guardian
+node src/cli.js run --recipe codex-exec \
+  --input working_dir=. \
+  --input prompt="Review src/recipe-install.js for private-repo edge cases." \
+  --input inject_files=src/recipe-install.js,src/recipe-runner.js \
+  --manifest .guardrail/recipes/codex-exec.approved.json
+```
+
 Public GitHub recipe install rules:
 
 - Use `guardrail recipe install github://owner/repo/path.json@sha` with an explicit commit SHA.

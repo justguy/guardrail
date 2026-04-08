@@ -52,7 +52,8 @@ src/
   incident-hooks.js      Incident response triggers + actions
   shared.js              Utilities (deep equality, atomic writes, env building, subprocess execution)
   recipe-runner.js       Recipe resolution by ID, input validation, dry-run orchestration
-  recipe-install.js      Local registry management, install from path/URL, trusted sources
+  recipe-install.js      Local registry, install from path/URL/github://, SHA pinning, trusted sources
+  recipe-publish.js      Recipe publish: manifest→recipe, personal data scrub, gh CLI PR flow
   verify.js              Self-verification checks (core imports, signing, safe defaults, risk)
   demo-scenarios.js      Demo pack: recipe, trust, blocked scenarios
 
@@ -63,6 +64,7 @@ recipes/
   dep-upgrade            Packages: dependency upgrade within patch/minor scope (community, medium)
   infra-deploy           Infra: Terraform validate/plan/apply scoped to env (verified, high)
   openclaw-wrapper       OpenClaw: wrapped flow with scope enforcement (community, high)
+  claude-cli-invoke      Custom: single-shot Claude CLI invocation with model/effort/tools/budget (community, medium)
 
 tests/
   test-core.js                Contract, manifest, risk, approval, drift, validator, logger tests
@@ -93,7 +95,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~14,500 lines of source, ~14,000 lines of tests, 1044 passing tests, 0 dependencies.
+**Stats:** ~14,500 lines of source, ~14,000 lines of tests, 1048 passing tests, 0 dependencies.
 
 ---
 
@@ -325,7 +327,7 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Workflow engine (Bucket 2 MVP)
 - [x] Template system (individual + workflow templates)
 - [x] Adversarial test suite
-- [x] Initial MVP closed; current full suite is 1044 passing tests, 0 dependencies
+- [x] Initial MVP closed; current full suite is 1048 passing tests, 0 dependencies
 
 ### Phase 2 — Hardening
 
@@ -637,6 +639,7 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 | test-input-validator.js | 91 | Shared input parsing, coercion, enum/range/pattern validation, exact-value approval edge cases |
 | test-github-install.js | 38 | GitHub SHA-pinned install, pin metadata, CLI parsing, remote verification, authenticated fallback, loadRawJson |
 | test-recipe-publish.js | 47 | Manifest-to-recipe conversion, personal-data scrub, PR body, publish dry-run guards |
-| **Current runner total** | **1044 tests / 224 suites** | Reported by `npm test`; use the command output as the canonical count |
+| test-codex-recipe.js | 4 | Codex exec recipe schema plus prompt/file wrapper helper assembly |
+| **Current runner total** | **1048 tests / 225 suites** | Reported by `npm test`; use the command output as the canonical count |
 
-Run: `npm test` (all 1044), `npm run test:e2e` (verification/e2e/adversarial suites), `npm run test:core` (core unit/integration suites), `npm run test:acceptance` (56 feature acceptance tests)
+Run: `npm test` (all 1048), `npm run test:e2e` (verification/e2e/adversarial suites), `npm run test:core` (core unit/integration suites), `npm run test:acceptance` (56 feature acceptance tests)
