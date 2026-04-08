@@ -289,6 +289,8 @@ In workflow mode, drift detection also compares:
 
 One manifest path stores one approval unit. Reusing a path for a different command or workflow intentionally overwrites the previous approval.
 
+Workflow definitions may include `recipe_ref` steps. In that case, the workflow manifest remains the single approval unit and captures each referenced recipe's resolved version, recipe hash, resolved inputs, and any prompt-bearing file hashes that were part of the approved workflow.
+
 ## Contract Normalization
 
 Normalization rules:

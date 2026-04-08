@@ -94,6 +94,12 @@ function writeDefFile(dir, def, filename = 'workflow.json') {
   return filePath;
 }
 
+function writeRecipeFile(dir, recipe, filename = `${recipe.id}.recipe.json`) {
+  const filePath = join(dir, filename);
+  writeFileSync(filePath, JSON.stringify(recipe, null, 2), 'utf8');
+  return filePath;
+}
+
 /**
  * Build a normalised workflow and its manifest for comparison tests.
  */
@@ -196,6 +202,19 @@ describe('Workflow Definition Parsing', () => {
     assert.equal(loaded.name, 'service-workflow');
     assert.equal(loaded.services.length, 1);
     assert.equal(loaded.steps.length, 4);
+  });
+
+  it('recipe_ref steps require a recipe specifier', () => {
+    const def = makeDefinition({
+      steps: [{
+        id: 'step_a',
+        type: 'recipe_ref',
+        inputs: {},
+        on: { success: 'done', failure: 'abort' },
+      }],
+    });
+    const filePath = writeDefFile(tmpDir, def, 'missing-recipe-ref.json');
+    assert.throws(() => loadWorkflowDefinition(filePath), /recipe specifier/);
   });
 });
 
@@ -780,6 +799,47 @@ describe('Workflow Risk Aggregation', () => {
     assert.ok(!risk.reasons.includes('secret injection enabled'));
     assert.ok(!risk.reasons.includes('environment variable inheritance enabled'));
   });
+
+  it('workflow with community recipe_ref includes recipe reference risk reasons', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-recipe-risk-'));
+    try {
+      mkdirSync(join(dir, 'recipes'), { recursive: true });
+      writeRecipeFile(join(dir, 'recipes'), {
+        id: 'community-step',
+        name: 'Community Step',
+        description: 'Community recipe',
+        version: '1.0.0',
+        author: 'tester',
+        category: 'custom',
+        channel: 'community',
+        approval_required: true,
+        risk_level: 'medium',
+        inputs: {},
+        steps: [{
+          id: 'main',
+          description: 'echo',
+          run: { command: 'echo', args: ['hello'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      });
+      const def = makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'community-step',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      });
+
+      const normalized = normalizeWorkflowDefinition(def, dir);
+      const risk = evaluateWorkflowRisk(normalized, { trustClass: 'reviewed_internal', projectRoot: dir });
+      assert.ok(risk.riskLevel === 'yellow' || risk.riskLevel === 'red');
+      assert.ok(risk.reasons.some((reason) => reason.includes('community recipe reference')));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ===========================================================================
@@ -1076,6 +1136,59 @@ describe('Workflow Normalization', () => {
     assert.equal(normalized.services[0].id, 'aaa_service');
     assert.equal(normalized.services[1].id, 'api');
   });
+
+  it('normalizes recipe_ref steps into pinned recipe metadata and hashed input files', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-recipe-ref-'));
+    try {
+      mkdirSync(join(dir, 'recipes'), { recursive: true });
+      writeFileSync(join(dir, 'prompt.txt'), 'Review this file\n', 'utf8');
+      writeRecipeFile(join(dir, 'recipes'), {
+        id: 'recipe-step',
+        name: 'Recipe Step',
+        description: 'A workflow-invoked recipe',
+        version: '1.0.0',
+        author: 'tester',
+        category: 'custom',
+        channel: 'community',
+        approval_required: true,
+        risk_level: 'medium',
+        inputs: {
+          prompt_file: {
+            type: 'string',
+            approval_mode: 'path_policy',
+            content_hash: true,
+            rules: { must_be_relative: true, deny_segments: ['..'], max_depth: 8 },
+          },
+        },
+        steps: [{
+          id: 'main',
+          description: 'echo file path',
+          run: { command: 'echo', args: ['{{inputs.prompt_file}}'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      });
+
+      const def = makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'recipe-step',
+          inputs: { prompt_file: 'prompt.txt' },
+          on: { success: 'done', failure: 'abort' },
+        }],
+      });
+
+      const normalized = normalizeWorkflowDefinition(def, dir);
+      const step = normalized.steps[0];
+      assert.equal(step.type, 'recipe_ref');
+      assert.equal(step.recipeRef.id, 'recipe-step');
+      assert.equal(step.recipeRef.resolvedVersion, '1.0.0');
+      assert.equal(step.recipeRef.resolvedInputs.prompt_file, 'prompt.txt');
+      assert.equal(step.recipeRef.inputContentHashes.prompt_file.path, 'prompt.txt');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ===========================================================================
@@ -1135,6 +1248,83 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
 
     assert.equal(result.status, 'approval_required');
     assert.equal(result.exitCode, STATUS_EXIT_CODES.approval_required);
+  });
+
+  it('executes chained recipe_ref steps under one approved workflow manifest', async () => {
+    mkdirSync(join(tmpDir, 'recipes'), { recursive: true });
+    writeRecipeFile(join(tmpDir, 'recipes'), {
+      id: 'recipe-one',
+      name: 'Recipe One',
+      description: 'First recipe',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{
+        id: 'main',
+        description: 'echo one',
+        run: { command: 'echo', args: ['one'], mode: 'structured' },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    });
+    writeRecipeFile(join(tmpDir, 'recipes'), {
+      id: 'recipe-two',
+      name: 'Recipe Two',
+      description: 'Second recipe',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{
+        id: 'main',
+        description: 'echo two',
+        run: { command: 'echo', args: ['two'], mode: 'structured' },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    });
+
+    const def = makeDefinition({
+      entryStep: 'step_a',
+      steps: [
+        {
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'recipe-one',
+          inputs: {},
+          on: { success: 'step_b', failure: 'abort' },
+        },
+        {
+          id: 'step_b',
+          type: 'recipe_ref',
+          recipe: 'recipe-two',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        },
+      ],
+    });
+    const defPath = writeDefFile(tmpDir, def, 'workflow-recipes.json');
+    const manifest = buildManifest(def, tmpDir);
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    const manifestPath = join(tmpDir, 'approved.workflow.recipes.json');
+    saveManifest(manifest, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'success');
+    assert.equal(result.stepsExecuted, 2);
   });
 });
 

@@ -129,6 +129,8 @@ If users need multiple workflows in the same repo, Guardrail also supports:
 
 Each manifest path stores one approval unit: one command contract or one workflow definition. The manifest also records the user-acknowledged risk assessment used for unattended reuse.
 
+Workflow definitions may include `recipe_ref` steps when the user wants one explicit workflow approval to cover multiple bounded recipe executions. That approval applies to the workflow definition as a whole, not to standalone recipe runs outside the workflow.
+
 ### Workflow Definition
 
 Guardrail v1 supports explicit multi-step workflows through a checked-in workflow definition file.
@@ -139,7 +141,7 @@ A workflow definition names:
 - the entry step
 - the maximum iteration count
 - optional named services
-- ordered task and service steps with explicit transitions
+- ordered task, service, and optional `recipe_ref` steps with explicit transitions
 
 Workflow approval is still explicit and immutable after approval. Any change to the workflow definition, service graph, transitions, project root, or risk assessment triggers re-approval.
 

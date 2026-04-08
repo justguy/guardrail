@@ -459,6 +459,7 @@ export function createRecipeManifest(recipe, recipeHash, riskAssessment, resolve
       allowUnverified: options.allowUnverified ?? false,
     },
     resolvedInputs,
+    inputContentHashes: options.inputContentHashes ?? {},
     riskAssessment: {
       trustClass:                 riskAssessment.trustClass   ?? 'unknown',
       riskLevel:                  riskAssessment.riskLevel    ?? 'red',
@@ -500,6 +501,19 @@ export function diffRecipeManifests(candidate, approved) {
     const aVal = approved.resolvedInputs?.[key];
     if (!deepEqual(cVal, aVal)) {
       diffs.push(`~ input "${key}": ${pretty(aVal)} -> ${pretty(cVal)}`);
+    }
+  }
+
+  const allInputHashes = new Set([
+    ...Object.keys(candidate.inputContentHashes ?? {}),
+    ...Object.keys(approved.inputContentHashes ?? {}),
+  ]);
+
+  for (const key of allInputHashes) {
+    const cVal = candidate.inputContentHashes?.[key];
+    const aVal = approved.inputContentHashes?.[key];
+    if (!deepEqual(cVal, aVal)) {
+      diffs.push(`~ inputContentHashes "${key}": ${pretty(aVal)} -> ${pretty(cVal)}`);
     }
   }
 

@@ -762,6 +762,26 @@ export function evaluateWorkflowRisk(normalizedWorkflow, options = {}) {
     allReasons.add('multi-step workflow');
   }
   for (const step of steps) {
+    if (step.type === 'recipe_ref' && step.recipeRef) {
+      let recipeRiskLevel = step.recipeRef.riskLevel === 'high'
+        ? RISK_LEVELS.RED
+        : step.recipeRef.riskLevel === 'medium'
+          ? RISK_LEVELS.YELLOW
+          : RISK_LEVELS.GREEN;
+      if (step.recipeRef.channel === 'community' && recipeRiskLevel === RISK_LEVELS.GREEN) {
+        recipeRiskLevel = RISK_LEVELS.YELLOW;
+      }
+      stepRiskLevels.push(recipeRiskLevel);
+      allReasons.add(`recipe step ${step.id} uses ${step.recipeRef.id}@${step.recipeRef.resolvedVersion}`);
+      if (step.recipeRef.channel === 'community') {
+        allReasons.add('community recipe reference');
+      }
+      if ((step.recipeRef.flaggedInputs || []).length > 0) {
+        allReasons.add(`recipe step ${step.id} includes flagged inputs`);
+      }
+      continue;
+    }
+
     if (!step.run) continue;
 
     // Build a contract-like object from the step's run block.

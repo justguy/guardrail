@@ -11,6 +11,7 @@ Use this guide when another coding agent needs to execute commands or workflows 
 5. Approval reuse is exact-value based today. If an input value changes, treat it as drift even when the template or recipe schema would allow the new value.
 6. Guardrail locks execution per manifest hash. Different manifests can run concurrently; the same approved execution cannot run twice at once.
 7. Prefer `README.md` and `docs/technical-status.md` over speculative design docs. If another document describes a feature that is not marked done there, treat it as planned, not available.
+8. If you need one approval to cover multiple recipes, use workflow mode with `recipe_ref` steps. Do not try to reuse one recipe manifest for several different recipes.
 
 ## Local CLI Entry Point
 
@@ -50,6 +51,12 @@ Non-interactive reuse:
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow run --definition <workflow-definition-path> --non-interactive --approved-manifest <approved-workflow-manifest-path>
 ```
 
+Workflow note:
+
+- Workflow steps can be `task`, `service_start`, `service_stop`, `service_restart`, or `recipe_ref`.
+- `recipe_ref` is the native answer when you want one workflow approval to cover multiple bounded recipe executions.
+- The workflow manifest captures each referenced recipe's resolved version, recipe hash, resolved inputs, and any prompt-bearing file hashes that were part of the approved workflow.
+
 ## Recipe Mode
 
 Interactive approval:
@@ -82,9 +89,12 @@ Recipe version rules:
 Bundled Codex recipe:
 
 - `recipes/codex-exec.recipe.json` wraps `codex exec` through `src/codex-exec-wrapper.js`
-- supports inline prompt text, prompt files, injected file-content blocks, model/profile selection, sandbox selection, workspace roots, JSON output, and schema/output file flags
+- supports inline prompt text, `input_files` prompt context, model/profile selection, sandbox selection, workspace roots, JSON output, and schema/output file flags
 - use it when an agent needs a bounded, repeatable Codex invocation instead of calling `codex exec` directly
-- prompt-bearing file paths are approved as paths, not content hashes; if prompt file contents changed, use a fresh approval run
+- repeat `--input input_files=...` to pass one or more prompt-bearing files
+- `input_files` are content-hash bound at approval time and rechecked immediately before execution
+- inline `prompt` values are `review_each_time`: they require fresh approval every run, even if unchanged
+- for unattended reuse, keep stable prompt material in `input_files` instead of inline prompt text
 
 Example interactive run:
 
@@ -93,8 +103,67 @@ cd /Users/adilevinshtein/Documents/dev/Guardian
 node src/cli.js run --recipe codex-exec \
   --input working_dir=. \
   --input prompt="Review src/recipe-install.js for private-repo edge cases." \
-  --input inject_files=src/recipe-install.js,src/recipe-runner.js \
+  --input input_files=src/recipe-install.js \
+  --input input_files=src/recipe-runner.js \
   --manifest .guardrail/recipes/codex-exec.approved.json
+```
+
+Bundled Claude recipe:
+
+- `recipes/claude-exec.recipe.json` wraps `claude --print` through `src/claude-exec-wrapper.js`
+- supports inline prompt text, `input_files` prompt context, explicit working directory control, `allowed_tools`, `max_budget_usd`, `system_prompt`, and `session_name`
+- `working_dir` sets the Claude process cwd; `add_dirs` only grants additional tool-access roots
+- inline `prompt` and `system_prompt` are `review_each_time`; reusable prompt context should live in `input_files`
+
+Example interactive run:
+
+```bash
+cd /Users/adilevinshtein/Documents/dev/Guardian
+node src/cli.js run --recipe claude-exec \
+  --input guardrail_repo=. \
+  --input working_dir=. \
+  --input prompt="Review tests/integration/authRedirectFlow.test.js for flakiness." \
+  --input input_files=tests/integration/authRedirectFlow.test.js \
+  --input model=sonnet \
+  --input effort=high \
+  --input mode=plan \
+  --input output_format=text \
+  --input max_budget_usd=1.00 \
+  --input allowed_tools=Read,Glob,Grep \
+  --input system_prompt="Focus on concrete reproduction steps and likely root causes." \
+  --input session_name=auth-review \
+  --manifest .guardrail/recipes/claude-exec.approved.json
+```
+
+AI recipe naming convention:
+
+- Use `<tool>-exec` for single-shot wrappers around one underlying AI CLI.
+- Use `*-workflow` or `*-lifecycle` only when the recipe owns multiple steps or service state.
+- Keep the recipe id, recipe filename, and wrapper helper aligned where possible.
+
+Bounded operational recipe naming convention:
+
+- Use `<domain>-<action>` for single-purpose operational recipes like `git-branch-cleanup` and `git-commit`.
+- Keep each recipe focused on one bounded action. Do not widen a commit recipe into push/merge/release behavior.
+
+Bundled git commit recipe:
+
+- `recipes/git-commit.recipe.json` wraps git staging plus `git commit` through `src/git-commit-wrapper.js`
+- it stages only the approved `paths` list and reads the commit text from `message_file`
+- `message_file` is content-hash bound at approval time and rechecked before execution
+- this recipe does not push; use a separate approval unit if push behavior is needed later
+
+Example interactive run:
+
+```bash
+cd /Users/adilevinshtein/Documents/dev/Guardian
+node src/cli.js run --recipe git-commit \
+  --input guardrail_repo=. \
+  --input repo_path=. \
+  --input paths=src/cli.js \
+  --input paths=README.md \
+  --input message_file=.guardrail/commit-message.txt \
+  --manifest .guardrail/recipes/git-commit.approved.json
 ```
 
 Public GitHub recipe install rules:
@@ -227,6 +296,56 @@ Minimal valid service-lifecycle workflow:
 }
 ```
 
+Minimal valid workflow with chained recipe executions under one approval:
+
+```json
+{
+  "version": 1,
+  "kind": "workflow_definition",
+  "name": "recipe-chain",
+  "projectRoot": ".",
+  "entryStep": "review",
+  "maxIterations": 3,
+  "services": [],
+  "steps": [
+    {
+      "id": "review",
+      "type": "recipe_ref",
+      "recipe": "codex-exec",
+      "inputs": {
+        "working_dir": ".",
+        "input_files": ["src/cli.js", "README.md"]
+      },
+      "on": {
+        "success": "commit",
+        "failure": "abort"
+      }
+    },
+    {
+      "id": "commit",
+      "type": "recipe_ref",
+      "recipe": "git-commit",
+      "inputs": {
+        "guardrail_repo": ".",
+        "repo_path": ".",
+        "paths": ["README.md"],
+        "message_file": ".guardrail/commit-message.txt"
+      },
+      "on": {
+        "success": "done",
+        "failure": "abort"
+      }
+    }
+  ]
+}
+```
+
+Recipe resolution inside workflows follows the same rules as standalone recipe mode:
+
+- `recipe: "name@1.2.3"` uses that exact installed version or fails.
+- `recipe: "name"` resolves the latest installed version at approval time.
+- The approved workflow pins the resolved recipe version and recipe hash. If the referenced recipe later changes, Guardrail treats that as workflow drift and stops for re-approval.
+
 For the first pass, use the smallest real route set:
 
 - `POST /api/start-project`
@@ -288,6 +407,8 @@ node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --non-interacti
 
 If this is workflow mode, run:
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow run --definition <WORKFLOW_DEFINITION_PATH> --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH>
+
+If one approval should cover multiple recipe executions, express that as a workflow whose steps are `recipe_ref` entries. Do not run the sub-recipes directly.
 
 If this is recipe mode, run:
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --recipe <RECIPE_ID[@VERSION]> --input key=value --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH>

@@ -478,8 +478,15 @@ describe('Recipe System: Example Recipes', () => {
     assert.ok(r.tags.includes('openclaw'));
   });
 
+  it('git-commit recipe is valid and categorized', () => {
+    const r = loadRecipe(join(recipeDir, 'git-commit.recipe.json'));
+    assert.equal(r.category, 'git');
+    assert.ok(r.tags.includes('commit'));
+    assert.equal(r.approval_required, true);
+  });
+
   it('all recipes have guardrails defined', () => {
-    const files = ['git-branch-cleanup', 'github-pr-merge', 'dep-upgrade', 'infra-deploy', 'openclaw-wrapper', 'npm-publish'];
+    const files = ['git-branch-cleanup', 'git-commit', 'github-pr-merge', 'dep-upgrade', 'infra-deploy', 'openclaw-wrapper', 'npm-publish'];
     for (const name of files) {
       const r = loadRecipe(join(recipeDir, `${name}.recipe.json`));
       assert.ok(r.guardrails.constraints?.length > 0, `${name} should have constraints`);

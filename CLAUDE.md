@@ -2,7 +2,7 @@
 
 ## What This Project Is
 
-Guardrail is a Node.js CLI (zero dependencies) that enforces contract-locked execution for CLI commands, multi-step workflows, and parameterized templates. It prevents scope drift by hashing execution contracts and blocking anything that doesn't match a previously approved manifest.
+Guardrail is a Node.js CLI (zero dependencies) that enforces contract-locked execution for CLI commands, multi-step workflows, parameterized templates, and recipe-based executions. It prevents scope drift by hashing execution contracts and blocking anything that doesn't match a previously approved manifest.
 
 ## Project Structure
 
@@ -17,6 +17,9 @@ src/recipe.js               Recipe packaging: schema validation, parsing, hashin
 src/recipe-index.js         Recipe indexing, category filtering, fuzzy search
 src/recipe-channel.js       Verified/community trust model, signature mock, enforcement
 src/recipe-executor.js      Native recipe execution, runtime guardrails, dry-run
+src/prompt-inputs.js        Prompt payload assembly + prompt-bearing file content hashing helpers
+src/codex-exec-wrapper.js   Structured wrapper for codex exec with input_files prompt context
+src/claude-exec-wrapper.js  Structured wrapper for claude --print with input_files prompt context
 src/resource-bounds.js      Resource constraint schema + runtime enforcement
 src/learning-mode.js        Step-by-step explanation engine for learning mode
 src/profile.js              User/environment profiles with persistence
@@ -48,7 +51,8 @@ src/service-registry.js     Service lifecycle (start/stop/restart)
 src/logger.js               NDJSON logging, terminal output formatting
 src/shared.js               Utilities (deep equality, atomic writes, env building)
 src/recipe-runner.js        Recipe resolution by ID, input validation, execution orchestrator
-src/recipe-install.js       Local registry, install from path/URL, trusted sources
+src/recipe-install.js       Local registry, install from path/URL/github://, SHA pinning, trusted sources
+src/recipe-publish.js       Recipe publish: manifest→recipe, personal data scrub, gh CLI PR flow
 src/verify.js               Self-verification checks (guardrail verify)
 src/demo-scenarios.js       Demo pack: recipe, trust, blocked scenarios
 src/risk-traits.js          Risk trait taxonomy, bucket classification, capability summary
@@ -72,6 +76,10 @@ tests/test-adversarial-e2e.js   Adversarial e2e: path traversal, agent bypass, s
 tests/test-gap-closure.js   Gap closure: recipe runner, install, verify, demo scenarios, versioning
 tests/test-feature-acceptance.js  Feature acceptance: 51 scenarios derived from README
 tests/test-input-validator.js     Input validation, risk traits, buckets, shell parsing
+tests/test-github-install.js     GitHub SHA-pinned install, pin metadata, CLI parsing, remote verification
+tests/test-recipe-publish.js     Manifest→recipe conversion, personal-data scrub, PR body, publish guards
+tests/test-codex-recipe.js       Codex recipe wrapper and prompt-input coverage
+tests/test-claude-recipe.js      Claude recipe wrapper and prompt-input coverage
 docs/technical-status.md    Current implementation status and roadmap
 docs/issues.md              Issue tracker — all bugs, fixes, and resolutions are logged here
 docs/acceptance-tests.md    Feature acceptance test matrix with results
@@ -87,7 +95,7 @@ docs/more_adapters.md       Adapter strategy: IDE, GitHub Actions, LangChain
 npm test
 ```
 
-All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Currently 957 tests, all passing.
+All tests use Node.js built-in test runner (`node:test`). No test framework dependencies. Run `npm test` for the current source of truth.
 
 ## Key Patterns
 
@@ -97,11 +105,12 @@ All tests use Node.js built-in test runner (`node:test`). No test framework depe
 - **Structured mode default**: Shell is explicit opt-in. Templates forbid shell entirely.
 - **No dependencies**: Only Node.js built-ins. Do not add npm dependencies.
 
-## Three Execution Paths
+## Four Execution Paths
 
 1. **Command mode** (`guardrail run -- cmd args`): Single command → contract → manifest → approval → execution
-2. **Workflow mode** (`guardrail workflow run --definition file`): Multi-step state machine with services and transitions
+2. **Workflow mode** (`guardrail workflow run --definition file`): Multi-step state machine with services, transitions, and optional `recipe_ref` chaining under one workflow approval
 3. **Template mode** (`guardrail run --template file --input k=v`): Parameterized contract with typed inputs, env handshake, rollback
+4. **Recipe mode** (`guardrail run --recipe name --input k=v`): Installed execution bundle → resolved inputs → recipe manifest → approval → native recipe executor
 
 Each has its own supervisor file, manifest path, and approval flow. They share contract.js, manifest.js, policy-engine.js, worker-interface.js, and validator.js.
 
@@ -133,7 +142,7 @@ Hash: `SHA256(canonical(template_def) + canonical(resolved_inputs) + canonical(e
 
 - Update `docs/technical-status.md` when adding features, fixing bugs, or changing the roadmap status.
 - Track all bugs and resolutions in `docs/issues.md`. Every issue gets a numbered entry (ISSUE-NNN) with problem, root cause, fix, and status. Update status when resolved.
-- Run `npm test` after changes — all 957+ tests must pass.
+- Run `npm test` after changes — all 1048+ tests must pass.
 - Follow existing patterns: pure validation functions return error arrays, supervisors handle approval flow, workers handle process spawning.
 - Keep zero dependencies. Only Node.js built-ins.
 - The test pattern uses `node:test` with `describe/it/assert`. Fixtures are built with helper functions (e.g., `makeIndividualTemplate()`).

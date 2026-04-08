@@ -2,6 +2,9 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { serializeStable, checkRegexSafety } from './contract.js';
 import { deepEqual, pretty, indexById, resolvePath } from './shared.js';
+import { resolveRecipeById, resolveInputs, parseRecipeSpecifier } from './recipe-runner.js';
+import { hashRecipe } from './recipe.js';
+import { collectRecipeInputContentHashes } from './prompt-inputs.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -13,6 +16,7 @@ const WORKFLOW_MANIFEST_VERSION = 2;
 
 const VALID_STEP_TYPES = new Set([
   'task',
+  'recipe_ref',
   'service_start',
   'service_stop',
   'service_restart',
@@ -112,6 +116,15 @@ function validateStepBody(step, serviceIds) {
       errors.push(`${prefix}: steps of type "task" must have a run block`);
     } else if (typeof step.run.command !== 'string' || step.run.command.trim() === '') {
       errors.push(`${prefix}: run.command must be a non-empty string`);
+    }
+  }
+
+  if (step.type === 'recipe_ref') {
+    if (typeof step.recipe !== 'string' || step.recipe.trim() === '') {
+      errors.push(`${prefix}: steps of type "recipe_ref" must have a recipe specifier`);
+    }
+    if (step.inputs !== undefined && (!step.inputs || typeof step.inputs !== 'object' || Array.isArray(step.inputs))) {
+      errors.push(`${prefix}: recipe_ref inputs must be an object when provided`);
     }
   }
 
@@ -345,14 +358,77 @@ function normalizeService(svc, projectRoot) {
   return normalized;
 }
 
-function normalizeStep(step, projectRoot) {
+export function buildWorkflowRecipeSearchDirs(projectRoot, basePath, explicitSearchDirs = []) {
+  const candidates = [
+    ...(Array.isArray(explicitSearchDirs) ? explicitSearchDirs : []),
+    resolvePath('recipes', projectRoot),
+    resolvePath('recipes', basePath),
+  ];
+
+  return [...new Set(candidates.map((entry) => resolvePath(entry, basePath)))];
+}
+
+function normalizeRecipeRefStep(step, projectRoot, options = {}) {
+  const searchDirs = buildWorkflowRecipeSearchDirs(projectRoot, options.basePath ?? projectRoot, options.recipeSearchDirs);
+  let resolvedRecipe;
+  try {
+    resolvedRecipe = resolveRecipeById(step.recipe, searchDirs);
+  } catch (err) {
+    throw new Error(`Workflow step "${step.id}": ${err.message}`);
+  }
+
+  let inputResult;
+  try {
+    inputResult = resolveInputs(resolvedRecipe.recipe, step.inputs || {}, { execution_shape: 'structured' });
+  } catch (err) {
+    throw new Error(`Workflow step "${step.id}": ${err.message}`);
+  }
+
+  const { version: requestedVersion } = parseRecipeSpecifier(step.recipe);
+  const recipeHash = hashRecipe(resolvedRecipe.recipe);
+  const flaggedInputs = (inputResult.flagged || []).map((entry) => ({
+    key: entry.key,
+    reasons: entry.reasons,
+    traits: entry.traits,
+    capabilities: entry.capabilities,
+    neverReuse: entry.never_reuse ?? false,
+  }));
+
   return {
+    specifier: step.recipe,
+    id: resolvedRecipe.recipe.id,
+    requestedVersion,
+    resolvedVersion: resolvedRecipe.version,
+    sourcePath: resolvedRecipe.sourcePath,
+    recipeHash,
+    channel: resolvedRecipe.recipe.channel ?? 'community',
+    riskLevel: resolvedRecipe.recipe.risk_level,
+    approvalRequired: resolvedRecipe.recipe.approval_required,
+    resolvedInputs: inputResult.resolved,
+    flaggedInputs,
+    inputContentHashes: collectRecipeInputContentHashes(resolvedRecipe.recipe, inputResult.resolved, {
+      cwd: projectRoot,
+    }),
+  };
+}
+
+function normalizeStep(step, projectRoot, options = {}) {
+  const normalized = {
     ...step,
     idempotent: step.idempotent ?? false,
     validator: step.validator ?? STEP_DEFAULTS.validator,
     updateSource: step.updateSource ?? STEP_DEFAULTS.updateSource,
     run: step.run ? normalizeRunBlock(step.run, projectRoot) : step.run,
   };
+
+  if (step.type === 'recipe_ref') {
+    normalized.recipeRef = normalizeRecipeRefStep(step, projectRoot, options);
+    delete normalized.recipe;
+    delete normalized.inputs;
+    delete normalized.run;
+  }
+
+  return normalized;
 }
 
 function normalizeRollbackStep(step, projectRoot) {
@@ -429,6 +505,10 @@ function diffStepFields(id, cStep, aStep) {
 
   if (cStep.serviceId !== aStep.serviceId && (cStep.serviceId !== undefined || aStep.serviceId !== undefined)) {
     diffs.push(`~ Step ${id} serviceId: ${pretty(aStep.serviceId)} -> ${pretty(cStep.serviceId)}`);
+  }
+
+  if (!deepEqual(cStep.recipeRef, aStep.recipeRef)) {
+    diffs.push(`~ Step ${id} recipeRef: ${pretty(aStep.recipeRef)} -> ${pretty(cStep.recipeRef)}`);
   }
 
   if (!deepEqual(cStep.run, aStep.run)) {
@@ -559,7 +639,7 @@ export function loadWorkflowDefinition(filePath) {
   return def;
 }
 
-export function normalizeWorkflowDefinition(definition, basePath) {
+export function normalizeWorkflowDefinition(definition, basePath, options = {}) {
   const projectRoot = resolvePath(definition.projectRoot ?? '.', basePath);
 
   const services = (definition.services ?? [])
@@ -567,7 +647,7 @@ export function normalizeWorkflowDefinition(definition, basePath) {
     .sort((a, b) => a.id.localeCompare(b.id));
 
   const steps = (definition.steps ?? [])
-    .map(step => normalizeStep(step, projectRoot))
+    .map(step => normalizeStep(step, projectRoot, { ...options, basePath }))
     .sort((a, b) => a.id.localeCompare(b.id));
 
   return {

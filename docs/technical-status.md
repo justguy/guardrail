@@ -13,11 +13,15 @@ src/
   cli.js                 Entry point, argument parsing, command routing
   contract.js            Contract creation, normalization, hashing, shell detection
   manifest.js            Manifest creation, persistence (atomic write), diff, comparison
-  workflow.js            Workflow definition loading, validation, linting, normalization, hashing
-  workflow-supervisor.js Workflow execution orchestrator (state machine, services, transitions)
+  workflow.js            Workflow definition loading, validation, linting, normalization, hashing, recipe_ref pinning
+  workflow-supervisor.js Workflow execution orchestrator (state machine, services, transitions, recipe_ref dispatch)
   template.js            Template engine: load, validate, lint, interpolate, hash, explain, simulate
   template-supervisor.js Template execution supervisor with rollback support
   recipe-supervisor.js   Recipe approval, drift detection, manifest reuse, runtime policy wiring
+  prompt-inputs.js       Prompt payload assembly + prompt-bearing file content hashing helpers
+  codex-exec-wrapper.js  Structured wrapper for codex exec with prompt/input_files support
+  claude-exec-wrapper.js Structured wrapper for claude --print with prompt/input_files support
+  git-commit-wrapper.js  Structured wrapper for exact-path staging plus git commit from a message file
   supervisor.js          Single-command execution orchestrator (approval, convergence, retry)
   worker-interface.js    Child process spawning (structured vs shell modes)
   policy-engine.js       Risk evaluation, trust classification, binary/env/path analysis
@@ -60,11 +64,13 @@ src/
 recipes/
   npm-publish            Packages: build, test, publish NPM package (verified, high)
   git-branch-cleanup     Git: safe merged branch deletion with preview (verified, medium)
+  git-commit             Git: exact-path staging plus commit from a hashed message file (community, medium)
   github-pr-merge        GitHub: batch merge approved PRs with CI gating (verified, high)
   dep-upgrade            Packages: dependency upgrade within patch/minor scope (community, medium)
   infra-deploy           Infra: Terraform validate/plan/apply scoped to env (verified, high)
   openclaw-wrapper       OpenClaw: wrapped flow with scope enforcement (community, high)
-  claude-cli-invoke      Custom: single-shot Claude CLI invocation with model/effort/tools/budget (community, medium)
+  codex-exec             Custom: structured Codex wrapper with input_files prompt context (community, medium)
+  claude-exec            Custom: structured Claude wrapper with input_files, cwd, tools, budget, and session controls (community, medium)
 
 tests/
   test-core.js                Contract, manifest, risk, approval, drift, validator, logger tests
@@ -95,7 +101,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~14,500 lines of source, ~14,000 lines of tests, 1048 passing tests, 0 dependencies.
+**Stats:** ~14,500 lines of source, ~14,000 lines of tests, 0 dependencies. Use `npm test` for the current passing count.
 
 ---
 
@@ -133,11 +139,11 @@ docs/                    Product requirements, specs, invariants, implementation
 | Workflow definition format | Done | JSON with steps, services, transitions, typed step dispatch |
 | Workflow validation | Done | Top-level schema, unique IDs, transitions, entry step, rollback validation |
 | Workflow linting | Done | Fatal errors (failure→done, shell mode, missing rollback) + advisory warnings |
-| Workflow normalization | Done | Sorted steps/services, default envPolicy, path resolution, idempotent defaults |
+| Workflow normalization | Done | Sorted steps/services, default envPolicy, path resolution, idempotent defaults, `recipe_ref` resolution/pinning |
 | Workflow hashing | Done | SHA-256 of canonical serialized workflow (includes rollback + rollback_policy) |
 | Workflow manifest (v2) | Done | Includes rollback section, rollback_policy, idempotent flags |
-| Workflow drift detection | Done | Step/service/transition/rollback-level diffing |
-| Workflow execution | Done | State machine with step dispatch, service lifecycle |
+| Workflow drift detection | Done | Step/service/transition/rollback-level diffing, including `recipe_ref` version/hash/input-hash changes |
+| Workflow execution | Done | State machine with step dispatch, service lifecycle, and native `recipe_ref` execution |
 | Rollback guarantees (I-W2) | Done | Pre-approved rollback, auto-execute on abort/non-idempotent failure |
 | Idempotency enforcement (I-W4) | Done | Steps default false, non-idempotent failure forces rollback+abort |
 | Negotiation request generation | Done | Structured issue codes, self_resolvable field, round tracking |
@@ -202,6 +208,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | Static analysis | Done | 5 checks: structured mode, guardrails, risk, description, input constraints |
 | Recipe supervisor | Done | Manifest-backed approval, drift detection, non-interactive acknowledgement enforcement |
 | Native executor | Done | Step-by-step execution with runtime guardrail enforcement (separate from template supervisor) |
+| Workflow recipe chaining | Done | `recipe_ref` workflow steps let one workflow approval cover multiple bounded recipe executions |
 | Dangerous command blocking | Done | rm -rf /, chmod 777, sudo rm, dd, mkfs, fork bomb detection |
 | Scope restriction | Done | Path-based scope enforcement, blocks out-of-scope file access |
 | Dry-run mode | Done | Full simulation: interpolation, danger check, scope check, no execution |
@@ -210,7 +217,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | Recipe inspect | Done | `guardrail recipe inspect` verifies hash integrity, detects tampering |
 | Local + remote recipe loading | Done | Filesystem + HTTP/HTTPS fetch + validate |
 | CLI commands | Done | `guardrail list`, `guardrail create`, `guardrail pack`, `guardrail recipe validate/inspect` |
-| Example recipes (6) | Done | npm-publish, git-branch-cleanup, github-pr-merge, dep-upgrade, infra-deploy, openclaw-wrapper |
+| Bundled recipes | Done | npm-publish, git-branch-cleanup, git-commit, github-pr-merge, dep-upgrade, infra-deploy, openclaw-wrapper, codex-exec, claude-exec |
 
 ### Bucket 5 — Policy, UX, Adoption
 
@@ -327,7 +334,7 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Workflow engine (Bucket 2 MVP)
 - [x] Template system (individual + workflow templates)
 - [x] Adversarial test suite
-- [x] Initial MVP closed; current full suite is 1048 passing tests, 0 dependencies
+- [x] Initial MVP closed; current full suite passes with 0 dependencies
 
 ### Phase 2 — Hardening
 
@@ -640,6 +647,6 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 | test-github-install.js | 38 | GitHub SHA-pinned install, pin metadata, CLI parsing, remote verification, authenticated fallback, loadRawJson |
 | test-recipe-publish.js | 47 | Manifest-to-recipe conversion, personal-data scrub, PR body, publish dry-run guards |
 | test-codex-recipe.js | 4 | Codex exec recipe schema plus prompt/file wrapper helper assembly |
-| **Current runner total** | **1048 tests / 225 suites** | Reported by `npm test`; use the command output as the canonical count |
+| **Current runner total** | **See `npm test` output** | Treat the live test command output as the canonical count |
 
-Run: `npm test` (all 1048), `npm run test:e2e` (verification/e2e/adversarial suites), `npm run test:core` (core unit/integration suites), `npm run test:acceptance` (56 feature acceptance tests)
+Run: `npm test` (full suite), `npm run test:e2e` (verification/e2e/adversarial suites), `npm run test:core` (core unit/integration suites), `npm run test:acceptance` (feature acceptance coverage)

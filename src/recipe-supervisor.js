@@ -10,6 +10,10 @@ import { executeRecipe } from './recipe-executor.js';
 import { classifyTrust } from './recipe-channel.js';
 import { saveManifest, loadManifest } from './manifest.js';
 import {
+  collectRecipeInputContentHashes,
+  verifyRecipeInputContentHashes,
+} from './prompt-inputs.js';
+import {
   createLogger,
   printBanner,
   printDenied,
@@ -156,6 +160,14 @@ function printRecipeDrift(diffs) {
   process.stdout.write('\n');
 }
 
+function formatReviewEachTimeReason(flaggedInputs) {
+  const keys = flaggedInputs
+    .filter((entry) => entry?.never_reuse)
+    .map((entry) => entry.key);
+  if (keys.length === 0) return null;
+  return `Fresh approval required for review_each_time inputs: ${keys.join(', ')}`;
+}
+
 export async function runRecipeSupervisor(options) {
   const {
     specifier,
@@ -216,9 +228,15 @@ export async function runRecipeSupervisor(options) {
     resultOpts.sourcePath = sourcePath;
 
     let resolvedInputs;
+    let flaggedInputs = [];
+    let inputContentHashes;
     try {
       const inputResult = resolveInputs(recipe, inputs);
       resolvedInputs = inputResult.resolved;
+      flaggedInputs = inputResult.flagged;
+      inputContentHashes = collectRecipeInputContentHashes(recipe, resolvedInputs, {
+        cwd: resolvedCwd,
+      });
     } catch (err) {
       if (!jsonOutput) {
         printResult({ success: false, exitCode: 1, message: err.message });
@@ -242,6 +260,7 @@ export async function runRecipeSupervisor(options) {
       sourcePath,
       requestedVersion,
       allowUnverified,
+      inputContentHashes,
     });
 
     let approved = null;
@@ -253,6 +272,7 @@ export async function runRecipeSupervisor(options) {
 
     let needsApproval = false;
     let driftDiffs = [];
+    const reviewEachTimeReason = formatReviewEachTimeReason(flaggedInputs);
     if (approved === null) {
       needsApproval = true;
       logger.info('no_approved_manifest', { path: manifestPath });
@@ -260,8 +280,17 @@ export async function runRecipeSupervisor(options) {
       const comparison = compareRecipeManifests(candidate, approved);
       needsApproval = !comparison.matches;
       driftDiffs = comparison.diffs;
+      if (!needsApproval && reviewEachTimeReason) {
+        needsApproval = true;
+        logger.info('recipe_review_each_time_reapproval', {
+          recipeId: recipe.id,
+          inputs: flaggedInputs.filter((entry) => entry?.never_reuse).map((entry) => entry.key),
+        });
+      }
       if (needsApproval) {
-        logger.warn('recipe_drift_detected', { diffs: driftDiffs });
+        if (driftDiffs.length > 0) {
+          logger.warn('recipe_drift_detected', { diffs: driftDiffs });
+        }
       } else {
         logger.info('manifest_matches', { recipeHash, manifestPath });
       }
@@ -283,14 +312,21 @@ export async function runRecipeSupervisor(options) {
       if (nonInteractive) {
         const reason = approved === null
           ? 'No approved manifest found. Run interactively to approve.'
-          : 'Recipe drift detected in non-interactive mode.';
+          : driftDiffs.length > 0
+            ? 'Recipe drift detected in non-interactive mode.'
+            : reviewEachTimeReason;
         state.terminalReason = reason;
         persistStateSafe(stateDir, state);
         if (!jsonOutput) {
           if (driftDiffs.length > 0) printRecipeDrift(driftDiffs);
           printResult({ success: false, exitCode: STATUS_EXIT_CODES[approved === null ? 'approval_required' : 'drift_detected'], message: reason });
         }
-        return buildResult(runId, approved === null ? 'approval_required' : 'drift_detected', {
+        const status = approved === null
+          ? 'approval_required'
+          : driftDiffs.length > 0
+            ? 'drift_detected'
+            : 'approval_required';
+        return buildResult(runId, status, {
           ...resultOpts,
           reason,
         });
@@ -310,6 +346,9 @@ export async function runRecipeSupervisor(options) {
         printBanner();
         if (driftDiffs.length > 0) printRecipeDrift(driftDiffs);
         printRecipeApprovalSummary(recipe, resolvedInputs, riskAssessment, sourcePath, requestedVersion);
+        if (reviewEachTimeReason) {
+          process.stdout.write(colorize(`  ${reviewEachTimeReason}\n\n`, 'yellow'));
+        }
       }
 
       const userApproved = await promptApproval(riskAssessment.riskLevel);
@@ -364,6 +403,19 @@ export async function runRecipeSupervisor(options) {
       return buildResult(runId, 'concurrent_blocked', { ...resultOpts, reason });
     }
     lockRelease = lockResult.release;
+
+    const approvedForExecution = approved !== null && !needsApproval ? approved : candidate;
+    const inputHashCheck = verifyRecipeInputContentHashes(approvedForExecution.inputContentHashes);
+    if (!inputHashCheck.verified) {
+      const reason = inputHashCheck.errors.join('; ');
+      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: recipeHash, reason });
+      state.terminalReason = reason;
+      persistStateSafe(stateDir, state);
+      if (!jsonOutput) {
+        printResult({ success: false, exitCode: STATUS_EXIT_CODES.drift_detected, message: `Recipe input file drift detected: ${reason}` });
+      }
+      return buildResult(runId, 'drift_detected', { ...resultOpts, reason });
+    }
 
     const execution = await executeRecipe(recipe, resolvedInputs, {
       allowUnverified,

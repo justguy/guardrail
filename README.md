@@ -98,6 +98,8 @@ guardrail workflow run --definition workflows/server-cycle.json
 guardrail workflow lint --definition workflows/server-cycle.json
 ```
 
+Workflow steps can be regular `task` steps, service lifecycle steps, or `recipe_ref` steps. Use `recipe_ref` when you want one workflow approval to cover a bounded chain of recipe executions instead of approving each recipe separately.
+
 ### 3. Template Mode
 
 Run a parameterized, contract-locked execution template with typed inputs, environment handshake, and rollback:
@@ -216,11 +218,35 @@ guardrail run --recipe git-branch-cleanup@1.0.0 --input repo_path=. --dry-run
 # Execute a recipe interactively (stores approval manifest)
 guardrail run --recipe git-branch-cleanup --input repo_path=.
 
-# Run Codex with an inline prompt plus injected file context
+# Create a bounded git commit from exact paths and a hashed message file
+guardrail run --recipe git-commit \
+  --input guardrail_repo=. \
+  --input repo_path=. \
+  --input paths=src/cli.js \
+  --input paths=README.md \
+  --input message_file=.guardrail/commit-message.txt
+
+# Run Codex with an inline prompt plus reusable file-backed prompt context
 guardrail run --recipe codex-exec \
   --input working_dir=. \
   --input prompt="Review this change for security issues." \
-  --input inject_files=src/recipe-install.js,src/recipe-runner.js
+  --input input_files=src/recipe-install.js \
+  --input input_files=src/recipe-runner.js
+
+# Run Claude with an inline prompt plus one hashed prompt file
+guardrail run --recipe claude-exec \
+  --input guardrail_repo=. \
+  --input working_dir=. \
+  --input prompt="Review authRedirectFlow.test.js for flakiness." \
+  --input input_files=tests/integration/authRedirectFlow.test.js \
+  --input model=sonnet \
+  --input effort=high \
+  --input mode=plan \
+  --input output_format=text \
+  --input max_budget_usd=1.00 \
+  --input allowed_tools=Read,Glob,Grep \
+  --input system_prompt="Focus on reproducibility and concrete failures." \
+  --input session_name=auth-review
 
 # Reuse a previously approved recipe manifest in CI
 guardrail run --recipe git-branch-cleanup \
@@ -254,14 +280,70 @@ Recipes are packaged execution bundles with:
 
 Recipe execution uses a recipe-specific supervisor in front of the native recipe executor. Dry-runs stay approval-free previews. Real execution stores and reuses a recipe manifest the same way command, workflow, and template mode do.
 
-The bundled `codex-exec` recipe is a Guardrail-managed wrapper around `codex exec`. It supports:
+If you need one approval to cover multiple recipe executions, promote that chain to workflow mode and reference the recipes from workflow steps with `type: "recipe_ref"`. The approved workflow manifest captures each referenced recipe's resolved version, content hash, resolved inputs, and any prompt-bearing file hashes.
+
+The bundled `codex-exec` and `claude-exec` recipes are Guardrail-managed wrappers around `codex exec` and `claude --print`. They support:
 
 - inline prompt text
-- prompt files
-- injected file content blocks
-- model, profile, sandbox, workspace, JSON output, and schema/output file flags
+- `input_files` arrays for prompt-bearing file content
+- working-directory control plus additional tool-access directories
+- model/provider/profile/effort/tool/budget flags supported by the underlying CLI
 
-Important caveat: recipe approval reuse binds to the approved file paths, not the contents of prompt-bearing files. If the contents of `prompt_file` or `inject_files` matter to the approval decision, use a fresh approval run or inline the prompt text for that execution.
+Important prompt-handling rules:
+
+- Repeat `--input input_files=...` to pass one or more prompt-bearing files.
+- Guardrail stores SHA-256 content hashes for `input_files` in the approved recipe manifest and rechecks them immediately before execution.
+- Inline `prompt` and `system_prompt` values are `review_each_time` inputs: they require fresh approval every run, even if the text is unchanged.
+- For repeatable unattended automation, prefer stable prompt material in `input_files` instead of inline prompt text.
+
+Naming convention for AI wrapper recipes:
+
+- Use `<tool>-exec` for single-shot structured wrappers around one underlying AI CLI.
+- Reserve names like `*-workflow` or `*-lifecycle` for multi-step orchestrations, not one-command wrappers.
+- Match the recipe id, filename, and wrapper helper name whenever practical: for example `codex-exec`, `recipes/codex-exec.recipe.json`, and `src/codex-exec-wrapper.js`.
+
+Naming convention for bounded operational recipes:
+
+- Use `<domain>-<action>` for task-specific operational recipes like `git-branch-cleanup` or `git-commit`.
+- Prefer one clearly bounded action per recipe. If you need service state or multiple lifecycle phases, promote it to a workflow instead of widening the recipe.
+
+Minimal workflow recipe chain:
+
+```json
+{
+  "version": 1,
+  "kind": "workflow_definition",
+  "name": "review-and-commit",
+  "projectRoot": ".",
+  "entryStep": "review",
+  "maxIterations": 3,
+  "services": [],
+  "steps": [
+    {
+      "id": "review",
+      "type": "recipe_ref",
+      "recipe": "codex-exec",
+      "inputs": {
+        "working_dir": ".",
+        "input_files": ["src/cli.js", "README.md"]
+      },
+      "on": { "success": "commit", "failure": "abort" }
+    },
+    {
+      "id": "commit",
+      "type": "recipe_ref",
+      "recipe": "git-commit",
+      "inputs": {
+        "guardrail_repo": ".",
+        "repo_path": ".",
+        "paths": ["README.md"],
+        "message_file": ".guardrail/commit-message.txt"
+      },
+      "on": { "success": "done", "failure": "abort" }
+    }
+  ]
+}
+```
 
 For public recipe distribution:
 
@@ -303,6 +385,8 @@ Each mode stores its approval separately:
 - Recipe manifest: `.guardrail/recipes/<recipe-id>.approved.json`
 
 A command manifest does not also approve a workflow, template, or recipe. Each is an independent approval unit.
+
+A workflow manifest may include multiple `recipe_ref` steps, but that approval only applies to the workflow definition as a whole. It does not also approve standalone `guardrail run --recipe ...` executions outside that workflow.
 
 ---
 
@@ -440,7 +524,7 @@ guardrail demo blocked
 
 ## Testing
 
-1048 tests, all passing, zero dependencies. Node.js built-in test runner only.
+Tests are automated, passing, and use only the Node.js built-in test runner. Use `npm test` for the current count.
 
 ```bash
 npm test              # full suite

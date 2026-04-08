@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readFileSync, existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { runSupervisor, STATUS_EXIT_CODES } from './supervisor.js';
 import { hasShellMetacharacters } from './contract.js';
 import { DEFAULT_MANIFEST_PATH } from './manifest.js';
@@ -105,6 +106,18 @@ export function parseArgs(argv) {
 
   let i = 0;
 
+  const assignInputValue = (key, value) => {
+    if (!(key in result.inputs)) {
+      result.inputs[key] = value;
+      return;
+    }
+    if (Array.isArray(result.inputs[key])) {
+      result.inputs[key].push(value);
+      return;
+    }
+    result.inputs[key] = [result.inputs[key], value];
+  };
+
   // --- Subcommand -----------------------------------------------------------
 
   if (i >= argv.length) {
@@ -146,7 +159,7 @@ export function parseArgs(argv) {
         const kv = argv[i++];
         const eq = kv.indexOf('=');
         if (eq < 1) return { error: 'usage' };
-        result.inputs[kv.slice(0, eq)] = kv.slice(eq + 1);
+        assignInputValue(kv.slice(0, eq), kv.slice(eq + 1));
         continue;
       }
       if (arg === '--env-allow') {
@@ -575,7 +588,7 @@ export function parseArgs(argv) {
       if (eq < 1) {
         return { error: 'usage' };
       }
-      result.inputs[kv.slice(0, eq)] = kv.slice(eq + 1);
+      assignInputValue(kv.slice(0, eq), kv.slice(eq + 1));
       continue;
     }
 
@@ -1431,11 +1444,12 @@ async function main() {
       process.exit(1);
     }
 
-    const { loadWorkflowDefinition, lintWorkflowDefinition } = await import('./workflow.js');
+    const { loadWorkflowDefinition, lintWorkflowDefinition, normalizeWorkflowDefinition } = await import('./workflow.js');
 
     let def;
     try {
       def = loadWorkflowDefinition(parsed.definition);
+      normalizeWorkflowDefinition(def, dirname(resolve(parsed.definition)));
     } catch (err) {
       console.error(err.message);
       process.exit(1);

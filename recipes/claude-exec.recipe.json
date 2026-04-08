@@ -1,0 +1,167 @@
+{
+  "id": "claude-exec",
+  "name": "Claude Exec",
+  "description": "Run claude --print through a Guardrail-managed wrapper with inline prompt text, input_files prompt context, working-directory control, and structured flag wiring.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "guardrail_repo": {
+      "type": "string",
+      "description": "Path to the Guardrail checkout that contains the Claude wrapper helper",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 8
+      }
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Inline prompt text to send to Claude",
+      "approval_mode": "review_each_time",
+      "required": false
+    },
+    "input_files": {
+      "type": "string",
+      "description": "One or more relative file paths whose contents become tagged prompt blocks. Repeat --input input_files=... to pass multiple files.",
+      "approval_mode": "list",
+      "content_hash": true,
+      "base_dir_input": "working_dir",
+      "required": false,
+      "item_validator": {
+        "type": "string",
+        "approval_mode": "path_policy",
+        "rules": {
+          "must_be_relative": true,
+          "deny_segments": [".."],
+          "max_depth": 12
+        }
+      }
+    },
+    "model": {
+      "type": "string",
+      "description": "Model to use",
+      "enum": ["opus", "sonnet", "haiku"]
+    },
+    "effort": {
+      "type": "string",
+      "description": "Reasoning effort level",
+      "enum": ["low", "medium", "high", "max"]
+    },
+    "mode": {
+      "type": "string",
+      "description": "Permission mode governing tool approval behavior",
+      "enum": ["default", "plan", "acceptEdits", "dontAsk"]
+    },
+    "output_format": {
+      "type": "string",
+      "description": "Response output format",
+      "enum": ["text", "json", "stream-json"]
+    },
+    "max_budget_usd": {
+      "type": "string",
+      "description": "Maximum dollar spend for this invocation (e.g. '1.00')",
+      "pattern": "^[0-9]{1,4}\\.[0-9]{2}$"
+    },
+    "allowed_tools": {
+      "type": "string",
+      "description": "Allowed tool list passed to Claude via --allowed-tools",
+      "pattern": "^[A-Za-z0-9_(),* :-]+$"
+    },
+    "system_prompt": {
+      "type": "string",
+      "description": "Prompt appended to Claude's default system prompt. Use review_each_time because wording changes execution behavior.",
+      "approval_mode": "review_each_time"
+    },
+    "working_dir": {
+      "type": "string",
+      "description": "Relative directory Claude should use as its process cwd",
+      "approval_mode": "path_policy",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "add_dirs": {
+      "type": "string",
+      "description": "Additional relative directories to grant Claude tool access to",
+      "approval_mode": "list",
+      "required": false,
+      "item_validator": {
+        "type": "string",
+        "approval_mode": "path_policy",
+        "rules": {
+          "must_be_relative": true,
+          "deny_segments": [".."],
+          "max_depth": 12
+        }
+      }
+    },
+    "session_name": {
+      "type": "string",
+      "description": "Display name for the session",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+    },
+    "no_session_persistence": {
+      "type": "boolean",
+      "description": "Disable Claude session persistence",
+      "default": true,
+      "required": false
+    }
+  },
+  "steps": [
+    {
+      "id": "invoke",
+      "description": "Build the prompt from inline text and input_files, then run Claude CLI with structured arguments only",
+      "run": {
+        "command": "node",
+        "args": [
+          "{{inputs.guardrail_repo}}/src/claude-exec-wrapper.js",
+          "--prompt", "{{inputs.prompt}}",
+          "--input-files", "{{inputs.input_files}}",
+          "--model", "{{inputs.model}}",
+          "--effort", "{{inputs.effort}}",
+          "--permission-mode", "{{inputs.mode}}",
+          "--output-format", "{{inputs.output_format}}",
+          "--max-budget-usd", "{{inputs.max_budget_usd}}",
+          "--allowed-tools", "{{inputs.allowed_tools}}",
+          "--system-prompt", "{{inputs.system_prompt}}",
+          "--working-dir", "{{inputs.working_dir}}",
+          "--add-dirs", "{{inputs.add_dirs}}",
+          "--session-name", "{{inputs.session_name}}",
+          "--no-session-persistence", "{{inputs.no_session_persistence}}"
+        ],
+        "mode": "structured"
+      },
+      "idempotent": true,
+      "validator": {
+        "regex": ".+"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Never pass --dangerously-skip-permissions or --allow-dangerously-skip-permissions",
+      "input_files are limited to approved relative paths and content-hash bound at approval time",
+      "working_dir controls the Claude process cwd; add_dirs only grants additional tool access",
+      "No shell mode steps — a single structured node wrapper handles prompt assembly and invocation"
+    ],
+    "invariants": [
+      "mode: structured",
+      "At least one prompt source must be present before Claude runs",
+      "Every declared operational input is wired through the wrapper",
+      "Output is non-empty (validator enforces .+ on response)"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "custom",
+  "tags": ["claude", "cli", "ai", "agent"],
+  "channel": "community",
+  "signature": null
+}

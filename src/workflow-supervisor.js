@@ -7,6 +7,7 @@ import {
   createWorkflowManifest,
   compareWorkflowManifests,
   TERMINAL_STATES,
+  buildWorkflowRecipeSearchDirs,
 } from './workflow.js';
 import { evaluateWorkflowRisk } from './policy-engine.js';
 import { saveManifest, loadManifest } from './manifest.js';
@@ -42,6 +43,10 @@ import {
 } from './negotiation.js';
 import { checkTimePolicy, acquireLock } from './runtime-policy.js';
 import { createAuditLog } from './audit.js';
+import { resolveRecipeById } from './recipe-runner.js';
+import { hashRecipe } from './recipe.js';
+import { executeRecipe } from './recipe-executor.js';
+import { verifyRecipeInputContentHashes } from './prompt-inputs.js';
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -85,10 +90,12 @@ function formatDriftsForPrint(diffs) {
 // Phase A: Load, normalize, hash, evaluate risk (pure pipeline)
 // ---------------------------------------------------------------------------
 
-function loadAndPrepare(definitionPath, trustClass, logger) {
+function loadAndPrepare(definitionPath, trustClass, logger, options = {}) {
   const definition = loadWorkflowDefinition(resolve(definitionPath));
   const basePath = dirname(resolve(definitionPath));
-  const workflow = normalizeWorkflowDefinition(definition, basePath);
+  const workflow = normalizeWorkflowDefinition(definition, basePath, {
+    recipeSearchDirs: options.recipeSearchDirs,
+  });
 
   logger.info('workflow_loaded', { name: workflow.name, entryStep: workflow.entryStep, maxIterations: workflow.maxIterations });
 
@@ -349,6 +356,67 @@ async function executeTaskStep(stepDef, stepId, ctx) {
   return { outcome: 'failure', iteration, terminalReason: `Unknown validation status: ${validation.status}` };
 }
 
+async function executeRecipeRefStep(stepDef, stepId, ctx) {
+  const {
+    logger,
+    workflow,
+    recipeSearchDirs,
+    auditLog,
+    runId,
+    workflowHash,
+    stateDir,
+  } = ctx;
+
+  const inputHashCheck = verifyRecipeInputContentHashes(stepDef.recipeRef?.inputContentHashes);
+  if (!inputHashCheck.verified) {
+    const reason = inputHashCheck.errors.join('; ');
+    logger.warn('recipe_ref_input_drift', { stepId, reason });
+    return { outcome: 'failure', terminalReason: `Recipe input file drift detected for step "${stepId}": ${reason}` };
+  }
+
+  let resolvedRecipe;
+  try {
+    resolvedRecipe = resolveRecipeById(stepDef.recipeRef.specifier, recipeSearchDirs);
+  } catch (err) {
+    logger.error('recipe_ref_resolution_error', { stepId, error: err.message });
+    return { outcome: 'failure', terminalReason: `Recipe resolution failed for step "${stepId}": ${err.message}` };
+  }
+
+  const currentHash = hashRecipe(resolvedRecipe.recipe);
+  if (resolvedRecipe.version !== stepDef.recipeRef.resolvedVersion || currentHash !== stepDef.recipeRef.recipeHash) {
+    logger.warn('recipe_ref_drift_detected', {
+      stepId,
+      expectedVersion: stepDef.recipeRef.resolvedVersion,
+      actualVersion: resolvedRecipe.version,
+      expectedHash: stepDef.recipeRef.recipeHash,
+      actualHash: currentHash,
+    });
+    return {
+      outcome: 'failure',
+      terminalReason: `Recipe reference drift detected for step "${stepId}". Re-approve the workflow.`,
+    };
+  }
+
+  const execution = await executeRecipe(resolvedRecipe.recipe, stepDef.recipeRef.resolvedInputs, {
+    allowUnverified: true,
+    cwd: workflow.projectRoot,
+    stateDir,
+    approved: true,
+    traceId: runId,
+    auditLog,
+    manifestHash: workflowHash,
+  });
+
+  if (execution.status === 'success') {
+    logger.info('recipe_ref_completed', { stepId, recipeId: resolvedRecipe.recipe.id, recipeVersion: resolvedRecipe.version });
+    return { outcome: 'success' };
+  }
+
+  const reason = execution.reason || `Recipe step ended with status ${execution.status}`;
+  logger.warn('recipe_ref_failed', { stepId, status: execution.status, reason });
+  return { outcome: 'failure', terminalReason: reason };
+}
+
 async function handleUpdateProposal(proposal, contract, stepDef, stepId, ctx, iteration) {
   const { logger, jsonOutput, maxIterations } = ctx;
 
@@ -466,7 +534,7 @@ async function executeRollbackSteps(rollbackSteps, logger, jsonOutput) {
 // Phase D: Execution loop
 // ---------------------------------------------------------------------------
 
-async function executeWorkflow(workflow, { serviceRegistry, logger, jsonOutput, state }) {
+async function executeWorkflow(workflow, { serviceRegistry, logger, jsonOutput, state, recipeSearchDirs, auditLog, runId, workflowHash, stateDir }) {
   const stepMap = indexById(workflow.steps);
   const totalSteps = workflow.steps.length;
   let currentStep = workflow.entryStep;
@@ -511,6 +579,12 @@ async function executeWorkflow(workflow, { serviceRegistry, logger, jsonOutput, 
       const svcResult = await executeServiceStep(stepDef, workflow, serviceRegistry, logger);
       state.serviceHandles = serviceRegistry.getState();
       outcome = svcResult.outcome;
+    } else if (stepDef.type === 'recipe_ref') {
+      const recipeResult = await executeRecipeRefStep(stepDef, currentStep, {
+        logger, workflow, recipeSearchDirs, auditLog, runId, workflowHash, stateDir,
+      });
+      outcome = recipeResult.outcome;
+      if (recipeResult.terminalReason) terminalReason = recipeResult.terminalReason;
     } else if (stepDef.type === 'task') {
       const taskResult = await executeTaskStep(stepDef, currentStep, {
         logger, jsonOutput, maxIterations: workflow.maxIterations, iteration,
@@ -614,7 +688,9 @@ export async function runWorkflowSupervisor(options) {
     // Phase A: Load and prepare
     let prepared;
     try {
-      prepared = loadAndPrepare(definitionPath, trustClass, logger);
+      prepared = loadAndPrepare(definitionPath, trustClass, logger, {
+        recipeSearchDirs: options.recipeSearchDirs,
+      });
     } catch (err) {
       logger.error('definition_load_error', { path: definitionPath, error: err.message });
       persistStateSafe(stateDir, state);
@@ -622,6 +698,11 @@ export async function runWorkflowSupervisor(options) {
     }
 
     const { workflow, workflowHash, riskAssessment } = prepared;
+    const recipeSearchDirs = buildWorkflowRecipeSearchDirs(
+      workflow.projectRoot,
+      dirname(resolve(definitionPath)),
+      options.recipeSearchDirs,
+    );
     state.workflowName = workflow.name;
     state.currentStep = workflow.entryStep;
     resultOpts.workflowHash = workflowHash;
@@ -686,7 +767,7 @@ export async function runWorkflowSupervisor(options) {
     serviceRegistry = createServiceRegistry(workflow.services || []);
 
     const execResult = await executeWorkflow(workflow, {
-      serviceRegistry, logger, jsonOutput, state,
+      serviceRegistry, logger, jsonOutput, state, recipeSearchDirs, auditLog, runId, workflowHash, stateDir,
     });
 
     resultOpts.attempt = execResult.stepsExecuted;

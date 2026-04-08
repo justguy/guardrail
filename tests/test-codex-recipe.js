@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { loadRecipe } from '../src/recipe.js';
+import { buildPromptPayload } from '../src/prompt-inputs.js';
 import {
   parseWrapperArgs,
-  buildPromptPayload,
   buildCodexExecArgs,
 } from '../src/codex-exec-wrapper.js';
 
@@ -27,32 +27,34 @@ describe('Codex recipe', () => {
   it('parses wrapper args by flag name', () => {
     const parsed = parseWrapperArgs([
       '--prompt', 'Fix the bug',
+      '--input-files', 'src/a.js,src/b.js',
       '--sandbox', 'workspace-write',
       '--json', 'true',
       '--full-auto', 'false',
     ]);
     assert.equal(parsed.prompt, 'Fix the bug');
+    assert.equal(parsed.inputFiles, 'src/a.js,src/b.js');
     assert.equal(parsed.sandbox, 'workspace-write');
     assert.equal(parsed.json, 'true');
     assert.equal(parsed.fullAuto, 'false');
   });
 
-  it('builds prompt payload from inline prompt, prompt file, and injected files', () => {
+  it('builds prompt payload from inline prompt and input files', () => {
     const dir = tmpDir();
-    writeFileSync(join(dir, 'prompt.md'), 'Base prompt from file\n');
     writeFileSync(join(dir, 'context.txt'), 'Injected context\n');
+    writeFileSync(join(dir, 'notes.md'), 'More context\n');
 
     const payload = buildPromptPayload({
       prompt: 'Inline instruction',
-      promptFile: 'prompt.md',
-      injectFiles: ['context.txt'],
+      inputFiles: ['context.txt', 'notes.md'],
       baseDir: dir,
     });
 
     assert.match(payload, /Inline instruction/);
-    assert.match(payload, /Base prompt from file/);
-    assert.match(payload, /<injected_file path="context.txt">/);
+    assert.match(payload, /<input_file path="context.txt">/);
     assert.match(payload, /Injected context/);
+    assert.match(payload, /<input_file path="notes.md">/);
+    assert.match(payload, /More context/);
   });
 
   it('builds codex exec args from normalized options', () => {

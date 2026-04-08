@@ -512,6 +512,19 @@ describe('CLI bare recipe name detection', async () => {
     assert.equal(result.subcommand, 'recipe-publish');
     assert.equal(result.manifestPath, '.guardrail/approved.json');
   });
+
+  it('collects repeated --input values into arrays', () => {
+    const result = parseArgs([
+      'run',
+      '--recipe', 'codex-exec',
+      '--input', 'input_files=src/a.js',
+      '--input', 'input_files=src/b.js',
+      '--dry-run',
+    ]);
+    assert.equal(result.subcommand, 'run');
+    assert.equal(result.recipeId, 'codex-exec');
+    assert.deepEqual(result.inputs.input_files, ['src/a.js', 'src/b.js']);
+  });
 });
 
 // ---------------------------------------------------------------------------

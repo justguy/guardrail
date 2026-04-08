@@ -13,8 +13,11 @@ import { execSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, realpathSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { normalizeWorkflowDefinition, hashWorkflow, createWorkflowManifest } from '../src/workflow.js';
+import { evaluateWorkflowRisk } from '../src/policy-engine.js';
+import { saveManifest } from '../src/manifest.js';
 
-const CLI = 'node src/cli.js';
+const CLI = `node ${join(process.cwd(), 'src', 'cli.js')}`;
 
 function run(cmd, opts = {}) {
   try {
@@ -78,6 +81,94 @@ describe('README Feature: Workflow Mode', () => {
     writeFileSync(join(dir, 'bad.json'), '{"not": "a workflow"}');
     const r = run(`${CLI} workflow lint --definition ${join(dir, 'bad.json')}`);
     assert.ok(r.exitCode !== 0, 'Lint should reject invalid workflow');
+  });
+
+  it('workflow run can chain multiple recipe_ref steps under one approved workflow manifest', () => {
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'recipes'), { recursive: true });
+
+    writeFileSync(join(dir, 'recipes', 'recipe-one.recipe.json'), JSON.stringify({
+      id: 'recipe-one',
+      name: 'Recipe One',
+      description: 'First workflow recipe',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{ id: 'main', description: 'echo one', run: { command: 'echo', args: ['one'], mode: 'structured' } }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    }, null, 2));
+
+    writeFileSync(join(dir, 'recipes', 'recipe-two.recipe.json'), JSON.stringify({
+      id: 'recipe-two',
+      name: 'Recipe Two',
+      description: 'Second workflow recipe',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{ id: 'main', description: 'echo two', run: { command: 'echo', args: ['two'], mode: 'structured' } }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    }, null, 2));
+
+    const def = {
+      version: 1,
+      kind: 'workflow_definition',
+      name: 'recipe-chain',
+      projectRoot: '.',
+      entryStep: 'step_a',
+      maxIterations: 3,
+      services: [],
+      steps: [
+        {
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'recipe-one',
+          inputs: {},
+          on: { success: 'step_b', failure: 'abort' },
+        },
+        {
+          id: 'step_b',
+          type: 'recipe_ref',
+          recipe: 'recipe-two',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        },
+      ],
+    };
+    const defPath = join(dir, 'workflow.json');
+    const manifestPath = join(dir, '.guardrail', 'workflows', 'recipe-chain.approved.json');
+    mkdirSync(join(dir, '.guardrail', 'workflows'), { recursive: true });
+    writeFileSync(defPath, JSON.stringify(def, null, 2));
+
+    const normalized = normalizeWorkflowDefinition(def, dir);
+    const workflowHash = hashWorkflow(normalized);
+    const riskAssessment = evaluateWorkflowRisk(normalized, {
+      trustClass: 'reviewed_internal',
+      projectRoot: dir,
+    });
+    const manifest = createWorkflowManifest(normalized, workflowHash, {
+      ...riskAssessment,
+      acknowledgedBy: 'acceptance-test',
+      acknowledgedAt: new Date().toISOString(),
+    }, normalized.projectRoot);
+    saveManifest(manifest, manifestPath);
+
+    const r = run(
+      `${CLI} workflow run --definition ${defPath} --trust reviewed_internal ` +
+      `--non-interactive --approved-manifest ${manifestPath} --json`,
+      { cwd: dir },
+    );
+    assert.equal(r.exitCode, 0, r.stderr);
+    const result = JSON.parse(r.stdout);
+    assert.equal(result.status, 'success');
+    assert.equal(result.stepsExecuted, 2);
   });
 });
 
@@ -277,6 +368,53 @@ describe('README Feature: Recipe System', () => {
     assert.ok(r.stdout.includes('Dry run'));
     assert.ok(r.stdout.includes('"id": "npm-install-safe"'));
     assert.ok(r.stdout.includes('"channel": "community"'));
+  });
+
+  it('bundled codex recipe accepts repeated input_files and dry-runs safely', () => {
+    const r = run(
+      `${CLI} run --recipe codex-exec ` +
+      `--input working_dir=. ` +
+      `--input prompt="Review recipe docs." ` +
+      `--input input_files=README.md ` +
+      `--input input_files=docs/agent-onboarding.md ` +
+      `--dry-run`,
+    );
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.ok(r.stdout.includes('Safe:  YES'));
+  });
+
+  it('bundled Claude recipe dry-runs with structured prompt/input_files execution', () => {
+    const r = run(
+      `${CLI} run --recipe claude-exec ` +
+      `--input guardrail_repo=. ` +
+      `--input working_dir=. ` +
+      `--input prompt="Review auth flow tests." ` +
+      `--input input_files=README.md ` +
+      `--input model=sonnet ` +
+      `--input effort=high ` +
+      `--input mode=plan ` +
+      `--input output_format=text ` +
+      `--input max_budget_usd=1.00 ` +
+      `--input allowed_tools=Read,Glob,Grep ` +
+      `--input system_prompt="Focus on deterministic failures." ` +
+      `--input session_name=readme-review ` +
+      `--dry-run`,
+    );
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.ok(r.stdout.includes('Safe:  YES'));
+  });
+
+  it('bundled git commit recipe dry-runs with an exact staged path list and message file', () => {
+    const r = run(
+      `${CLI} run --recipe git-commit ` +
+      `--input guardrail_repo=. ` +
+      `--input repo_path=. ` +
+      `--input paths=README.md ` +
+      `--input message_file=README.md ` +
+      `--dry-run`,
+    );
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.ok(r.stdout.includes('Safe:  YES'));
   });
 });
 

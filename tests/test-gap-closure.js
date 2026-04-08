@@ -14,6 +14,7 @@ import { saveManifest } from '../src/manifest.js';
 import { signRecipe } from '../src/recipe-channel.js';
 import { runFullVerification } from '../src/verify.js';
 import { listScenarios } from '../src/demo-scenarios.js';
+import { collectRecipeInputContentHashes } from '../src/prompt-inputs.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -587,6 +588,76 @@ describe('Recipe Version Resolution', () => {
 
     assert.equal(result.status, 'success');
     assert.equal(result.recipeVersion, '1.0.0');
+  });
+
+  it('recipe supervisor detects content drift for input_files even when the file path is unchanged', async () => {
+    const sourceDir = tmpDir();
+    const registryDir = join(tmpDir(), 'registry');
+    const manifestDir = join(tmpDir(), '.guardrail', 'recipes');
+    mkdirSync(manifestDir, { recursive: true });
+    const manifestPath = join(manifestDir, 'claude-input-files.approved.json');
+    const workspaceDir = join(registryDir, 'workspace');
+    mkdirSync(workspaceDir, { recursive: true });
+    const promptFile = join(workspaceDir, 'prompt.txt');
+    writeFileSync(promptFile, 'Original prompt\n');
+
+    const recipe = makeRecipe({
+      id: 'claude-input-files',
+      inputs: {
+        input_files: {
+          type: 'string',
+          approval_mode: 'list',
+          content_hash: true,
+          base_dir_input: 'working_dir',
+          item_validator: {
+            type: 'string',
+            approval_mode: 'path_policy',
+            rules: { must_be_relative: true, deny_segments: ['..'], max_depth: 8 },
+          },
+        },
+        working_dir: {
+          type: 'string',
+          approval_mode: 'path_policy',
+          rules: { must_be_relative: true, deny_segments: ['..'], max_depth: 8 },
+        },
+      },
+      steps: [{ id: 's1', description: 'echo', run: { command: 'echo', args: ['ok'], mode: 'structured' } }],
+      approval_required: true,
+      risk_level: 'medium',
+    });
+    const recipePath = writeRecipe(sourceDir, recipe);
+    installFromPath(recipePath, { registryDir });
+    const { recipe: installedRecipe, sourcePath } = resolveRecipeById('claude-input-files', [registryDir]);
+
+    const manifest = createRecipeManifest(
+      installedRecipe,
+      hashRecipe(installedRecipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { input_files: ['prompt.txt'], working_dir: 'workspace' },
+      {
+        cwd: registryDir,
+        projectRoot: registryDir,
+        sourcePath,
+        inputContentHashes: collectRecipeInputContentHashes(installedRecipe, { input_files: ['prompt.txt'], working_dir: 'workspace' }, { cwd: registryDir }),
+      },
+    );
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    saveManifest(manifest, manifestPath);
+
+    writeFileSync(promptFile, 'Changed prompt\n');
+
+    const result = await runRecipeSupervisor({
+      specifier: 'claude-input-files',
+      inputs: { input_files: ['prompt.txt'], working_dir: 'workspace' },
+      cwd: registryDir,
+      searchDirs: [registryDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'drift_detected');
   });
 });
 

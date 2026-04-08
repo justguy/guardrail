@@ -476,6 +476,48 @@ describe('Integration: Recipe Supervisor Runtime Policy', () => {
     assert.equal(result.status, 'approval_required');
   });
 
+  it('requires fresh approval for review_each_time recipe inputs even when the manifest matches exactly', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    const recipe = makeRecipe({
+      inputs: {
+        prompt: {
+          type: 'string',
+          approval_mode: 'review_each_time',
+          required: false,
+        },
+      },
+      steps: [
+        {
+          id: 'step-1',
+          description: 'Echo prompt',
+          run: { command: 'echo', args: ['{{inputs.prompt}}'], mode: 'structured' },
+        },
+      ],
+    });
+    const sourcePath = writeRecipeFile(recipesDir, recipe);
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+
+    createApprovedRecipeManifest(recipe, dir, manifestPath, sourcePath, {
+      resolvedInputs: { prompt: 'review this repo' },
+    });
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { prompt: 'review this repo' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'approval_required');
+    assert.match(result.reason, /review_each_time inputs: prompt/);
+  });
+
   it('time policy blocks recipe execution with an approved manifest', async () => {
     const dir = tmpDir();
     const recipesDir = join(dir, 'recipes');

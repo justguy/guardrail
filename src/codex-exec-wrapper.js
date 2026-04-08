@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { buildPromptPayload } from './prompt-inputs.js';
 
 function truthy(value) {
   return value === true || value === 'true' || value === '1';
@@ -22,8 +22,7 @@ function resolveFrom(baseDir, maybePath) {
 export function parseWrapperArgs(argv) {
   const options = {
     prompt: '',
-    promptFile: '',
-    injectFiles: '',
+    inputFiles: '',
     model: '',
     profile: '',
     sandbox: '',
@@ -49,12 +48,8 @@ export function parseWrapperArgs(argv) {
         options.prompt = value;
         i += 1;
         break;
-      case '--prompt-file':
-        options.promptFile = value;
-        i += 1;
-        break;
-      case '--inject-files':
-        options.injectFiles = value;
+      case '--input-files':
+        options.inputFiles = value;
         i += 1;
         break;
       case '--model':
@@ -125,38 +120,6 @@ export function parseWrapperArgs(argv) {
   return options;
 }
 
-export function buildPromptPayload({
-  prompt = '',
-  promptFile = '',
-  injectFiles = [],
-  baseDir = process.cwd(),
-}) {
-  const sections = [];
-
-  if (prompt) {
-    sections.push(String(prompt).trim());
-  }
-
-  if (promptFile) {
-    const filePath = resolveFrom(baseDir, promptFile);
-    sections.push(readFileSync(filePath, 'utf8').trimEnd());
-  }
-
-  for (const file of injectFiles) {
-    const filePath = resolveFrom(baseDir, file);
-    const content = readFileSync(filePath, 'utf8').trimEnd();
-    sections.push(
-      `<injected_file path="${file}">\n${content}\n</injected_file>`
-    );
-  }
-
-  const payload = sections.filter(Boolean).join('\n\n');
-  if (!payload.trim()) {
-    throw new Error('Provide prompt, prompt_file, or inject_files.');
-  }
-  return payload;
-}
-
 export function buildCodexExecArgs(options = {}) {
   const args = ['exec'];
 
@@ -209,8 +172,7 @@ function normalizeOptions(rawOptions) {
 
   return {
     prompt: rawOptions.prompt || '',
-    promptFile: rawOptions.promptFile || '',
-    injectFiles: splitCsv(rawOptions.injectFiles),
+    inputFiles: splitCsv(rawOptions.inputFiles),
     model: rawOptions.model || '',
     profile: rawOptions.profile || '',
     sandbox,
@@ -238,8 +200,7 @@ export async function runCodexExec(rawOptions) {
   const options = normalizeOptions(rawOptions);
   const promptPayload = buildPromptPayload({
     prompt: options.prompt,
-    promptFile: options.promptFile,
-    injectFiles: options.injectFiles,
+    inputFiles: options.inputFiles,
     baseDir: options.baseDir,
   });
   const args = buildCodexExecArgs(options);

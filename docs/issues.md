@@ -326,26 +326,55 @@ In the `list` command dispatch in `cli.js`, `existsSync` was imported from `node
 
 ---
 
-### ISSUE-018: claude-cli-invoke recipe v1.0.0 had 4 unwired inputs and ambiguous branching
+### ISSUE-018: legacy Claude recipe draft had unwired inputs, ambiguous branching, and no reusable prompt-file safety model
 
 **Found:** 2026-04-07, during recipe review
 **Severity:** Medium — recipe would execute but with phantom capabilities
 
 **Problem:**
-The v1.0.0 recipe declared `system_prompt`, `allowed_tools`, `working_dir`, and `max_budget_usd` as inputs but none appeared in any step's args. The description claimed those capabilities. Two invoke steps (inline vs file) existed with no branching metadata — the recipe system has no conditional routing, so it was unclear how step selection would work. The file-based step used `sh -c` piping, which is a weaker execution shape than structured mode.
+The original recipe declared `system_prompt`, `allowed_tools`, `working_dir`, and `max_budget_usd` without wiring them into the real execution path. It also had mutually-exclusive inline/file invoke steps with no recipe-level branching semantics, so the actual path was unclear. The file-based path used `sh -c` piping, which weakened the execution shape, and there was no manifest-bound content-hash model for reusable prompt-bearing files.
 
 **Root cause:**
 Recipe was drafted with aspirational inputs and two mutually-exclusive steps in a system that only supports sequential execution. No self-review caught the mismatch between declared inputs and actual args.
 
 **Fix:**
-1. Collapsed to single step, single execution shape — no branching, no shell
-2. Wired all 10 inputs directly into the `claude` CLI args
-3. Replaced `working_dir` with `add_dir` (wired to `--add-dir`, the correct Claude CLI mechanism)
-4. Added `session_name` (wired to `--name`) for repeatable invocation tracking
-5. Removed `auto` from permission mode enum (bypasses approvals, conflicts with guardrail intent)
-6. Made all inputs required — no optional inputs means no phantom features
-7. Rewrote description to match actual behavior
-8. Bumped version to 2.0.0
+1. Replaced the ambiguous multi-step draft with one structured wrapper step and no shell fallback
+2. Added `src/claude-exec-wrapper.js` to assemble prompt input and invoke `claude --print` honestly
+3. Wired `system_prompt`, `allowed_tools`, `working_dir`, and `max_budget_usd` to real Claude CLI/runtime behavior
+4. Added `input_files` as a list input with manifest-bound SHA-256 content hashes and a pre-execution recheck
+5. Kept inline `prompt`/`system_prompt` as `review_each_time` so prompt text still requires fresh approval each run
+6. Added `session_name` and `no_session_persistence` for repeatable session control
+7. Rewrote the description and guardrails to match the actual execution shape
+8. Bumped the recipe to `3.0.0`
 
-**Files changed:** `recipes/claude-cli-invoke.recipe.json`
+**Naming outcome:** The shipped recipe follows the `*-exec` naming convention and is published as `claude-exec`.
+
+**Files changed:** `recipes/claude-exec.recipe.json`, `src/claude-exec-wrapper.js`, `src/prompt-inputs.js`, recipe and integration tests
+**Status:** Resolved
+
+---
+
+### ISSUE-019: One approval could not cover a bounded chain of recipe executions
+
+**Found:** 2026-04-07, during agent workflow design
+**Severity:** Medium — blocked the intended “review/fix/commit” style agent loop
+
+**Problem:**
+Standalone recipe manifests were one-approval-per-recipe. That meant agents could not natively run a bounded multi-recipe lifecycle under one workflow approval. The only workaround was an opaque wrapper script, which hid the inner recipe boundaries from Guardrail.
+
+**Root cause:**
+Workflow mode only understood `task` and service lifecycle steps. Recipe execution existed as a separate supervisor path, with no workflow-native step type that could pin and execute a referenced recipe inside the workflow manifest.
+
+**Fix:**
+1. Added workflow step type `recipe_ref`
+2. Normalized `recipe_ref` steps into pinned recipe metadata: resolved version, recipe hash, resolved inputs, and prompt-bearing file hashes
+3. Included `recipe_ref` metadata in workflow hashing and drift detection
+4. Executed `recipe_ref` steps natively from the workflow supervisor instead of requiring a wrapper script
+5. Rolled referenced recipe risk into workflow risk aggregation
+6. Added unit, integration, and README-derived acceptance coverage for chained `recipe_ref` execution under one workflow manifest
+
+**Supported model:**
+Use one workflow manifest when you want one approval to cover multiple bounded recipe executions. That workflow approval does not also bless standalone `guardrail run --recipe ...` executions outside the workflow.
+
+**Files changed:** `src/workflow.js`, `src/workflow-supervisor.js`, `src/policy-engine.js`, `src/cli.js`, workflow and acceptance tests, README/onboarding/spec docs
 **Status:** Resolved

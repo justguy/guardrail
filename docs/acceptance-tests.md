@@ -3,7 +3,7 @@
 **Source:** [tests/test-feature-acceptance.js](../tests/test-feature-acceptance.js)
 **Method:** Every test derived from README claims, not from code. If a test fails, the feature is broken or the README is lying.
 **Run:** `npm run test:acceptance`
-**Last run:** 2026-04-08 — **56/56 PASS**
+**Current status:** See the latest `npm run test:acceptance` output.
 
 ---
 
@@ -21,6 +21,7 @@
 |---|----------|----------|--------|
 | 4 | `workflow lint` on valid definition | Exit 0, no errors | PASS |
 | 5 | `workflow lint` on invalid JSON | Exit != 0 | PASS |
+| 6 | `workflow run` with chained `recipe_ref` steps under one approved workflow manifest | Exit 0, both recipe steps execute | PASS |
 
 ## Template Mode
 
@@ -61,7 +62,7 @@
 | 23 | `run --recipe <id>@99.0.0` (nonexistent version) | Error with available versions | PASS |
 | 24 | `run --recipe <id> --dry-run` missing input | Error naming the missing input | PASS |
 | 25 | `run --recipe <id>` invalid enum input | Error showing allowed values | PASS |
-| 26 | All 6 shipped recipes dry-run | All exit 0, all "Safe: YES" | PASS |
+| 26 | Bundled operational recipes dry-run | All exit 0, all "Safe: YES" | PASS |
 
 ### 6 Recipe Dry-Runs
 
@@ -164,6 +165,6 @@
 
 ## Summary
 
-**56 feature acceptance tests, 56 passing.**
+Feature acceptance coverage is automated and passing. Use `npm run test:acceptance` for the current count and result.
 
 Every documented feature in the README has at least one test proving it works. Tests exercise the actual CLI binary (`node src/cli.js`) with real arguments, real files, and real output assertions — not mocked internals.

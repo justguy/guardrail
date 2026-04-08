@@ -1,7 +1,7 @@
 {
   "id": "codex-exec",
   "name": "Codex Exec",
-  "description": "Run codex exec through a Guardrail-managed wrapper with inline prompts, prompt files, and injected file content.",
+  "description": "Run codex exec through a Guardrail-managed wrapper with inline prompt text, input_files prompt context, and structured flag wiring.",
   "version": "1.0.0",
   "author": {
     "name": "Guardrail Team",
@@ -25,21 +25,12 @@
       "approval_mode": "review_each_time",
       "required": false
     },
-    "prompt_file": {
+    "input_files": {
       "type": "string",
-      "description": "Relative file path whose contents become part of the prompt payload",
-      "approval_mode": "path_policy",
-      "required": false,
-      "rules": {
-        "must_be_relative": true,
-        "deny_segments": [".."],
-        "max_depth": 12
-      }
-    },
-    "inject_files": {
-      "type": "string",
-      "description": "Comma-separated relative file paths to inject into the prompt as tagged file blocks",
+      "description": "One or more relative file paths whose contents become tagged prompt blocks. Repeat --input input_files=... to pass multiple files.",
       "approval_mode": "list",
+      "content_hash": true,
+      "base_dir_input": "working_dir",
       "required": false,
       "item_validator": {
         "type": "string",
@@ -179,14 +170,13 @@
   "steps": [
     {
       "id": "run-codex-exec",
-      "description": "Build the final prompt payload from inline text, prompt file content, and injected files, then invoke codex exec",
+      "description": "Build the final prompt payload from inline text and input_files, then invoke codex exec",
       "run": {
         "command": "node",
         "args": [
           "{{inputs.guardrail_repo}}/src/codex-exec-wrapper.js",
           "--prompt", "{{inputs.prompt}}",
-          "--prompt-file", "{{inputs.prompt_file}}",
-          "--inject-files", "{{inputs.inject_files}}",
+          "--input-files", "{{inputs.input_files}}",
           "--model", "{{inputs.model}}",
           "--profile", "{{inputs.profile}}",
           "--sandbox", "{{inputs.sandbox}}",
@@ -212,7 +202,8 @@
     "constraints": [
       "Never pass --dangerously-bypass-approvals-and-sandbox",
       "Prompt-bearing file inputs are limited to approved relative paths",
-      "Injected files are appended as explicit tagged blocks so the prompt boundary is visible",
+      "Prompt-bearing file inputs are content-hash bound at approval time and rechecked before execution",
+      "Input files are appended as explicit tagged blocks so the prompt boundary is visible",
       "The wrapper only forwards supported codex exec flags and drops unset parameters"
     ],
     "invariants": [
