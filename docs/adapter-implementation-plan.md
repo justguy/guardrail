@@ -540,6 +540,134 @@ The public repo accepts profile PRs because profiles are declarative and validat
 
 ## Protocol Handlers
 
+## Auth Prerequisites and Preflight
+
+Adapter and recipe invocation need an explicit auth-preflight layer for tools whose execution depends on credentials or prior CLI login state.
+
+This solves the **early diagnosis** problem, not the **authentication** problem itself.
+
+Preflight must convert vague runtime failures like:
+
+```text
+claude --print failed with exit code 1: Not logged in · Please run /login
+```
+
+into explicit contract failures before Guardrail starts the recipe or adapter-managed command.
+
+### Two Auth Requirement Types
+
+#### 1. `requires_env`
+
+Use `requires_env` when the tool is expected to authenticate through environment variables that Guardrail must explicitly plumb into the child process.
+
+Example:
+
+```json
+{
+  "requires_env": ["ANTHROPIC_API_KEY"]
+}
+```
+
+Preflight behavior:
+
+- compare the declared env names against the approved `envPolicy.allow` list
+- keep `inherit: false` as the default boundary
+- fail closed before execution if any required env var is not explicitly mapped
+
+Expected failure shape:
+
+```json
+{
+  "status": "blocked",
+  "reason": "missing_auth_mapping",
+  "message": "This recipe requires ANTHROPIC_API_KEY. Please map it in your Guardrail manifest."
+}
+```
+
+#### 2. `requires_auth`
+
+Use `requires_auth` when the tool depends on a runtime-local authentication state that is not just an environment variable, such as a logged-in CLI session, keychain entry, or credential file in the active runtime.
+
+Example:
+
+```json
+{
+  "requires_auth": [
+    {
+      "type": "claude_login",
+      "check": "claude auth status",
+      "env": ["HOME", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR"]
+    }
+  ]
+}
+```
+
+Preflight behavior:
+
+- require explicit `--env-allow` plumbing for any env vars needed to expose the auth runtime to the guarded child process
+- run a bounded, tool-specific auth check before the real invocation
+- return a machine-readable failure if the required auth state is missing in the current runtime
+- distinguish “tool not logged in” from “tool logged in somewhere else, but not in this runtime/user/home directory”
+
+Suggested failure reasons:
+
+- `missing_auth_prerequisite`
+- `auth_runtime_mismatch`
+
+Example failure:
+
+```json
+{
+  "status": "blocked",
+  "reason": "missing_auth_prerequisite",
+  "message": "Claude CLI is not logged in for this runtime. Run claude login."
+}
+```
+
+### Important Boundary
+
+Preflight does **not** create credentials, log the tool in, or repair the runtime automatically.
+
+It only:
+
+- makes the auth mode explicit in the contract
+- checks that the runtime satisfies that contract
+- fails early with an actionable reason instead of a late step-level exit code
+
+For example, adding `requires_env: ["ANTHROPIC_API_KEY"]` to `claude-exec` only helps if the recipe is actually meant to run via API-key auth and the approved manifest maps that variable through `envPolicy.allow`.
+
+Adding `requires_auth: [{ "type": "claude_login", ... }]` only helps if the selected runtime really has Claude CLI login state available.
+
+If the tool's auth state lives behind runtime-local env such as `HOME`, `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`, or `GH_CONFIG_DIR`, those values must still be explicitly passed through `--env-allow` so the guarded child process can see the same auth location the preflight just checked.
+
+### Phase Scope
+
+Phase 1 now includes env-based auth preflight because it aligns directly with Guardrail's existing `envPolicy` boundary and the `missing_auth_mapping` contract in `docs/auth_req.txt`.
+
+Current shipped `requires_auth` coverage is intentionally bounded to explicit, known CLI checks:
+
+- Claude CLI via `claude auth status`
+- GitHub CLI via `gh auth status --hostname github.com`
+
+Current shipped auth-runtime env handling is intentionally bounded too:
+
+- `claude_login` may require explicit mapping of `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, or `HOME`
+- `gh_auth` may require explicit mapping of `GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, or `HOME`
+- profiles may override those defaults with an explicit `requires_auth[].env` list
+
+Broader `requires_auth` coverage for stateful CLIs remains Phase 1.5 / v0.3 work, including:
+
+- Claude CLI
+- Codex CLI
+- `gh`
+- cloud CLIs that rely on local SSO/session state
+
+This keeps the implementation honest:
+
+- `requires_env` and `requires_auth` improve diagnosis and contract clarity
+- runtime-local CLI auth also needs its auth-location env plumbed explicitly, or Guardrail will fail closed before execution
+- actual credentials, login, or session state still must be provisioned by the human, CI runner, or runtime environment
+
 ### stdin-json (`adapter-stdin.js`)
 
 - entry: `async runStdinAdapter(profile, argv)`
@@ -617,6 +745,7 @@ Deferred to v0.3:
 ```text
 guardrail adapter run --tool openclaw -- npm test
 guardrail adapter run --profile ./my-tool.json -- npm test
+guardrail adapter run --profile ./my-tool.json --env-allow ANTHROPIC_API_KEY -- npm test
 guardrail adapter shim --tool aider --commands npm,git,python
 guardrail adapter shim --list
 guardrail adapter shim --remove npm
@@ -673,7 +802,8 @@ Available tools: guardrail adapter profile list
 |------|-------|---------------|
 | `src/adapter-extract.js` | ~120 | Safe field extraction via allowlisted JSONPath subset |
 | `src/adapter-profile.js` | ~220 | Profile validation, loading, version selection, hashing, listing |
-| `src/adapter-engine.js` | ~280 | Orchestration: extract -> call supervisor -> normalize -> render |
+| `src/adapter-engine.js` | ~280 | Orchestration: extract -> auth preflight -> call supervisor -> normalize -> render |
+| `src/adapter-auth.js` | ~80 | Bounded `requires_env` / `requires_auth` preflight helpers |
 
 ### Protocol Handlers
 

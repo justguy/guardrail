@@ -378,3 +378,66 @@ Use one workflow manifest when you want one approval to cover multiple bounded r
 
 **Files changed:** `src/workflow.js`, `src/workflow-supervisor.js`, `src/policy-engine.js`, `src/cli.js`, workflow and acceptance tests, README/onboarding/spec docs
 **Status:** Resolved
+
+---
+
+### ISSUE-020: Adapter runtime did not honor core profile contract fields end-to-end
+
+**Found:** 2026-04-07, during review of `docs/adapter-implementation-plan.md` against the live adapter runtime
+**Severity:** High — the adapter system existed, but key public-profile semantics were not actually enforced
+
+**Problem:**
+Several live adapter seams did not match the documented Phase 1 contract:
+
+1. `stdin-json` intercept extraction ignored JSONPath mappings and treated input like a shell string
+2. `adapter-stdin` wrote the whole internal adapter wrapper object to stdout instead of the rendered public response
+3. `response.format: "human"` was ignored because the engine read `profile.format` instead of `profile.response.format`
+4. profile `exit_codes` were ignored; the runtime always returned the native Guardrail exit code
+
+This meant public profiles could validate on disk while still not behaving according to the documented adapter contract.
+
+**Root cause:**
+The adapter runtime had the right overall structure, but the live engine path was not actually consuming the profile contract fields as the source of truth. It mixed internal fallback behavior with public-profile semantics and lacked direct tests for the adapter protocol seam.
+
+**Fix:**
+1. `adapter-engine.js`
+   - use JSONPath extraction for `stdin-json` `command` / `args` / `cwd`
+   - fail closed when extracted args/cwd resolve to invalid shapes
+   - honor `response.format` from the response block
+   - honor profile `exit_codes` by adapter category
+   - correctly consume the `{ valid, errors }` result from `validateProfile()`
+2. `adapter-stdin.js`
+   - write the rendered public response, not the internal wrapper object
+   - preserve plain-text output for human-format profiles
+3. Added focused adapter-path tests covering:
+   - `stdin-json` interception
+   - human-format rendering
+   - profile exit-code mapping
+   - rendered-response stdout behavior
+4. Updated `docs/technical-status.md` so the adapter system is no longer described as “Not started”
+
+**Files changed:** `src/adapter-engine.js`, `src/adapter-stdin.js`, `tests/test-adapter.js`, `docs/technical-status.md`
+**Status:** Resolved
+
+---
+
+### ISSUE-021: AI exec wrappers could be mistaken for outer sandboxes during host execution
+
+**Found:** 2026-04-08, during real `claude-exec` approval/runtime testing
+**Severity:** Medium — approval boundary was correct, but the UX did not make the host-execution boundary explicit enough
+
+**Problem:**
+`claude-exec` and `codex-exec` were approval-bounded wrappers around `claude --print` and `codex exec`, but the approval surface did not explicitly warn that running them outside the host sandbox/container boundary widens real privileges. Users could reasonably infer that Guardrail or the wrapper itself was still providing outer containment.
+
+**Root cause:**
+The core docs already said Guardrail is not a sandbox, but the recipe-specific approval/risk surface did not restate that boundary where users actually approve these AI wrappers.
+
+**Fix:**
+1. Added an explicit host-boundary warning to recipe risk evaluation for `claude-exec` and `codex-exec`
+2. Surfaced that warning directly in recipe approval summary output
+3. Added recipe-level constraints documenting that host execution relies on the underlying tool/runtime permission model
+4. Updated README and agent onboarding to describe the boundary in the AI recipe sections
+5. Added runtime coverage proving `claude-exec` is marked with the host-boundary warning before approval
+
+**Files changed:** `src/recipe-supervisor.js`, `recipes/claude-exec.recipe.json`, `recipes/codex-exec.recipe.json`, `README.md`, `docs/agent-onboarding.md`, `tests/test-integration-runtime.js`
+**Status:** Resolved

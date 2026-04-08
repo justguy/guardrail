@@ -57,9 +57,30 @@ export function buildOutOfScopeUpdateDecision(proposalCheck) {
 }
 
 /**
+ * Bounded stream clipping policy for adapter-facing worker output.
+ * Full raw output stays in logs/state; only bounded slices reach results.
+ */
+const MAX_WORKER_OUTPUT_BYTES = 1024 * 1024; // 1 MB
+
+function clipOutput(str) {
+  if (typeof str !== 'string') return { text: '', truncated: false };
+  if (Buffer.byteLength(str) <= MAX_WORKER_OUTPUT_BYTES) return { text: str, truncated: false };
+  // Clip to byte budget, then trim to last complete char boundary
+  const buf = Buffer.from(str);
+  return { text: buf.subarray(0, MAX_WORKER_OUTPUT_BYTES).toString('utf8'), truncated: true };
+}
+
+/**
  * Build the structured result object returned by runSupervisor.
+ *
+ * Phase 1 adapter contract: includes reason, drift, worker, and telemetry
+ * fields so adapter-engine.js can translate to adapter-result/v1 without
+ * scraping terminal output.
  */
 function buildResult(runId, status, opts = {}) {
+  const stdoutClip = clipOutput(opts.workerStdout);
+  const stderrClip = clipOutput(opts.workerStderr);
+
   return {
     runId,
     status,
@@ -69,6 +90,32 @@ function buildResult(runId, status, opts = {}) {
     riskLevel:    opts.riskLevel    ?? '',
     riskReasons:  opts.riskReasons  ?? [],
     exitCode:     STATUS_EXIT_CODES[status] ?? STATUS_EXIT_CODES.internal_error,
+
+    // Machine-readable reason for adapters and APIs
+    reason: opts.reason ?? '',
+
+    // Bounded drift context
+    drift: {
+      detected: (opts.driftDiffs ?? []).length > 0,
+      diffs:    (opts.driftDiffs ?? []).map(d => typeof d === 'string' ? { description: d } : d),
+    },
+
+    // Bounded worker context
+    worker: {
+      launched:                   opts.workerLaunched ?? false,
+      exitCode:                   opts.workerExitCode ?? null,
+      timedOut:                   opts.workerTimedOut ?? false,
+      interactivePromptDetected:  opts.interactivePromptDetected ?? false,
+      stdout:                     stdoutClip.text,
+      stderr:                     stderrClip.text,
+      stdoutTruncated:            stdoutClip.truncated,
+      stderrTruncated:            stderrClip.truncated,
+    },
+
+    // Execution telemetry
+    telemetry: {
+      durationMs: opts.durationMs ?? 0,
+    },
   };
 }
 
@@ -176,9 +223,11 @@ export async function runSupervisor(options) {
     validator      = null,
     updateSource   = null,
     projectRoot    = null,
+    envPolicy      = null,
   } = options;
 
   const runId    = generateRunId();
+  const startTime = Date.now();
   const stateDir = join(cwd, '.guardrail');
   const logDir   = join(stateDir, 'logs');
   const logger   = createLogger(runId, logDir);
@@ -202,6 +251,21 @@ export async function runSupervisor(options) {
     riskLevel:    '',
     riskReasons:  [],
     attempt:      0,
+    reason:       '',
+    driftDiffs:   [],
+    workerLaunched: false,
+    workerExitCode: null,
+    workerTimedOut: false,
+    interactivePromptDetected: false,
+    workerStdout: '',
+    workerStderr: '',
+    durationMs:   0,
+  };
+
+  // Helper to finalize shared result opts before each buildResult call
+  const finalize = (reason) => {
+    resultOpts.reason = reason;
+    resultOpts.durationMs = Date.now() - startTime;
   };
 
   logger.info('supervisor_start', { command, args, shell, cwd, nonInteractive, jsonOutput });
@@ -219,6 +283,7 @@ export async function runSupervisor(options) {
       cwd:   resolve(cwd),
       mode,
       shell: shell || null,
+      envPolicy: envPolicy || undefined,
     });
 
     logger.info('contract_created', { mode, command });
@@ -230,6 +295,7 @@ export async function runSupervisor(options) {
       const safety = checkRegexSafety(validator.regex);
       if (!safety.safe) {
         logger.error('redos_regex_rejected', { reason: safety.reason });
+        finalize(`Validator regex rejected: ${safety.reason}`);
         const result = buildResult(runId, 'policy_violation', resultOpts);
         persistState(stateDir, state, result);
         if (!jsonOutput) {
@@ -269,6 +335,7 @@ export async function runSupervisor(options) {
           expected: fileHashCheck.expected,
           actual: fileHashCheck.actual,
         });
+        finalize(`File hash mismatch: expected ${fileHashCheck.expected}, got ${fileHashCheck.actual ?? 'unreadable'} for ${fileHashCheck.path ?? contract.command}`);
         const result = buildResult(runId, 'policy_violation', resultOpts);
         persistState(stateDir, state, result);
         if (!jsonOutput) {
@@ -352,6 +419,7 @@ export async function runSupervisor(options) {
     if (nonInteractive && approved !== null && !needsApproval) {
       if (!approved.riskAssessment?.acknowledgedBy) {
         logger.error('non_interactive_unacknowledged_risk', { path: manifestPath });
+        finalize('Approved manifest has no acknowledged risk assessment. Run interactively first.');
         const result = buildResult(runId, 'approval_required', resultOpts);
         persistState(stateDir, state, result);
         if (!jsonOutput) {
@@ -366,6 +434,7 @@ export async function runSupervisor(options) {
         // Non-interactive mode: fail closed
         if (approved === null) {
           logger.error('non_interactive_no_manifest', { path: manifestPath });
+          finalize('No approved manifest found. Run interactively to approve.');
           const result = buildResult(runId, 'approval_required', resultOpts);
           persistState(stateDir, state, result);
           if (!jsonOutput) {
@@ -375,6 +444,8 @@ export async function runSupervisor(options) {
         } else {
           // Drift in non-interactive mode
           logger.error('non_interactive_drift', { diffs: driftDiffs });
+          resultOpts.driftDiffs = driftDiffs;
+          finalize('Contract drift detected in non-interactive mode.');
           const result = buildResult(runId, 'drift_detected', resultOpts);
           persistState(stateDir, state, result);
           if (!jsonOutput) {
@@ -388,6 +459,7 @@ export async function runSupervisor(options) {
       // Detect unsupported TTY condition: interactive approval requested but no TTY
       if (!process.stdin.isTTY) {
         logger.error('unsupported_no_tty', { message: 'Interactive approval needed but stdin is not a TTY' });
+        finalize('Interactive approval required but stdin is not a TTY. Use --non-interactive with --approved-manifest.');
         const result = buildResult(runId, 'unsupported', resultOpts);
         persistState(stateDir, state, result);
         if (!jsonOutput) {
@@ -411,6 +483,7 @@ export async function runSupervisor(options) {
 
       if (!userApproved) {
         logger.info('approval_denied', { riskLevel: riskAssessment.riskLevel });
+        finalize('User denied approval.');
         const result = buildResult(runId, 'approval_denied', resultOpts);
         persistState(stateDir, state, result);
         if (!jsonOutput) {
@@ -430,6 +503,7 @@ export async function runSupervisor(options) {
         logger.info('manifest_saved', { path: manifestPath });
       } catch (err) {
         logger.error('manifest_save_error', { path: manifestPath, error: err.message });
+        finalize('Failed to save approved manifest. Aborting before execution.');
         const result = buildResult(runId, 'internal_error', resultOpts);
         persistState(stateDir, state, result);
         if (!jsonOutput) {
@@ -455,6 +529,7 @@ export async function runSupervisor(options) {
         const detail = timeCheck.errors.map(e => e.detail).join('; ');
         logger.error('time_policy_violated', { errors: timeCheck.errors });
         auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: contractHash, reason: detail });
+        finalize(`Time policy violated: ${detail}`);
         const result = buildResult(runId, 'time_policy_violated', resultOpts);
         persistState(stateDir, state, result);
         if (!jsonOutput) {
@@ -468,6 +543,7 @@ export async function runSupervisor(options) {
     if (!lockResult.acquired) {
       logger.error('concurrent_blocked', { detail: lockResult.detail });
       auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: contractHash, reason: lockResult.detail });
+      finalize(`Concurrent execution blocked: ${lockResult.detail}`);
       const result = buildResult(runId, 'concurrent_blocked', resultOpts);
       persistState(stateDir, state, result);
       if (!jsonOutput) {
@@ -711,6 +787,24 @@ export async function runSupervisor(options) {
       status: finalStatus,
     });
 
+    // Populate worker context from the execution loop
+    if (lastWorkerResult) {
+      resultOpts.workerLaunched = true;
+      resultOpts.workerExitCode = lastWorkerResult.exitCode ?? null;
+      resultOpts.workerTimedOut = lastWorkerResult.timedOut ?? false;
+      resultOpts.workerStdout = lastWorkerResult.stdout ?? '';
+      resultOpts.workerStderr = lastWorkerResult.stderr ?? '';
+    }
+    if (terminalMessage && terminalMessage.includes('Interactive prompt detected')) {
+      resultOpts.interactivePromptDetected = true;
+    }
+    resultOpts.driftDiffs = driftDiffs;
+
+    const reasonMsg = finalStatus === 'success'
+      ? 'Run completed successfully.'
+      : (terminalMessage ?? `Run ended with status: ${finalStatus}`);
+    finalize(reasonMsg);
+
     const result = buildResult(runId, finalStatus, resultOpts);
     persistState(stateDir, state, result);
 
@@ -722,7 +816,7 @@ export async function runSupervisor(options) {
       printResult({
         success:  isSuccess,
         exitCode: result.exitCode,
-        message:  isSuccess ? 'Run completed successfully.' : (terminalMessage ?? `Run ended with status: ${finalStatus}`),
+        message:  reasonMsg,
         errors:   lastWorkerResult?.stderr ? [lastWorkerResult.stderr.slice(0, 500)] : [],
       });
     }
@@ -738,6 +832,7 @@ export async function runSupervisor(options) {
     // Release lock if held
     try { if (lockRelease) lockRelease(); } catch { /* ignore */ }
 
+    finalize(`Internal error: ${err.message}`);
     const result = buildResult(runId, 'internal_error', resultOpts);
     try {
       persistState(stateDir, state, result);

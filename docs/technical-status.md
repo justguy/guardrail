@@ -58,6 +58,15 @@ src/
   recipe-runner.js       Recipe resolution by ID, input validation, dry-run orchestration
   recipe-install.js      Local registry, install from path/URL/github://, SHA pinning, trusted sources
   recipe-publish.js      Recipe publish: manifest→recipe, personal data scrub, gh CLI PR flow
+  adapter-extract.js     Safe field extraction via allowlisted JSONPath subset
+  adapter-profile.js     Adapter profile validation, loading, version selection, hashing
+  adapter-engine.js      Adapter orchestration: extract → auth preflight → supervisor → normalize → render
+  adapter-auth.js        Adapter auth preflight: requires_env mapping + bounded CLI auth checks
+  adapter-stdin.js       stdin-json protocol handler, bounded input parsing
+  adapter-shim.js        env-shim protocol: PATH shim create/remove/list/install-path
+  adapter-cli.js         Adapter subcommand parsing and routing
+  adapter-profile-install.js  Adapter profile install from path/URL/github://
+  adapter-profiles/      Bundled profiles: openclaw (stdin-json), aider (env-shim), cline (mcp/blocked)
   verify.js              Self-verification checks (core imports, signing, safe defaults, risk)
   demo-scenarios.js      Demo pack: recipe, trust, blocked scenarios
 
@@ -69,8 +78,8 @@ recipes/
   dep-upgrade            Packages: dependency upgrade within patch/minor scope (community, medium)
   infra-deploy           Infra: Terraform validate/plan/apply scoped to env (verified, high)
   openclaw-wrapper       OpenClaw: wrapped flow with scope enforcement (community, high)
-  codex-exec             Custom: structured Codex wrapper with input_files prompt context (community, medium)
-  claude-exec            Custom: structured Claude wrapper with input_files, cwd, tools, budget, and session controls (community, medium)
+  codex-exec             Custom: structured Codex wrapper with input_files prompt context and host-boundary warning (community, high)
+  claude-exec            Custom: structured Claude wrapper with input_files, cwd, tools, budget, session controls, and host-boundary warning (community, medium)
 
 tests/
   test-core.js                Contract, manifest, risk, approval, drift, validator, logger tests
@@ -260,7 +269,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | Recipe install (local) | Done | `guardrail recipe install <path>` to `~/.guardrail/recipes/` |
 | Recipe install (remote) | Done | `guardrail recipe install <url>` with fail-closed trusted source enforcement |
 | GitHub recipe distribution (`github://`, public publish flow) | Done | SHA-pinned install, `.pins/<version>.json` metadata, publish dry-run/PR flow |
-| Adapter system (`adapter run`, profile install, shim flow) | Not started | Design only today — see `docs/adapter-implementation-plan.md` |
+| Adapter system (`adapter run`, profile install, shim flow) | Partial | Core adapter runtime is live: declarative profiles, `adapter-result/v1` normalization, `adapter run`, `adapter shim`, `adapter profile install`, auth preflight, and bundled `openclaw` / `aider` / `cline` profiles exist. Remaining work is deeper session support, future protocol expansion, and any additional hardening beyond the current Phase 1 surface. |
 | Local recipe registry | Done | `~/.guardrail/recipes/`, duplicate/version conflict handling |
 | Trusted source config | Done | `~/.guardrail/config.json` with `trusted_sources` array |
 | Self-verification | Done | `guardrail verify` — 7 checks: modules, validation, signing, safe defaults, risk, dangerous, recipes |
@@ -509,9 +518,9 @@ Three product phases, each with its own go-to-market motion.
 | D0k | Wrapper/version coupling and provenance policy | v0.3 | Safe upgrades for Guardrail-shipped wrapper recipes | Not started — recipes that depend on local wrapper helpers need explicit drift/provenance rules when the helper changes independently of the recipe artifact. Define how wrapper hashes, bundled versions, and recipe compatibility are pinned and surfaced to users. |
 | D0l | Org policy for trusted recipe roots and external execution sources | v0.4 | Central governance for shared recipe libraries | Not started — today extra recipe roots are caller-supplied. Add org/repo policy controls for which external recipe roots, mounted paths, or registries are trusted and when human approval is still required. |
 | D0m | Workflow parity for private/shared installed recipe sources across machines | v0.4 | Consistent local/CI/team behavior | Not started — once workflows use installed or shared recipes, the same workflow should resolve predictably on laptops, CI, and shared runners. Define parity rules for installed versions, private sources, and missing-source diagnostics. |
-| D0n | `recipe_ref` trust/signature enforcement parity with standalone recipe mode | v0.3 | Stronger provenance guarantees for workflow-chained recipes | Not started — workflow `recipe_ref` already pins recipe version and content hash, but it should also enforce channel/signature policy explicitly, surface verified-vs-community provenance in the workflow manifest, and fail closed when a referenced recipe no longer satisfies the approved trust boundary. |
+| D0n | `recipe_ref` trust/signature enforcement parity with standalone recipe mode | v0.3 | Stronger provenance guarantees for workflow-chained recipes | Done — workflow `recipe_ref` records trust/signature metadata in normalized manifests, enforces `channel`/signature policy at execution time, persists trust-boundary (`allow_unverified`) in workflow approvals, and fails closed when trust policy changes after approval. |
 | D0o | Reproduce and fix first-approval TTY failure under `tpf` | v0.3 | Reliable interactive approval from agent shells | Done — verified first interactive approval in command, recipe, and workflow mode through `tpf --passthrough-tty`. Guardrail keeps the TTY requirement; the supported approval-bearing path is documented in README and agent onboarding. |
-| D0p | Enforce `review_each_time` parity for workflow `recipe_ref` inputs | v0.3 | Honest approval semantics for prompt-bearing chained recipes | Not started — standalone recipe mode forces fresh approval for inputs flagged `review_each_time`/`never_reuse`, but workflow `recipe_ref` steps currently normalize and store `flaggedInputs` without using them to block non-interactive reuse. Add workflow-level reapproval enforcement for unchanged prompt-bearing inputs such as `system_prompt` and inline `prompt`, and cover it in workflow acceptance tests. |
+| D0p | Enforce `review_each_time` parity for workflow `recipe_ref` inputs | v0.3 | Honest approval semantics for prompt-bearing chained recipes | Done — workflow approval now rechecks recipe_ref `flaggedInputs` for `never_reuse`-qualified values and forces non-interactive reapproval even on manifest matches, with dedicated workflow regression coverage. |
 | D1 | npm registry (`@guardrail/recipes`) | v0.3 | Developer ergonomics | Not started — convenience layer on top of GitHub repo, not a replacement. npm versions are immutable once published; content hash is stable. Requires publish pipeline. Ship after GitHub-based distribution is proven. |
 | D2 | Self-hosted recipe registry (JSON API) | v0.5 | Enterprise air-gap | Not started — thin static API: `GET /v1/recipes`, `GET /v1/recipes/{category}/{name}`, `GET /v1/recipes/{category}/{name}/versions`. Simplest impl is S3+CloudFront or R2, write-once, no database. Becomes `registry.guardrail.dev`; enterprise customers run on-prem instances declared in org policy `trusted_registries`. |
 
@@ -519,12 +528,12 @@ Three product phases, each with its own go-to-market motion.
 
 | # | Feature | Target | Unlocks | Status |
 |---|---------|--------|---------|--------|
-| A0a | Rich command supervisor context | v0.2 | Stable agent/tool integrations | Not started — spec in docs/adapter-implementation-plan.md. `runSupervisor()` returns bounded worker output, drift diffs, reason, and telemetry instead of a minimal pass/fail summary. |
-| A0b | `adapter-result/v1` translation layer + declarative profiles | v0.2 | Public open-source profile ecosystem | Not started — spec in docs/adapter-implementation-plan.md. Public profiles target a versioned schema, declare `schema_target`, and remain pure-data mappings. |
-| A0c | Adapter CLI + Phase 1 protocols (`stdin-json`, `env-shim`) | v0.2 | OpenClaw/Aider integration | Not started — spec in docs/adapter-implementation-plan.md. `mcp` profiles are recognized but blocked until runtime support exists. |
-| A0d | GitHub SHA-pinned adapter profile install | v0.2 | Safe public profile sharing | Not started — spec in docs/adapter-implementation-plan.md. Uses `github://owner/repo/path@sha`, trusted source enforcement, immutable installs, and `.pins/<version>.json` metadata. |
-| A0e | Bundled adapter profiles for `openclaw`, `aider`, and `cline` | v0.2 | Turnkey agent onboarding | Not started — spec in docs/adapter-implementation-plan.md. Ship pure-data bundled profiles under `src/adapter-profiles/`; `cline` may declare `mcp` but must remain blocked at runtime until MCP support exists. |
-| A0f | Adapter auth mapping and env-policy preflight (`missing_auth_mapping`) | v0.2 | Safe CI/OIDC credential plumbing | Not started — spec in docs/auth_req.txt. Adapters and recipes that declare required credentials must compare them against the approved `envPolicy.allow` set, fail closed with an actionable `missing_auth_mapping` response, and keep `inherit: false` as the default credential boundary. |
+| A0a | Rich command supervisor context | v0.2 | Stable agent/tool integrations | Partial — `runSupervisor()` now returns bounded worker output, drift diffs, reason, and telemetry on the command path. Remaining work is broader contract hardening and more explicit adapter-path proof. |
+| A0b | `adapter-result/v1` translation layer + declarative profiles | v0.2 | Public open-source profile ecosystem | Partial — translation layer and declarative profiles are live. Remaining work is more end-to-end coverage and any future schema-version evolution. |
+| A0c | Adapter CLI + Phase 1 protocols (`stdin-json`, `env-shim`) | v0.2 | OpenClaw/Aider integration | Partial — `adapter run`, `adapter-stdin`, and shim management exist; `mcp` profiles are recognized and blocked for both `--tool` and `--profile` flows, and the direct `adapter-stdin` entrypoint now treats `argv[2]` as the profile path while still reading JSON from stdin or a forwarded file path. Remaining work is wider hardening and protocol-surface proof. |
+| A0d | GitHub SHA-pinned adapter profile install | v0.2 | Safe public profile sharing | Partial — GitHub/path install flow and pin metadata exist. Remaining work is stronger end-to-end proof around public distribution and trust policy. |
+| A0e | Bundled adapter profiles for `openclaw`, `aider`, and `cline` | v0.2 | Turnkey agent onboarding | Partial — bundled profiles ship under `src/adapter-profiles/`; `cline` remains blocked through the MCP gate. Remaining work is ongoing compatibility proof for real tools. |
+| A0f | Adapter auth mapping and env-policy preflight (`missing_auth_mapping`) | v0.2 | Safe CI/OIDC credential plumbing | Done — adapter profiles may declare `requires_env` and bounded `requires_auth` checks. `adapter run` now supports repeatable `--env-allow`, compares declared env requirements against the approved allow-list, fails closed with a `missing_auth_mapping` reason, preserves `inherit: false` with explicit allow-list plumbing, performs bounded CLI-auth preflight for supported runtime-local checks such as Claude and GitHub CLI login state, and requires explicit mapping of auth-runtime env such as `HOME`, `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`, or `GH_CONFIG_DIR` when those are needed to make the checked login state visible to the guarded child process. |
 | A0g | Agent session contracts and resumable named runs | v0.3 | Repeatable long-lived AI workflows | Not started — current AI recipes are single-shot wrappers. Add explicit session/state contracts so agents can resume, continue, or attach to named runs without falling back to uncontrolled local CLI state. |
 | A1 | Signed index + bare-name profile install | v0.3 | Discovery and easier onboarding | Not started — deferred until a signed index exists. Bare-name install should not ship before public-key verification is in place. |
 

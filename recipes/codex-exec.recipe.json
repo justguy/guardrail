@@ -204,6 +204,7 @@
       "Prompt-bearing file inputs are limited to approved relative paths",
       "Prompt-bearing file inputs are content-hash bound at approval time and rechecked before execution",
       "Input files are appended as explicit tagged blocks so the prompt boundary is visible",
+      "Guardrail does not provide outer sandboxing for Codex itself; running this recipe outside an external sandbox uses host privileges subject to Codex's own permission model",
       "The wrapper only forwards supported codex exec flags and drops unset parameters"
     ],
     "invariants": [

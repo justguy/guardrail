@@ -1,0 +1,40 @@
+{
+  "tool": "openclaw",
+  "protocol": "stdin-json",
+  "schema_target": "adapter-result/v1",
+  "version": "1.0.0",
+  "description": "OpenClaw adapter profile — routes OpenClaw tool invocations through Guardrail enforcement",
+  "intercept": {
+    "command": "$.command",
+    "args": "$.args",
+    "cwd": "$.cwd"
+  },
+  "response": {
+    "format": "json",
+    "success": {
+      "status": "success",
+      "stdout": "$.process.stdout",
+      "stderr": "$.process.stderr"
+    },
+    "blocked": {
+      "status": "blocked",
+      "reason": "$.guardrail.reason",
+      "drift_summary": "$.guardrail.driftSummary",
+      "risk_level": "$.guardrail.riskLevel"
+    },
+    "failed": {
+      "status": "failed",
+      "exit_code": "$.guardrail.exitCode",
+      "stderr": "$.process.stderr"
+    }
+  },
+  "exit_codes": {
+    "success": 0,
+    "blocked": 12,
+    "failed": 1
+  },
+  "defaults": {
+    "non_interactive": true,
+    "json_output": true
+  }
+}

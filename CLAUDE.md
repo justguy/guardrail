@@ -43,7 +43,7 @@ src/fingerprint.js          Environment fingerprinting for audit entries
 src/runtime-policy.js       Time policy, counter persistence, concurrency locks
 src/template.js             Template engine: validate, lint, interpolate, hash, explain, simulate
 src/template-supervisor.js  Template execution supervisor with rollback
-src/supervisor.js           Single-command execution orchestrator
+src/supervisor.js           Single-command execution orchestrator (rich bounded result for adapters)
 src/worker-interface.js     Child process spawning (structured vs shell modes)
 src/policy-engine.js        Risk evaluation, trust classification
 src/validator.js            Result validation, convergence tracking
@@ -53,6 +53,14 @@ src/shared.js               Utilities (deep equality, atomic writes, env buildin
 src/recipe-runner.js        Recipe resolution by ID, input validation, execution orchestrator
 src/recipe-install.js       Local registry, install from path/URL/github://, SHA pinning, trusted sources
 src/recipe-publish.js       Recipe publish: manifest→recipe, personal data scrub, gh CLI PR flow
+src/adapter-extract.js      Safe field extraction via allowlisted JSONPath subset
+src/adapter-profile.js      Adapter profile validation, loading, version selection, hashing
+src/adapter-engine.js       Adapter orchestration: extract → supervisor → normalize → render
+src/adapter-stdin.js        stdin-json protocol handler, bounded input parsing
+src/adapter-shim.js         env-shim protocol: PATH shim create/remove/list/install-path
+src/adapter-cli.js          Adapter subcommand parsing and routing
+src/adapter-profile-install.js  Adapter profile install from path/URL/github://
+src/adapter-profiles/       Bundled adapter profiles (openclaw, aider, cline)
 src/verify.js               Self-verification checks (guardrail verify)
 src/demo-scenarios.js       Demo pack: recipe, trust, blocked scenarios
 src/risk-traits.js          Risk trait taxonomy, bucket classification, capability summary
@@ -80,6 +88,7 @@ tests/test-github-install.js     GitHub SHA-pinned install, pin metadata, CLI pa
 tests/test-recipe-publish.js     Manifest→recipe conversion, personal-data scrub, PR body, publish guards
 tests/test-codex-recipe.js       Codex recipe wrapper and prompt-input coverage
 tests/test-claude-recipe.js      Claude recipe wrapper and prompt-input coverage
+tests/test-adapter.js            Adapter system: extract, profile, engine, stdin, shim, CLI, install
 docs/technical-status.md    Current implementation status and roadmap
 docs/issues.md              Issue tracker — all bugs, fixes, and resolutions are logged here
 docs/acceptance-tests.md    Feature acceptance test matrix with results

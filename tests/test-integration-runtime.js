@@ -145,6 +145,39 @@ function createApprovedRecipeManifest(recipe, cwd, manifestPath, sourcePath, opt
 // ===========================================================================
 
 describe('Integration: Command Supervisor Runtime Policy', () => {
+  it('returns the rich bounded result shape on successful execution', async () => {
+    const dir = tmpDir();
+    const manifestDir = join(dir, '.guardrail');
+    mkdirSync(manifestDir, { recursive: true });
+    const manifestPath = join(manifestDir, 'approved.json');
+
+    createApprovedCommandManifest('echo', ['hello'], dir, manifestPath);
+
+    const result = await runSupervisor({
+      command: 'echo',
+      args: ['hello'],
+      cwd: dir,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'success');
+    assert.equal(typeof result.reason, 'string');
+    assert.equal(result.drift.detected, false);
+    assert.deepEqual(result.drift.diffs, []);
+    assert.equal(result.worker.launched, true);
+    assert.equal(result.worker.exitCode, 0);
+    assert.equal(result.worker.timedOut, false);
+    assert.equal(result.worker.interactivePromptDetected, false);
+    assert.equal(result.worker.stdoutTruncated, false);
+    assert.equal(result.worker.stderrTruncated, false);
+    assert.match(result.worker.stdout, /hello/);
+    assert.equal(typeof result.telemetry.durationMs, 'number');
+    assert.ok(result.telemetry.durationMs >= 0);
+  });
+
   it('time policy blocks execution with expired validUntil', async () => {
     const dir = tmpDir();
     const manifestDir = join(dir, '.guardrail');
@@ -197,6 +230,32 @@ describe('Integration: Command Supervisor Runtime Policy', () => {
     } finally {
       lock.release();
     }
+  });
+
+  it('returns bounded drift context on non-interactive manifest drift', async () => {
+    const dir = tmpDir();
+    const manifestDir = join(dir, '.guardrail');
+    mkdirSync(manifestDir, { recursive: true });
+    const manifestPath = join(manifestDir, 'approved.json');
+
+    createApprovedCommandManifest('echo', ['hello'], dir, manifestPath);
+
+    const result = await runSupervisor({
+      command: 'echo',
+      args: ['goodbye'],
+      cwd: dir,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'drift_detected');
+    assert.equal(result.drift.detected, true);
+    assert.ok(Array.isArray(result.drift.diffs));
+    assert.ok(result.drift.diffs.length > 0);
+    assert.equal(typeof result.drift.diffs[0].description, 'string');
+    assert.match(result.reason, /Contract drift detected/);
   });
 
   it('audit log entries written on execution', async () => {
@@ -572,6 +631,35 @@ describe('Integration: Recipe Supervisor Runtime Policy', () => {
     const entries = queryAuditLog(auditPath, {});
     assert.ok(entries.some(e => e.event === 'recipe_execution_start'));
     assert.ok(entries.every(e => e.manifest_hash === manifest.recipeHash));
+  });
+
+  it('flags host-boundary risk for claude-exec before approval', async () => {
+    const dir = tmpDir();
+
+    const result = await runRecipeSupervisor({
+      specifier: 'claude-exec',
+      inputs: {
+        guardrail_repo: '.',
+        working_dir: '.',
+        prompt: 'Review this repo.',
+        model: 'sonnet',
+        effort: 'high',
+        mode: 'plan',
+        output_format: 'text',
+        max_budget_usd: '1.00',
+        system_prompt: 'Focus on facts only.',
+        session_name: 'risk-check',
+      },
+      cwd: dir,
+      searchDirs: [join(process.cwd(), 'recipes')],
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'approval_required');
+    assert.equal(result.riskLevel, 'yellow');
+    assert.ok(result.riskReasons.some((reason) => reason.includes('does not sandbox host execution')));
   });
 });
 

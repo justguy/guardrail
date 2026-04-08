@@ -119,6 +119,7 @@ Bundled Codex recipe:
 - `input_files` are content-hash bound at approval time and rechecked immediately before execution
 - inline `prompt` values are `review_each_time`: they require fresh approval every run, even if unchanged
 - for unattended reuse, keep stable prompt material in `input_files` instead of inline prompt text
+- `codex-exec` is not an outer sandbox. If it runs outside your host sandbox/container boundary, Codex executes with host privileges subject to Codex's own permission model.
 
 Example interactive run:
 
@@ -135,9 +136,11 @@ node src/cli.js run --recipe codex-exec \
 Bundled Claude recipe:
 
 - `recipes/claude-exec.recipe.json` wraps `claude --print` through `src/claude-exec-wrapper.js`
-- supports inline prompt text, `input_files` prompt context, explicit working directory control, `allowed_tools`, `max_budget_usd`, `system_prompt`, and `session_name`
+- supports inline prompt text, `input_files` prompt context, explicit working directory control, optional `allowed_tools`, `max_budget_usd`, `system_prompt`, and `session_name`
 - `working_dir` sets the Claude process cwd; `add_dirs` only grants additional tool-access roots
+- omit `allowed_tools` to let Claude use its default built-in tool set
 - inline `prompt` and `system_prompt` are `review_each_time`; reusable prompt context should live in `input_files`
+- `claude-exec` is not an outer sandbox. If it runs outside your host sandbox/container boundary, Claude executes with host privileges subject to Claude's own permission model. Guardrail warns about this in recipe approval risk reasons.
 
 Example interactive run:
 
@@ -153,7 +156,6 @@ node src/cli.js run --recipe claude-exec \
   --input mode=plan \
   --input output_format=text \
   --input max_budget_usd=1.00 \
-  --input allowed_tools=Read,Glob,Grep \
   --input system_prompt="Focus on concrete reproduction steps and likely root causes." \
   --input session_name=auth-review \
   --manifest .guardrail/recipes/claude-exec.approved.json
@@ -207,6 +209,37 @@ GH_CONFIG_DIR=/path/to/gh-config \
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js recipe install \
   github://owner/repo/recipes/safe.recipe.json@<full-commit-sha>
 ```
+
+## Adapter Mode
+
+Use adapter mode when an agent invokes another tool through Guardrail:
+
+```bash
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js adapter run --tool openclaw -- npm test
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js adapter run --profile ./my-tool-profile.json --env-allow ANTHROPIC_API_KEY -- npm test
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js adapter run --tool cline -- echo "blocked in v0.2"
+```
+
+If approval is not yet established in the current context, adapter runs are blocked with:
+
+```bash
+No approved manifest found. Run interactively to approve.
+```
+
+Useful adapter subcommands:
+
+- `guardrail adapter run --tool <name> -- <command> [args...]`
+- `guardrail adapter run --profile <profile-path> -- <command> [args...]`
+- `guardrail adapter profile install github://owner/repo/path.json@<sha>`
+- `guardrail adapter profile list`
+- `guardrail adapter profile show <tool>`
+
+Bounded auth preflight behavior:
+
+- `requires_env` requires explicit env mappings. If a required variable is not in `--env-allow`, `adapter run` fails before execution with `missing_auth_mapping`.
+- `requires_auth` validates bounded runtime state for known checks (for example `claude_login`, `gh_auth`) before process launch; missing checks fail with `missing_auth_prerequisite`.
+- Auth preflight returns blocked status and stops. It does not log the agent in for you; authentication must already exist in the same runtime (`claude auth login` / `gh auth status/login`).
+- MCP profiles are intentionally blocked in v0.2 at CLI level. Use env-shim/stdin-json profiles instead or wait for the roadmap to land.
 
 ## Workflow Authoring Note
 

@@ -69,6 +69,13 @@ function maxRisk(a, b) {
   return rank[a] >= rank[b] ? a : b;
 }
 
+const HOST_BOUNDARY_RECIPE_IDS = new Set(['claude-exec', 'codex-exec']);
+const HOST_BOUNDARY_WARNING = 'Guardrail does not sandbox host execution; this wrapper relies on the tool/runtime permission model';
+
+function hasHostBoundaryWarning(recipe) {
+  return HOST_BOUNDARY_RECIPE_IDS.has(recipe?.id);
+}
+
 function evaluateRecipeRisk(recipe, options = {}) {
   const trust = classifyTrust(recipe);
   const riskReasons = [];
@@ -85,6 +92,11 @@ function evaluateRecipeRisk(recipe, options = {}) {
 
   if (recipe.approval_required) {
     riskReasons.push('recipe metadata marks execution as approval-sensitive');
+  }
+
+  if (hasHostBoundaryWarning(recipe)) {
+    riskReasons.push(HOST_BOUNDARY_WARNING);
+    riskLevel = maxRisk(riskLevel, 'yellow');
   }
 
   if (!trust.verified) {
@@ -136,6 +148,9 @@ function printRecipeApprovalSummary(recipe, resolvedInputs, riskAssessment, sour
     for (const reason of riskAssessment.reasons) {
       line(`                       ${colorize('- ' + reason, 'yellow')}`);
     }
+  }
+  if (hasHostBoundaryWarning(recipe)) {
+    line(lv('Host boundary', colorize('Guardrail does not provide outer sandboxing for this recipe.', 'yellow')));
   }
   sep();
   line();

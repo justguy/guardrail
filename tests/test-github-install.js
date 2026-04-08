@@ -537,6 +537,16 @@ describe('CLI bare recipe name detection', async () => {
     assert.equal(result.definition, 'workflows/review.json');
     assert.deepEqual(result.recipeSearchDirs, ['/tmp/guardian-recipes', '/opt/shared-recipes']);
   });
+
+  it('parses workflow --allow-unverified', () => {
+    const result = parseArgs([
+      'workflow', 'run',
+      '--definition', 'workflows/review.json',
+      '--allow-unverified',
+    ]);
+    assert.equal(result.subcommand, 'workflow');
+    assert.equal(result.allowUnverified, true);
+  });
 });
 
 // ---------------------------------------------------------------------------

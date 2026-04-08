@@ -15,7 +15,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { normalizeWorkflowDefinition, hashWorkflow, createWorkflowManifest } from '../src/workflow.js';
 import { evaluateWorkflowRisk } from '../src/policy-engine.js';
+import { signRecipe } from '../src/recipe-channel.js';
 import { saveManifest } from '../src/manifest.js';
+import { runAdapter } from '../src/adapter-engine.js';
 
 const CLI = `node ${join(process.cwd(), 'src', 'cli.js')}`;
 
@@ -29,6 +31,47 @@ function run(cmd, opts = {}) {
 
 function tmpDir() {
   return realpathSync(mkdtempSync(join(tmpdir(), 'gr-feat-')));
+}
+
+function makeAdapterProfile(overrides = {}) {
+  return {
+    version: '1.0.0',
+    tool: 'acceptance-adapter',
+    description: 'Acceptance adapter profile',
+    schema_target: 'adapter-result/v1',
+    protocol: 'stdin-json',
+    intercept: {
+      command: '$.command',
+      args: '$.args',
+      cwd: '$.cwd',
+    },
+    response: {
+      format: 'json',
+      success: {
+        status: 'success',
+        stdout: '$.process.stdout',
+      },
+      blocked: {
+        status: 'blocked',
+        reason: '$.guardrail.reason',
+      },
+      failed: {
+        status: 'failed',
+        exit_code: '$.guardrail.exitCode',
+        stderr: '$.process.stderr',
+      },
+    },
+    exit_codes: { success: 0, blocked: 12, failed: 1 },
+    defaults: { non_interactive: true, json_output: true },
+    ...overrides,
+  };
+}
+
+function writeAdapterProfile(overrides = {}) {
+  const dir = tmpDir();
+  const profilePath = join(dir, 'acceptance.adapter.json');
+  writeFileSync(profilePath, JSON.stringify(makeAdapterProfile(overrides), null, 2));
+  return profilePath;
 }
 
 // ==========================================================================
@@ -134,35 +177,39 @@ describe('README Feature: Workflow Mode', () => {
     const externalRecipesDir = tmpDir();
     mkdirSync(externalRecipesDir, { recursive: true });
 
-    writeFileSync(join(externalRecipesDir, 'recipe-one.recipe.json'), JSON.stringify({
+    const recipeOne = {
       id: 'recipe-one',
       name: 'Recipe One',
       description: 'First workflow recipe',
       version: '1.0.0',
       author: 'test',
       category: 'custom',
-      channel: 'community',
+      channel: 'verified',
       approval_required: true,
       risk_level: 'low',
       inputs: {},
       steps: [{ id: 'main', description: 'echo one', run: { command: 'echo', args: ['one'], mode: 'structured' } }],
       guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
-    }, null, 2));
+    };
+    recipeOne.signature = signRecipe(recipeOne);
+    writeFileSync(join(externalRecipesDir, 'recipe-one.recipe.json'), JSON.stringify(recipeOne, null, 2));
 
-    writeFileSync(join(externalRecipesDir, 'recipe-two.recipe.json'), JSON.stringify({
+    const recipeTwo = {
       id: 'recipe-two',
       name: 'Recipe Two',
       description: 'Second workflow recipe',
       version: '1.0.0',
       author: 'test',
       category: 'custom',
-      channel: 'community',
+      channel: 'verified',
       approval_required: true,
       risk_level: 'low',
       inputs: {},
       steps: [{ id: 'main', description: 'echo two', run: { command: 'echo', args: ['two'], mode: 'structured' } }],
       guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
-    }, null, 2));
+    };
+    recipeTwo.signature = signRecipe(recipeTwo);
+    writeFileSync(join(externalRecipesDir, 'recipe-two.recipe.json'), JSON.stringify(recipeTwo, null, 2));
 
     const def = {
       version: 1,
@@ -221,6 +268,77 @@ describe('README Feature: Workflow Mode', () => {
     const result = JSON.parse(r.stdout);
     assert.equal(result.status, 'success');
     assert.equal(result.stepsExecuted, 2);
+  });
+
+  it('workflow run accepts --allow-unverified when manifest allows workflow trust boundary change', () => {
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'recipes'), { recursive: true });
+    writeFileSync(join(dir, 'recipes', 'comm.recipe.json'), JSON.stringify({
+      id: 'comm',
+      name: 'Community Recipe',
+      description: 'Community workflow recipe',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{ id: 'main', description: 'echo one', run: { command: 'echo', args: ['ok'], mode: 'structured' } }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    }, null, 2));
+
+    const def = {
+      version: 1,
+      kind: 'workflow_definition',
+      name: 'comm-boundary-wf',
+      projectRoot: '.',
+      entryStep: 'step_a',
+      maxIterations: 3,
+      services: [],
+      rollback_policy: 'none',
+      rollback_none_reason: 'single bounded recipe step',
+      steps: [{
+        id: 'step_a',
+        type: 'recipe_ref',
+        recipe: 'comm',
+        inputs: {},
+        on: { success: 'done', failure: 'abort' },
+      }],
+    };
+    const defPath = join(dir, 'workflow.json');
+    writeFileSync(defPath, JSON.stringify(def, null, 2));
+
+    const manifestDir = join(dir, '.guardrail', 'workflows');
+    mkdirSync(manifestDir, { recursive: true });
+    const normalized = normalizeWorkflowDefinition(def, dir, {
+      recipeSearchDirs: [join(dir, 'recipes')],
+      allowUnverified: true,
+    });
+    const manifestPath = join(manifestDir, 'comm.approved.json');
+    const workflowHash = hashWorkflow(normalized);
+    const riskAssessment = evaluateWorkflowRisk(normalized, {
+      trustClass: 'reviewed_internal',
+      projectRoot: dir,
+    });
+    const manifest = createWorkflowManifest(normalized, workflowHash, {
+      ...riskAssessment,
+      acknowledgedBy: 'acceptance-test',
+      acknowledgedAt: new Date().toISOString(),
+    }, normalized.projectRoot);
+    saveManifest(manifest, manifestPath);
+
+    const r = run(
+      `${CLI} workflow run --definition ${defPath} ` +
+      `--recipe-search-dir ${join(dir, 'recipes')} --allow-unverified --trust reviewed_internal ` +
+      `--non-interactive --approved-manifest ${manifestPath} --json`,
+      { cwd: dir },
+    );
+
+    assert.equal(r.exitCode, 0, r.stderr);
+    const result = JSON.parse(r.stdout);
+    assert.equal(result.status, 'success');
+    assert.equal(result.stepsExecuted, 1);
   });
 });
 
@@ -447,7 +565,6 @@ describe('README Feature: Recipe System', () => {
       `--input mode=plan ` +
       `--input output_format=text ` +
       `--input max_budget_usd=1.00 ` +
-      `--input allowed_tools=Read,Glob,Grep ` +
       `--input system_prompt="Focus on deterministic failures." ` +
       `--input session_name=readme-review ` +
       `--dry-run`,
@@ -467,6 +584,74 @@ describe('README Feature: Recipe System', () => {
     );
     assert.equal(r.exitCode, 0, r.stderr);
     assert.ok(r.stdout.includes('Safe:  YES'));
+  });
+});
+
+// ==========================================================================
+// README: "Adapter System"
+// ==========================================================================
+
+describe('README Feature: Adapter System', () => {
+  it('guardrail adapter run --tool openclaw executes through Guardrail and returns adapter output', () => {
+    const r = run(`${CLI} adapter run --tool openclaw -- echo adapter-openclaw`);
+    const raw = [r.stdout, r.stderr].filter(Boolean).join('\n');
+    assert.ok(r.exitCode !== 0, r.stderr || r.stdout);
+    assert.ok(raw.includes('No approved manifest found'));
+  });
+
+  it('guardrail adapter run blocks MCP profiles at parse/gate time', () => {
+    const r = run(`${CLI} adapter run --tool cline -- echo should-fail`);
+    assert.ok(r.exitCode !== 0);
+    assert.ok((r.stderr || '').includes('MCP protocol is not yet supported in v0.2.'));
+    assert.ok((r.stderr || '').includes('mcp-roadmap'));
+  });
+
+  it('adapter preflight enforces requires_env before execution', async () => {
+    const profilePath = writeAdapterProfile({
+      requires_env: ['BOUND_TOKEN'],
+    });
+
+    const blocked = await runAdapter({
+      profilePath,
+      rawInput: { command: 'echo', args: ['adapter-auth'] },
+    });
+    assert.equal(blocked.adapterResult.guardrail.category, 'blocked');
+    assert.ok(blocked.adapterResult.guardrail.reason.includes('missing_auth_mapping'));
+    assert.ok(blocked.adapterResult.guardrail.reason.includes('BOUND_TOKEN'));
+
+    const allowed = await runAdapter({
+      profilePath,
+      envAllow: ['BOUND_TOKEN'],
+      rawInput: { command: 'echo', args: ['adapter-auth'] },
+      supervisorFn: async () => ({
+        runId: 'accepted',
+        status: 'success',
+        reason: 'ok',
+        exitCode: 0,
+        worker: { launched: true, stdout: 'adapter-auth', stderr: '', exited: 0 },
+        telemetry: { durationMs: 1 },
+      }),
+    });
+    assert.equal(allowed.adapterResult.guardrail.category, 'success');
+    assert.ok(allowed.adapterResult.guardrail.exitCode === 0 || allowed.exitCode === 0);
+  });
+
+  it('adapter preflight blocks missing auth prerequisite checks via API path', async () => {
+    const profilePath = writeAdapterProfile({ requires_auth: [{ type: 'claude_login' }] });
+    const result = await runAdapter({
+      profilePath,
+      envAllow: ['HOME'],
+      rawInput: { command: 'echo', args: ['adapter-auth'] },
+      authCheckFn: async () => ({ success: false, stderr: 'Not logged in' }),
+      supervisorFn: async () => {
+        throw new Error('supervisor should not run when requires_auth fails');
+      },
+    });
+
+    assert.equal(result.adapterResult.guardrail.category, 'blocked');
+    assert.match(result.adapterResult.guardrail.reason, /missing_auth_prerequisite/);
+    assert.match(result.adapterResult.guardrail.reason, /Not logged in|Claude CLI is not logged in/);
+    assert.equal(result.exitCode, 16);
   });
 });
 

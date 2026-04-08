@@ -776,6 +776,11 @@ export function evaluateWorkflowRisk(normalizedWorkflow, options = {}) {
       if (step.recipeRef.channel === 'community') {
         allReasons.add('community recipe reference');
       }
+      if (step.recipeRef.trust?.warnings?.length) {
+        for (const warning of step.recipeRef.trust.warnings) {
+          allReasons.add(`recipe step ${step.id} trust warning: ${warning}`);
+        }
+      }
       if ((step.recipeRef.flaggedInputs || []).length > 0) {
         allReasons.add(`recipe step ${step.id} includes flagged inputs`);
       }

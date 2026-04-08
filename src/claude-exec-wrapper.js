@@ -2,6 +2,9 @@ import { resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { buildPromptPayload } from './prompt-inputs.js';
 
+const FAILURE_DETAIL_MAX_CHARS = 400;
+const FAILURE_DETAIL_MAX_LINES = 3;
+
 function truthy(value) {
   return value === true || value === 'true' || value === '1';
 }
@@ -17,6 +20,24 @@ function splitCsv(value) {
 function resolveFrom(baseDir, maybePath) {
   if (!maybePath) return '';
   return resolve(baseDir, maybePath);
+}
+
+function summarizeFailureText(text) {
+  if (!text || typeof text !== 'string') return '';
+
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, FAILURE_DETAIL_MAX_LINES);
+
+  if (lines.length === 0) return '';
+
+  let summary = lines.join(' | ');
+  if (summary.length > FAILURE_DETAIL_MAX_CHARS) {
+    summary = `${summary.slice(0, FAILURE_DETAIL_MAX_CHARS - 1).trimEnd()}…`;
+  }
+  return summary;
 }
 
 export function parseWrapperArgs(argv) {
@@ -120,6 +141,14 @@ export function buildClaudeArgs(options = {}) {
   return args;
 }
 
+export function buildClaudeFailureMessage({ code, stderr = '', stdout = '' }) {
+  const detail = summarizeFailureText(stderr) || summarizeFailureText(stdout);
+  if (detail) {
+    return `claude --print failed with exit code ${code}: ${detail}`;
+  }
+  return `claude --print failed with exit code ${code}`;
+}
+
 function normalizeOptions(rawOptions) {
   const baseDir = rawOptions.workingDir
     ? resolve(process.cwd(), rawOptions.workingDir)
@@ -158,7 +187,22 @@ export async function runClaudeExec(rawOptions) {
   await new Promise((resolvePromise, rejectPromise) => {
     const child = spawn('claude', args, {
       cwd: options.workingDir || process.cwd(),
-      stdio: ['ignore', 'inherit', 'inherit'],
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      stdout += text;
+      process.stdout.write(text);
+    });
+
+    child.stderr.on('data', (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      process.stderr.write(text);
     });
 
     child.on('error', (err) => {
@@ -170,7 +214,7 @@ export async function runClaudeExec(rawOptions) {
         return;
       }
       if (code !== 0) {
-        rejectPromise(new Error(`claude --print failed with exit code ${code}`));
+        rejectPromise(new Error(buildClaudeFailureMessage({ code, stderr, stdout })));
         return;
       }
       resolvePromise();

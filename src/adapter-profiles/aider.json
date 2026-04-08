@@ -1,0 +1,27 @@
+{
+  "tool": "aider",
+  "protocol": "env-shim",
+  "schema_target": "adapter-result/v1",
+  "version": "1.0.0",
+  "description": "Aider adapter profile — shim-based interception for Aider tool commands",
+  "intercept": {
+    "command": "$.command",
+    "args": "$.args",
+    "cwd": "$.cwd"
+  },
+  "response": {
+    "format": "human",
+    "success": "{{process.stdout}}",
+    "blocked": "BLOCKED: {{guardrail.reason}}\n{{guardrail.driftSummary}}",
+    "failed": "FAILED (exit {{guardrail.exitCode}}): {{process.stderr}}"
+  },
+  "exit_codes": {
+    "success": 0,
+    "blocked": 12,
+    "failed": 1
+  },
+  "defaults": {
+    "non_interactive": true,
+    "json_output": false
+  }
+}

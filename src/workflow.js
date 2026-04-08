@@ -5,6 +5,7 @@ import { deepEqual, pretty, indexById, resolvePath } from './shared.js';
 import { resolveRecipeById, resolveInputs, parseRecipeSpecifier } from './recipe-runner.js';
 import { hashRecipe } from './recipe.js';
 import { collectRecipeInputContentHashes } from './prompt-inputs.js';
+import { classifyTrust } from './recipe-channel.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -358,6 +359,16 @@ function normalizeService(svc, projectRoot) {
   return normalized;
 }
 
+function resolveRecipeAllowUnverified(step, options = {}) {
+  if (Object.prototype.hasOwnProperty.call(step, 'allow_unverified')) {
+    return !!step.allow_unverified;
+  }
+  if (Object.prototype.hasOwnProperty.call(step, 'allowUnverified')) {
+    return !!step.allowUnverified;
+  }
+  return options.allowUnverified === true;
+}
+
 export function buildWorkflowRecipeSearchDirs(projectRoot, basePath, explicitSearchDirs = []) {
   const candidates = [
     ...(Array.isArray(explicitSearchDirs) ? explicitSearchDirs : []),
@@ -386,6 +397,7 @@ function normalizeRecipeRefStep(step, projectRoot, options = {}) {
 
   const { version: requestedVersion } = parseRecipeSpecifier(step.recipe);
   const recipeHash = hashRecipe(resolvedRecipe.recipe);
+  const trust = classifyTrust(resolvedRecipe.recipe);
   const flaggedInputs = (inputResult.flagged || []).map((entry) => ({
     key: entry.key,
     reasons: entry.reasons,
@@ -393,6 +405,7 @@ function normalizeRecipeRefStep(step, projectRoot, options = {}) {
     capabilities: entry.capabilities,
     neverReuse: entry.never_reuse ?? false,
   }));
+  const allowUnverified = resolveRecipeAllowUnverified(step, options);
 
   return {
     specifier: step.recipe,
@@ -401,9 +414,12 @@ function normalizeRecipeRefStep(step, projectRoot, options = {}) {
     resolvedVersion: resolvedRecipe.version,
     sourcePath: resolvedRecipe.sourcePath,
     recipeHash,
-    channel: resolvedRecipe.recipe.channel ?? 'community',
+    channel: trust.channel,
     riskLevel: resolvedRecipe.recipe.risk_level,
     approvalRequired: resolvedRecipe.recipe.approval_required,
+    signature: resolvedRecipe.recipe.signature ?? null,
+    trust,
+    allowUnverified,
     resolvedInputs: inputResult.resolved,
     flaggedInputs,
     inputContentHashes: collectRecipeInputContentHashes(resolvedRecipe.recipe, inputResult.resolved, {
@@ -564,10 +580,36 @@ function diffSteps(cSteps, aSteps) {
   for (const [id, cStep] of cMap) {
     const aStep = aMap.get(id);
     if (!aStep) continue;
+    diffs.push(...diffRecipeRefTrustBoundary(id, cStep.recipeRef, aStep.recipeRef));
     diffs.push(...diffStepFields(id, cStep, aStep));
     if (!deepEqual(cStep.on, aStep.on)) {
       diffs.push(...diffStepTransitions(id, cStep.on, aStep.on));
     }
+  }
+
+  return diffs;
+}
+
+function diffRecipeRefTrustBoundary(stepId, cRecipeRef = {}, aRecipeRef = {}) {
+  const diffs = [];
+
+  const cTrust = cRecipeRef.trust ?? {};
+  const aTrust = aRecipeRef.trust ?? {};
+
+  if (cRecipeRef.channel !== aRecipeRef.channel) {
+    diffs.push(`~ Step ${stepId} recipeRef.channel: ${pretty(aRecipeRef.channel)} -> ${pretty(cRecipeRef.channel)}`);
+  }
+  if (cRecipeRef.signature !== aRecipeRef.signature) {
+    diffs.push(`~ Step ${stepId} recipeRef.signature: ${pretty(aRecipeRef.signature)} -> ${pretty(cRecipeRef.signature)}`);
+  }
+  if (cTrust.channel !== aTrust.channel) {
+    diffs.push(`~ Step ${stepId} recipeRef.trust.channel: ${pretty(aTrust.channel)} -> ${pretty(cTrust.channel)}`);
+  }
+  if (cTrust.verified !== aTrust.verified) {
+    diffs.push(`~ Step ${stepId} recipeRef.trust.verified: ${pretty(aTrust.verified)} -> ${pretty(cTrust.verified)}`);
+  }
+  if (cRecipeRef.allowUnverified !== aRecipeRef.allowUnverified) {
+    diffs.push(`~ Step ${stepId} recipeRef.allowUnverified: ${pretty(aRecipeRef.allowUnverified)} -> ${pretty(cRecipeRef.allowUnverified)}`);
   }
 
   return diffs;

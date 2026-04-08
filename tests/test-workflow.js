@@ -10,6 +10,7 @@ import { saveManifest, loadManifest } from '../src/manifest.js';
 import { createContract } from '../src/contract.js';
 import { STATUS_EXIT_CODES } from '../src/supervisor.js';
 import { runWorkflowSupervisor } from '../src/workflow-supervisor.js';
+import { signRecipe } from '../src/recipe-channel.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -970,6 +971,68 @@ describe('Workflow Diff Output', () => {
     assert.ok(diffs.some(d => d.startsWith('~ Transition step_a.success')));
   });
 
+  it('recipe_ref trust boundary drift emits explicit signature/channel/verified diffs', () => {
+    const basePath = mkdtempSync(join(tmpdir(), 'wf-boundary-diff-'));
+    try {
+      mkdirSync(join(basePath, 'recipes'), { recursive: true });
+      const recipe = {
+        id: 'recipe-boundary-drift',
+        name: 'Boundary Drift Recipe',
+        description: 'Recipe used for boundary diff coverage',
+        version: '1.0.0',
+        author: 'test',
+        category: 'custom',
+        channel: 'verified',
+        approval_required: true,
+        risk_level: 'low',
+        inputs: {},
+        steps: [{
+          id: 'main',
+          description: 'echo boundary',
+          run: { command: 'echo', args: ['ok'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      };
+      recipe.signature = signRecipe(recipe);
+      writeRecipeFile(join(basePath, 'recipes'), recipe);
+
+      const def = {
+        version: 1,
+        kind: 'workflow_definition',
+        name: 'boundary-workflow',
+        projectRoot: '.',
+        entryStep: 'step_a',
+        maxIterations: 5,
+        services: [],
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'recipe-boundary-drift',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      };
+
+      const approved = buildManifest(def, basePath);
+      const changed = JSON.parse(JSON.stringify(approved));
+      const changedStep = changed.workflow.steps.find((step) => step.id === 'step_a');
+      changedStep.recipeRef.signature = 'tampered-signature';
+      changedStep.recipeRef.channel = 'community';
+      if (changedStep.recipeRef.trust) {
+        changedStep.recipeRef.trust.channel = 'community';
+        changedStep.recipeRef.trust.verified = false;
+      }
+      const diffs = diffWorkflowManifests(changed, approved);
+
+      assert.ok(diffs.some(d => d.includes('recipeRef.signature')));
+      assert.ok(diffs.some(d => d.includes('recipeRef.channel')));
+      assert.ok(diffs.some(d => d.includes('recipeRef.trust.channel')));
+      assert.ok(diffs.some(d => d.includes('recipeRef.trust.verified')));
+    } finally {
+      rmSync(basePath, { recursive: true, force: true });
+    }
+  });
+
   it('step command change shows "~ ..." format', () => {
     const def1 = makeDefinition();
     const def2 = makeDefinition();
@@ -1185,6 +1248,11 @@ describe('Workflow Normalization', () => {
       assert.equal(step.recipeRef.resolvedVersion, '1.0.0');
       assert.equal(step.recipeRef.resolvedInputs.prompt_file, 'prompt.txt');
       assert.equal(step.recipeRef.inputContentHashes.prompt_file.path, 'prompt.txt');
+      assert.equal(step.recipeRef.channel, 'community');
+      assert.equal(step.recipeRef.signature, null);
+      assert.equal(step.recipeRef.trust.channel, 'community');
+      assert.equal(step.recipeRef.trust.verified, false);
+      assert.equal(step.recipeRef.allowUnverified, false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1234,6 +1302,53 @@ describe('Workflow Normalization', () => {
         normalized.steps[0].recipeRef.sourcePath,
         join(externalRecipesDir, 'external-recipe.recipe.json'),
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('normalizes verified recipe_ref trust metadata', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-recipe-verified-'));
+    try {
+      mkdirSync(join(dir, 'recipes'), { recursive: true });
+      const recipe = {
+        id: 'verified-step',
+        name: 'Verified Step',
+        description: 'A signed recipe step',
+        version: '1.0.0',
+        author: 'tester',
+        category: 'custom',
+        channel: 'verified',
+        approval_required: true,
+        risk_level: 'medium',
+        inputs: {},
+        steps: [{
+          id: 'main',
+          description: 'echo',
+          run: { command: 'echo', args: ['hello'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      };
+      recipe.signature = signRecipe(recipe);
+
+      writeRecipeFile(join(dir, 'recipes'), recipe);
+      const def = makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'verified-step',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      });
+      const normalized = normalizeWorkflowDefinition(def, dir);
+      const step = normalized.steps[0];
+
+      assert.equal(step.recipeRef.channel, 'verified');
+      assert.equal(step.recipeRef.signature, recipe.signature);
+      assert.equal(step.recipeRef.trust.channel, 'verified');
+      assert.equal(step.recipeRef.trust.verified, true);
+      assert.equal(step.recipeRef.allowUnverified, false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1299,16 +1414,74 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
     assert.equal(result.exitCode, STATUS_EXIT_CODES.approval_required);
   });
 
-  it('executes chained recipe_ref steps under one approved workflow manifest', async () => {
+  it('requires reapproval for workflow recipe_ref review_each_time inputs even when manifest matches', async () => {
     mkdirSync(join(tmpDir, 'recipes'), { recursive: true });
     writeRecipeFile(join(tmpDir, 'recipes'), {
+      id: 'recipe-review-each-time',
+      name: 'Recipe Review Each Time',
+      description: 'workflow recipe_ref review_each_time repro',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {
+        system_prompt: {
+          type: 'string',
+          approval_mode: 'review_each_time',
+          required: false,
+        },
+      },
+      steps: [{
+        id: 'main',
+        description: 'echo prompt',
+        run: { command: 'echo', args: ['{{inputs.system_prompt}}'], mode: 'structured' },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    });
+
+    const def = makeDefinition({
+      entryStep: 'step_a',
+      steps: [{
+        id: 'step_a',
+        type: 'recipe_ref',
+        recipe: 'recipe-review-each-time',
+        inputs: { system_prompt: 'Follow this instruction exactly' },
+        on: { success: 'done', failure: 'abort' },
+      }],
+    });
+
+    const defPath = writeDefFile(tmpDir, def, 'workflow-review-each-time.json');
+    const manifest = buildManifest(def, tmpDir);
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    const manifestPath = join(tmpDir, 'approved.workflow.review-each-time.json');
+    saveManifest(manifest, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'approval_required');
+    assert.equal(result.exitCode, STATUS_EXIT_CODES.approval_required);
+    assert.match(result.terminalReason, /review_each_time/);
+  });
+
+  it('executes chained recipe_ref steps under one approved workflow manifest', async () => {
+    mkdirSync(join(tmpDir, 'recipes'), { recursive: true });
+    const recipeOne = {
       id: 'recipe-one',
       name: 'Recipe One',
       description: 'First recipe',
       version: '1.0.0',
       author: 'tester',
       category: 'custom',
-      channel: 'community',
+      channel: 'verified',
       approval_required: true,
       risk_level: 'low',
       inputs: {},
@@ -1318,15 +1491,17 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
         run: { command: 'echo', args: ['one'], mode: 'structured' },
       }],
       guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
-    });
-    writeRecipeFile(join(tmpDir, 'recipes'), {
+    };
+    recipeOne.signature = signRecipe(recipeOne);
+    writeRecipeFile(join(tmpDir, 'recipes'), recipeOne);
+    const recipeTwo = {
       id: 'recipe-two',
       name: 'Recipe Two',
       description: 'Second recipe',
       version: '1.0.0',
       author: 'tester',
       category: 'custom',
-      channel: 'community',
+      channel: 'verified',
       approval_required: true,
       risk_level: 'low',
       inputs: {},
@@ -1336,7 +1511,9 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
         run: { command: 'echo', args: ['two'], mode: 'structured' },
       }],
       guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
-    });
+    };
+    recipeTwo.signature = signRecipe(recipeTwo);
+    writeRecipeFile(join(tmpDir, 'recipes'), recipeTwo);
 
     const def = makeDefinition({
       entryStep: 'step_a',
@@ -1378,14 +1555,14 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
 
   it('preserves recipe_ref failure detail in the final workflow result', async () => {
     mkdirSync(join(tmpDir, 'recipes'), { recursive: true });
-    writeRecipeFile(join(tmpDir, 'recipes'), {
+    const failingRecipe = {
       id: 'recipe-fail-detail',
       name: 'Recipe Fail Detail',
       description: 'fails with actionable detail',
       version: '1.0.0',
       author: 'tester',
       category: 'custom',
-      channel: 'community',
+      channel: 'verified',
       approval_required: true,
       risk_level: 'low',
       inputs: {},
@@ -1400,7 +1577,9 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
         },
       }],
       guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
-    });
+    };
+    failingRecipe.signature = signRecipe(failingRecipe);
+    writeRecipeFile(join(tmpDir, 'recipes'), failingRecipe);
 
     const def = makeDefinition({
       entryStep: 'step_a',
@@ -1436,6 +1615,163 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
     assert.equal(result.failedStep, 'step_a');
     assert.match(result.terminalReason, /Not logged in/);
     assert.match(result.terminalReason, /Please run \/login/);
+  });
+
+  it('blocks community recipe_ref execution when allow_unverified is not enabled', async () => {
+    mkdirSync(join(tmpDir, 'recipes'), { recursive: true });
+    writeRecipeFile(join(tmpDir, 'recipes'), {
+      id: 'recipe-blocked',
+      name: 'Blocked Recipe',
+      description: 'community recipe',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{
+        id: 'main',
+        description: 'echo blocked',
+        run: { command: 'echo', args: ['blocked'], mode: 'structured' },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    });
+
+    const def = makeDefinition({
+      entryStep: 'step_a',
+      steps: [{
+        id: 'step_a',
+        type: 'recipe_ref',
+        recipe: 'recipe-blocked',
+        inputs: {},
+        on: { success: 'done', failure: 'abort' },
+      }],
+    });
+    const defPath = writeDefFile(tmpDir, def, 'workflow-recipe-blocked.json');
+    const manifest = buildManifest(def, tmpDir);
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    const manifestPath = join(tmpDir, 'approved.workflow.recipe-blocked.json');
+    saveManifest(manifest, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'validation_failed');
+    assert.equal(result.failedStep, 'step_a');
+    assert.equal(result.stepsExecuted, 1);
+    assert.match(result.terminalReason, /Unverified recipe blocked/);
+  });
+
+  it('blocks verified-reported recipe when signature is not valid and allow_unverified is not enabled', async () => {
+    mkdirSync(join(tmpDir, 'recipes'), { recursive: true });
+    writeRecipeFile(join(tmpDir, 'recipes'), {
+      id: 'recipe-verification-failure',
+      name: 'Verification Failure Recipe',
+      description: 'Recipe with invalid verified signature',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'verified',
+      signature: 'not-a-real-signature',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{
+        id: 'main',
+        description: 'echo would block',
+        run: { command: 'echo', args: ['should-not-run'], mode: 'structured' },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    });
+
+    const def = makeDefinition({
+      entryStep: 'step_a',
+      steps: [{
+        id: 'step_a',
+        type: 'recipe_ref',
+        recipe: 'recipe-verification-failure',
+        inputs: {},
+        on: { success: 'done', failure: 'abort' },
+      }],
+    });
+    const defPath = writeDefFile(tmpDir, def, 'workflow-recipe-verification-failure.json');
+    const manifest = buildManifest(def, tmpDir);
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    const manifestPath = join(tmpDir, 'approved.workflow.recipe-verification-failure.json');
+    saveManifest(manifest, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'validation_failed');
+    assert.equal(result.failedStep, 'step_a');
+    assert.equal(result.stepsExecuted, 1);
+    assert.match(result.terminalReason, /Unverified recipe blocked/);
+  });
+
+  it('requires reapproval when workflow trust boundary changes from allow_unverified=true to false', async () => {
+    mkdirSync(join(tmpDir, 'recipes'), { recursive: true });
+    writeRecipeFile(join(tmpDir, 'recipes'), {
+      id: 'recipe-boundary',
+      name: 'Boundary Recipe',
+      description: 'community recipe',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{
+        id: 'main',
+        description: 'echo boundary',
+        run: { command: 'echo', args: ['boundary'], mode: 'structured' },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    });
+
+    const def = makeDefinition({
+      entryStep: 'step_a',
+      steps: [{
+        id: 'step_a',
+        type: 'recipe_ref',
+        recipe: 'recipe-boundary',
+        inputs: {},
+        on: { success: 'done', failure: 'abort' },
+      }],
+    });
+    const defPath = writeDefFile(tmpDir, def, 'workflow-trust-boundary.json');
+    const manifest = buildManifest(def, tmpDir);
+    manifest.workflow.steps[0].recipeRef.allowUnverified = true;
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    const manifestPath = join(tmpDir, 'approved.workflow.trust-boundary.json');
+    saveManifest(manifest, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'drift_detected');
+    assert.equal(result.exitCode, STATUS_EXIT_CODES.drift_detected);
+    assert.ok(result.terminalReason);
   });
 });
 

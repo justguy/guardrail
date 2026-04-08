@@ -8,6 +8,7 @@ import { loadRecipe, createRecipeManifest, compareRecipeManifests, hashRecipe } 
 import {
   parseWrapperArgs,
   buildClaudeArgs,
+  buildClaudeFailureMessage,
 } from '../src/claude-exec-wrapper.js';
 import {
   collectRecipeInputContentHashes,
@@ -70,6 +71,16 @@ describe('Claude recipe', () => {
       '--no-session-persistence',
       'Review this repo',
     ]);
+  });
+
+  it('formats claude failure messages with stderr detail when present', () => {
+    const message = buildClaudeFailureMessage({
+      code: 1,
+      stderr: 'Not logged in\nRun claude login\n',
+      stdout: '',
+    });
+
+    assert.equal(message, 'claude --print failed with exit code 1: Not logged in | Run claude login');
   });
 
   it('stores input file content hashes in recipe manifests and detects drift', () => {

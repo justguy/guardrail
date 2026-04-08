@@ -45,6 +45,11 @@ Commands:
   recipe install <path|url|github://>   Install a recipe to local registry
   recipe versions <id>                  List installed versions of a recipe
   recipe publish --name <n> --category <c> [--manifest <path>] [--description <d>] [--dry-run]
+  adapter run --tool <name> -- <cmd>    Run a command through an adapter profile
+  adapter shim --tool <n> --commands <c>  Create PATH shims for adapter interception
+  adapter profile install <source>      Install an adapter profile
+  adapter profile list                  List adapter profiles
+  adapter profile show <tool>           Show adapter profile details
   create --name <n> --category <c>      Generate a recipe skeleton
   profile create|use|list|show          Manage user profiles
   policy list|inspect|validate          Manage and enforce policies
@@ -68,6 +73,8 @@ Flags:
   --update-source <source>    Update source: none | worker_proposal | demo
   --definition <path>         Workflow definition file path
   --recipe-search-dir <path>  Extra recipe directory for workflow recipe_ref resolution (repeatable)
+  --allow-unverified          Allow community/unsigned workflow recipes
+  --env-allow <var>           Env var to allow for adapter auth/credential plumbing (repeatable)
   --help                      Show this help
   --version                   Show version
 
@@ -101,6 +108,7 @@ export function parseArgs(argv) {
     updateSource: null,
     definition: null,
     recipeSearchDirs: [],
+    allowUnverified: false,
     command: null,
     args: [],
     demoTarget: null,
@@ -227,6 +235,12 @@ export function parseArgs(argv) {
         continue;
       }
 
+      if (arg === '--allow-unverified') {
+        result.allowUnverified = true;
+        i++;
+        continue;
+      }
+
       if (arg === '--manifest') {
         i++;
         if (i >= argv.length) {
@@ -296,7 +310,7 @@ export function parseArgs(argv) {
     return result;
   }
 
-  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify') {
+  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify' && sub !== 'adapter') {
     return { error: 'usage' };
   }
 
@@ -439,6 +453,12 @@ export function parseArgs(argv) {
       return { error: 'usage' };
     }
     return result;
+  }
+
+  // --- adapter subcommand ---------------------------------------------------
+
+  if (sub === 'adapter') {
+    return { subcommand: 'adapter', adapterArgv: argv.slice(i) };
   }
 
   // --- recipe subcommand ----------------------------------------------------
@@ -1263,6 +1283,14 @@ async function main() {
     process.exit(0);
   }
 
+  // --- adapter dispatch -----------------------------------------------------
+
+  if (parsed.subcommand === 'adapter') {
+    const { runAdapterCli } = await import('./adapter-cli.js');
+    await runAdapterCli(parsed.adapterArgv || []);
+    process.exit(0);
+  }
+
   // --- recipe validate -----------------------------------------------------
 
   if (parsed.subcommand === 'recipe-validate') {
@@ -1512,6 +1540,7 @@ async function main() {
       jsonOutput: parsed.json,
       trustClass: parsed.trust,
       recipeSearchDirs: parsed.recipeSearchDirs,
+      allowUnverified: parsed.allowUnverified || false,
     });
 
     if (parsed.json) {

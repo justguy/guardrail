@@ -1,0 +1,66 @@
+Guardrail doesn't generate the credentials, but it must force the human (or the CI pipeline) to explicitly wire them up. If the recipe doesn't declare what it needs, the adapter engine can't prompt the user to fulfill the contract, and the execution fails because Guardrail's default state is inherit: false (an empty environment).
+
+Let's trace exactly how GitHub, AWS, and Guardrail's envPolicy work together in a real-world enterprise pipeline. This is where Guardrail shifts from a local dev tool into a CI/CD zero-trust enforcer.
+
+The Flow: GitHub Actions -> AWS -> Guardrail
+In a modern CI pipeline, you don't store AWS passwords in GitHub. You use OIDC (OpenID Connect). Here is how the three systems interact, and why Guardrail's envPolicy is the glue that makes it safe.
+
+Step 1: The Auth Broker (GitHub & AWS)
+GitHub Actions natively negotiates with AWS to prove its identity.
+
+GitHub says to AWS: "I am repo phalanx/core, running action #123. Give me a temporary token."
+
+AWS verifies this and injects temporary, short-lived credentials directly into the GitHub Runner's host environment (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN).
+
+Step 2: The Credential Plumber (Guardrail)
+Now the GitHub Runner is holding the keys to your AWS account. If a rogue npm install runs right now, it can steal those keys because they are sitting in the global environment.
+
+This is where Guardrail takes over. The GitHub Action workflow calls guardrail run to execute a public recipe called terraform_deploy.
+
+The terraform_deploy recipe explicitly declares:
+
+JSON
+"requires_env": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]
+Step 3: The envPolicy Contract
+Because Guardrail isolates the process, it strips the environment completely (inherit: false). The AWS keys are safe from any stray background processes.
+
+Guardrail checks the user's approved manifest for this pipeline. The manifest says:
+
+JSON
+"envPolicy": {
+  "inherit": false,
+  "allow": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]
+}
+Guardrail opens the valve. It passes only those three temporary tokens into the terraform process.
+
+Why the envPolicy Auth Applies (and is the ultimate safeguard)
+Yes, the envPolicy applies, and it is the most critical part of this entire architecture.
+
+If you didn't have the envPolicy, the temporary AWS credentials would be globally exposed to every single command executed in that GitHub Action step. By enforcing inherit: false and explicitly mapping the allow list, you achieve Sub-Process Least Privilege.
+
+If the Terraform script succeeds, and the next step is an agent running npm install, Guardrail closes the valve. The npm install recipe does not have the AWS keys in its allow list, so it executes in a completely sterile environment. Even if the NPM package is malicious, it cannot see the AWS credentials that are sitting right there on the GitHub runner.
+
+How to Implement the Public Schema
+When you publish a recipe to your GitHub registry, you shouldn't invent a new auth protocol. You just enforce the mapping.
+
+A public recipe schema should look like this:
+
+JSON
+{
+  "name": "phalanx/aws-s3-sync",
+  "trust": "verified",
+  "capabilities": ["Write to AWS S3"],
+  "inputs": {
+    "bucket_name": { "type": "string", "pattern": "^s3://[a-z0-9-]+$" }
+  },
+  "requires_env": [
+    "AWS_ACCESS_KEY_ID", 
+    "AWS_SECRET_ACCESS_KEY", 
+    "AWS_SESSION_TOKEN"
+  ]
+}
+When an agent (like OpenClaw or an MCP client) tries to use this tool, your adapter engine reads requires_env. It checks the local .guardrail/approved.json. If the developer hasn't explicitly mapped their local AWS credentials into the allow array for this recipe, the adapter instantly returns:
+
+{"status": "blocked", "reason": "missing_auth_mapping", "message": "This recipe requires AWS credentials. Please map them in your Guardrail manifest."}
+
+This architecture proves that you don't need a heavy sandbox to achieve enterprise security. By combining Host Identity (OIDC/SSO) with Guardrail's Contractual Plumbing (envPolicy), you make credential theft nearly impossible.

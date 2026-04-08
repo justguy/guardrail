@@ -258,7 +258,6 @@ guardrail run --recipe claude-exec \
   --input mode=plan \
   --input output_format=text \
   --input max_budget_usd=1.00 \
-  --input allowed_tools=Read,Glob,Grep \
   --input system_prompt="Focus on reproducibility and concrete failures." \
   --input session_name=auth-review
 
@@ -294,9 +293,16 @@ Recipes are packaged execution bundles with:
 
 Recipe execution uses a recipe-specific supervisor in front of the native recipe executor. Dry-runs stay approval-free previews. Real execution stores and reuses a recipe manifest the same way command, workflow, and template mode do.
 
-If you need one approval to cover multiple recipe executions, promote that chain to workflow mode and reference the recipes from workflow steps with `type: "recipe_ref"`. The approved workflow manifest captures each referenced recipe's resolved version, content hash, resolved inputs, and any prompt-bearing file hashes.
+If you need one approval to cover multiple recipe executions, promote that chain to workflow mode and reference the recipes from workflow steps with `type: "recipe_ref"`. The approved workflow manifest captures each referenced recipe's resolved version, content hash, resolved inputs, trust metadata (including `channel`, `signature`, and trust status), `allow_unverified` policy, and any prompt-bearing file hashes.
+
+For workflow recipe refs:
+
+- unverified/community recipes are blocked by default;
+- set `allow_unverified: true` on the step or pass `--allow-unverified` to the workflow run to request community execution explicitly and persist that decision in the approval boundary.
 
 The bundled `codex-exec` and `claude-exec` recipes are Guardrail-managed wrappers around `codex exec` and `claude --print`. They support:
+
+- optional tool allowlists (`allowed_tools` for `claude-exec`; omit it to let Claude use its default built-in tool set)
 
 - inline prompt text
 - `input_files` arrays for prompt-bearing file content
@@ -464,20 +470,46 @@ guardrail run --json --non-interactive --approved-manifest .guardrail/approved.j
 
 ---
 
-## Planned Adapter System
+## Adapter System
 
-Guardrail's next open-source integration layer is an **adapter system** for agent tools and local wrappers. The goal is to let tools like OpenClaw and Aider route execution through the same Guardrail enforcement pipeline without scraping terminal output or inventing adapter-specific drift logic.
+Guardrail includes an **adapter system** for agent tools and local wrappers. The goal is to let tools like OpenClaw and Aider route execution through the same Guardrail enforcement pipeline without scraping terminal output or inventing adapter-specific drift logic.
 
-Planned architecture:
+Current architecture:
 
 - **Rich supervisor result**: `runSupervisor()` returns bounded machine-readable context including native status, drift diffs, clipped stdout/stderr, and telemetry
 - **Stable public schema**: the adapter engine translates that internal result into a versioned public contract: `adapter-result/v1`
 - **Pure-data profiles**: public profiles declare a `schema_target`, map fields from `adapter-result/v1`, and cannot execute arbitrary code
-- **Pinned distribution**: Phase 1 public profiles install from SHA-pinned GitHub URLs, not from bare names
-- **Protocol limits**: Phase 1 supports `stdin-json` and `env-shim`; `mcp` profiles may exist but runtime support is deferred
+- **Pinned distribution**: public profiles install from SHA-pinned GitHub URLs, not from bare names
+- **Protocol limits**: Phase 1 supports `stdin-json` and `env-shim`; `mcp` profiles may exist but runtime support is deferred and blocked before execution
 - **Logging and audit**: adapter runs emit structured log/audit events, and any stdout/stderr exposed to adapters is clipped to bounded sizes
+- **Auth preflight**: profiles may declare `requires_env` and `requires_auth`; Guardrail fails early when required env mappings or bounded CLI auth prerequisites are missing. `requires_env` requires explicit `--env-allow` mapping; missing entries fail closed with `missing_auth_mapping`. `requires_auth` runs bounded local checks (for example `claude_login` and `gh_auth`) and fails with `missing_auth_prerequisite` when the current runtime is not authenticated.
 
-This is planned work, not part of the current shipped CLI surface. See [docs/adapter-implementation-plan.md](docs/adapter-implementation-plan.md) for the build plan.
+Example:
+
+```bash
+guardrail adapter run --tool openclaw -- npm test
+guardrail adapter run --profile ./my-tool.json --env-allow ANTHROPIC_API_KEY -- npm test
+guardrail adapter run --tool cline -- echo "blocked in v0.2"
+guardrail adapter profile install github://guardrail-dev/adapter-profiles/openclaw.json@<sha>
+```
+
+Adapter command approval shape:
+
+```bash
+guardrail adapter run --tool openclaw -- npm test
+```
+
+On first run, adapter execution still requires approval in the current Guardrail context; without it, the command is blocked with `No approved manifest found`.
+
+Adapter caveats:
+
+- `requires_auth` is preflight-only and does not perform interactive login. If a tool reports `missing_auth_prerequisite`, authenticate the runtime first (for example `claude auth login` or `gh auth login`) and retry.
+- Adapter `run` also enforces approval reuse: first approval is interactive and binds an adapter manifest; without one, `adapter run` returns a blocked result with `No approved manifest found`.
+- MCP profiles are blocked at CLI level in v0.2 with a hard error. If you need IDE-style protocol execution now, use the env-shim path instead.
+- `--env-allow` is bounded and explicit. It only controls what environment keys are handed to the adapter process for that run.
+- `claude-exec` and `codex-exec` are approval-bounded wrappers, not outer sandboxes. If you run them outside your host sandbox/container boundary, the underlying AI CLI runs with host privileges subject to its own permission model. Guardrail now calls this out as a yellow-to-red risk reason in approval UX.
+
+See [docs/adapter-implementation-plan.md](docs/adapter-implementation-plan.md) for the build plan and current boundaries.
 
 ---
 

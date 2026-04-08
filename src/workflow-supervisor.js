@@ -47,6 +47,7 @@ import { resolveRecipeById } from './recipe-runner.js';
 import { hashRecipe } from './recipe.js';
 import { executeRecipe } from './recipe-executor.js';
 import { verifyRecipeInputContentHashes } from './prompt-inputs.js';
+import { classifyTrust } from './recipe-channel.js';
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -86,6 +87,39 @@ function formatDriftsForPrint(diffs) {
   return diffs.map(d => (typeof d === 'string' ? { description: d } : d));
 }
 
+function formatReviewEachTimeReason(workflow) {
+  const flaggedItems = [];
+  const steps = workflow?.steps ?? [];
+
+  for (const step of steps) {
+    if (!step || step.type !== 'recipe_ref') continue;
+    const flaggedInputs = step?.recipeRef?.flaggedInputs ?? [];
+    const neverReuseKeys = flaggedInputs
+      .filter((entry) => entry?.neverReuse)
+      .map((entry) => entry.key)
+      .filter((key) => typeof key === 'string' && key.length > 0)
+      .map((key) => `${step.id}:${key}`);
+
+    for (const key of neverReuseKeys) {
+      flaggedItems.push(key);
+    }
+  }
+
+  if (flaggedItems.length === 0) return null;
+  return `Fresh approval required for review_each_time inputs: ${flaggedItems.join(', ')}`;
+}
+
+function formatRecipeRefBoundaryMismatch(expected = {}, actual = {}) {
+  const parts = [];
+  for (const [key, value] of Object.entries(expected)) {
+    if (value !== actual[key]) {
+      parts.push(`${key}: ${value} -> ${actual[key]}`);
+    }
+  }
+  if (parts.length === 0) return null;
+  return parts.join(', ');
+}
+
 // ---------------------------------------------------------------------------
 // Phase A: Load, normalize, hash, evaluate risk (pure pipeline)
 // ---------------------------------------------------------------------------
@@ -95,6 +129,7 @@ function loadAndPrepare(definitionPath, trustClass, logger, options = {}) {
   const basePath = dirname(resolve(definitionPath));
   const workflow = normalizeWorkflowDefinition(definition, basePath, {
     recipeSearchDirs: options.recipeSearchDirs,
+    allowUnverified: options.allowUnverified,
   });
 
   logger.info('workflow_loaded', { name: workflow.name, entryStep: workflow.entryStep, maxIterations: workflow.maxIterations });
@@ -135,21 +170,46 @@ function compareAgainstApproved(candidate, manifestPath, logger) {
 
   const comparison = compareWorkflowManifests(candidate, approved);
   if (comparison.matches) {
+    const reviewEachTimeReason = formatReviewEachTimeReason(candidate.workflow);
+    if (reviewEachTimeReason) {
+      logger.info('workflow_review_each_time_reapproval', {
+        manifestPath,
+        reviewEachTimeInputs: reviewEachTimeReason,
+      });
+      return { needsApproval: true, driftDiffs: [], approved, reviewEachTimeReason };
+    }
     logger.info('manifest_matches', { workflowHash: candidate.workflowHash });
     return { needsApproval: false, driftDiffs: [], approved };
   }
 
   logger.warn('drift_detected', { diffs: comparison.diffs });
-  return { needsApproval: true, driftDiffs: comparison.diffs, approved };
+  return { needsApproval: true, driftDiffs: comparison.diffs, approved, reviewEachTimeReason: null };
 }
 
 // ---------------------------------------------------------------------------
 // Phase C: Approval flow
 // ---------------------------------------------------------------------------
 
-async function handleApproval(candidate, manifestPath, driftDiffs, approved, riskAssessment, { nonInteractive, jsonOutput, logger, stateDir, state, runId, resultOpts }) {
+async function handleApproval(candidate, manifestPath, driftDiffs, approved, riskAssessment, {
+  nonInteractive,
+  jsonOutput,
+  logger,
+  stateDir,
+  state,
+  runId,
+  resultOpts,
+  reviewEachTimeReason = null,
+}) {
   if (nonInteractive) {
-    return handleNonInteractiveApproval(approved, driftDiffs, candidate, { logger, stateDir, state, runId, resultOpts, jsonOutput });
+    return handleNonInteractiveApproval(approved, driftDiffs, candidate, {
+      logger,
+      stateDir,
+      state,
+      runId,
+      resultOpts,
+      jsonOutput,
+      reviewEachTimeReason,
+    });
   }
 
   if (!process.stdin.isTTY) {
@@ -164,10 +224,30 @@ async function handleApproval(candidate, manifestPath, driftDiffs, approved, ris
   return handleInteractiveApproval(candidate, manifestPath, driftDiffs, riskAssessment, { jsonOutput, logger, stateDir, state, runId, resultOpts });
 }
 
-function handleNonInteractiveApproval(approved, driftDiffs, candidate, { logger, stateDir, state, runId, resultOpts, jsonOutput }) {
+function handleNonInteractiveApproval(approved, driftDiffs, candidate, {
+  logger,
+  stateDir,
+  state,
+  runId,
+  resultOpts,
+  jsonOutput,
+  reviewEachTimeReason = null,
+}) {
   if (approved === null) {
     logger.error('non_interactive_no_manifest');
     resultOpts.terminalReason = 'No approved manifest found. Run interactively to approve.';
+    state.terminalReason = resultOpts.terminalReason;
+    persistStateSafe(stateDir, state);
+    return buildResult(runId, 'approval_required', resultOpts);
+  }
+
+  const reason = driftDiffs.length > 0
+    ? 'Workflow drift detected in non-interactive mode.'
+    : reviewEachTimeReason;
+
+  if (reason && !driftDiffs.length && approved) {
+    logger.error('non_interactive_review_each_time_blocked', { reason });
+    resultOpts.terminalReason = reason;
     state.terminalReason = resultOpts.terminalReason;
     persistStateSafe(stateDir, state);
     return buildResult(runId, 'approval_required', resultOpts);
@@ -179,7 +259,7 @@ function handleNonInteractiveApproval(approved, driftDiffs, candidate, { logger,
   const negotiationRequest = generateNegotiationRequest(issues, negState);
 
   logger.error('non_interactive_drift', { diffs: driftDiffs, negotiation: negotiationRequest });
-  resultOpts.terminalReason = 'Workflow drift detected in non-interactive mode.';
+  resultOpts.terminalReason = reason;
   state.terminalReason = resultOpts.terminalReason;
   persistStateSafe(stateDir, state);
   if (!jsonOutput) printWorkflowDrift(formatDriftsForPrint(driftDiffs));
@@ -397,8 +477,38 @@ async function executeRecipeRefStep(stepDef, stepId, ctx) {
     };
   }
 
+  const expectedTrust = stepDef.recipeRef?.trust;
+  const currentTrust = classifyTrust(resolvedRecipe.recipe);
+  const boundaryExpected = {};
+  const boundaryActual = {};
+  if (stepDef.recipeRef?.channel !== undefined) {
+    boundaryExpected.channel = stepDef.recipeRef.channel;
+    boundaryActual.channel = currentTrust.channel;
+  }
+  if (Object.prototype.hasOwnProperty.call(stepDef.recipeRef || {}, 'signature')) {
+    boundaryExpected.signature = stepDef.recipeRef.signature ?? null;
+    boundaryActual.signature = resolvedRecipe.recipe.signature ?? null;
+  }
+  if (expectedTrust?.channel !== undefined) {
+    boundaryExpected.trust_channel = expectedTrust.channel;
+    boundaryActual.trust_channel = currentTrust.channel;
+  }
+  if (expectedTrust?.verified !== undefined) {
+    boundaryExpected.trust_verified = expectedTrust.verified;
+    boundaryActual.trust_verified = currentTrust.verified;
+  }
+
+  const trustMismatch = formatRecipeRefBoundaryMismatch(boundaryExpected, boundaryActual);
+  if (trustMismatch) {
+    logger.warn('recipe_ref_trust_boundary_mismatch', { stepId, expected: boundaryExpected, actual: boundaryActual });
+    return {
+      outcome: 'failure',
+      terminalReason: `recipe_ref trust boundary mismatch for step "${stepId}": ${trustMismatch}. Re-approve the workflow and review trust settings.`,
+    };
+  }
+
   const execution = await executeRecipe(resolvedRecipe.recipe, stepDef.recipeRef.resolvedInputs, {
-    allowUnverified: true,
+    allowUnverified: stepDef.recipeRef.allowUnverified ?? false,
     cwd: workflow.projectRoot,
     stateDir,
     approved: true,
@@ -663,6 +773,7 @@ export async function runWorkflowSupervisor(options) {
     manifestPath: rawManifestPath,
     nonInteractive = false,
     jsonOutput     = false,
+    allowUnverified = false,
     trustClass     = null,
   } = options;
 
@@ -689,6 +800,7 @@ export async function runWorkflowSupervisor(options) {
     let prepared;
     try {
       prepared = loadAndPrepare(definitionPath, trustClass, logger, {
+        allowUnverified,
         recipeSearchDirs: options.recipeSearchDirs,
       });
     } catch (err) {
@@ -711,7 +823,12 @@ export async function runWorkflowSupervisor(options) {
 
     // Phase B: Manifest comparison
     const candidate = createWorkflowManifest(workflow, workflowHash, riskAssessment, workflow.projectRoot);
-    const { needsApproval, driftDiffs, approved } = compareAgainstApproved(candidate, manifestPath, logger);
+    const {
+      needsApproval,
+      driftDiffs,
+      approved,
+      reviewEachTimeReason = null,
+    } = compareAgainstApproved(candidate, manifestPath, logger);
 
     // Non-interactive reuse must come from a previously acknowledged Guardrail
     // approval record, not just a matching file on disk.
@@ -728,7 +845,14 @@ export async function runWorkflowSupervisor(options) {
     // Phase C: Approval
     if (needsApproval) {
       const approvalResult = await handleApproval(candidate, manifestPath, driftDiffs, approved, riskAssessment, {
-        nonInteractive, jsonOutput, logger, stateDir, state, runId, resultOpts,
+        nonInteractive,
+        jsonOutput,
+        logger,
+        stateDir,
+        state,
+        runId,
+        resultOpts,
+        reviewEachTimeReason: reviewEachTimeReason,
       });
       if (approvalResult !== null) return approvalResult;
     }

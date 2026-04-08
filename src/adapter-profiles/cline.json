@@ -1,0 +1,36 @@
+{
+  "tool": "cline",
+  "protocol": "mcp",
+  "schema_target": "adapter-result/v1",
+  "version": "1.0.0",
+  "description": "Cline adapter profile — MCP protocol for future IDE integration (blocked in v0.2)",
+  "intercept": {
+    "command": "$.command",
+    "args": "$.args",
+    "cwd": "$.cwd"
+  },
+  "response": {
+    "format": "json",
+    "success": {
+      "status": "success",
+      "stdout": "$.process.stdout"
+    },
+    "blocked": {
+      "status": "blocked",
+      "reason": "$.guardrail.reason"
+    },
+    "failed": {
+      "status": "failed",
+      "exit_code": "$.guardrail.exitCode"
+    }
+  },
+  "exit_codes": {
+    "success": 0,
+    "blocked": 12,
+    "failed": 1
+  },
+  "defaults": {
+    "non_interactive": true,
+    "json_output": true
+  }
+}
