@@ -10,6 +10,7 @@ Use this guide when another coding agent needs to execute commands or workflows 
 4. In non-interactive mode, only a previously approved Guardrail manifest counts as reusable approval.
 5. Approval reuse is exact-value based today. If an input value changes, treat it as drift even when the template or recipe schema would allow the new value.
 6. Guardrail locks execution per manifest hash. Different manifests can run concurrently; the same approved execution cannot run twice at once.
+7. Prefer `README.md` and `docs/technical-status.md` over speculative design docs. If another document describes a feature that is not marked done there, treat it as planned, not available.
 
 ## Local CLI Entry Point
 

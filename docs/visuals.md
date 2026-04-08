@@ -1,5 +1,12 @@
 Perfect—this is exactly how you make Guardrail *click instantly*.
 
+Before using any of these visuals, keep the product boundary honest:
+
+- Show Guardrail as an approval and drift-control layer, not as a VM, sandbox, or malware cage.
+- Prefer labels like "approved contract", "risk", "blocked drift", and "re-approval required" over imagery that implies full containment.
+- If a visual shows agents or chaotic commands, the message should be "outside approved scope" rather than "Guardrail neutralizes malicious code."
+- For open-source launch assets, clarity beats hype: the visuals should reinforce the same limitations stated in the README.
+
 Below are **high-quality, ready-to-use prompts** for generating visuals (Midjourney / DALL·E / Stable Diffusion / Figma AI). Each one is designed to communicate a *specific concept* that drives understanding + virality.
 
 ---

@@ -181,6 +181,8 @@ For the full template specification, see [docs/guardrail-template-implementation
 
 Guardrail Recipes are not a template gallery or a config repo. Each recipe is a packaged execution bundle with typed inputs, versioned artifacts, manifest-backed approval for real execution, and runtime guardrails around danger, scope, and provenance.
 
+For open-source distribution, treat recipes as auditable artifacts, not safety certificates. Registry review, pinning, and provenance checks reduce ambiguity; they do not guarantee that a community recipe is harmless once executed.
+
 ### Browse the Recipe Library
 
 | Category | Examples |

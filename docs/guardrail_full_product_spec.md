@@ -1,5 +1,13 @@
 You’re right. That file was not implementation-grade, and calling it “actual prompts” was a miss.
 
+This document is a backlog-style feature map, not the implementation source of truth. For what Guardrail actually guarantees today, use:
+
+- `README.md` for product boundary and user-facing behavior
+- `docs/technical-status.md` for shipped status and explicit non-goals
+- `docs/issues.md` for known gaps and corrected historical weaknesses
+
+Everything below must be interpreted through the current Guardrail boundary: it is an approval, drift-control, and audit layer for trusted workflows. It is not a sandbox, not a containment boundary, and not a substitute for host hardening. Open-source additions should bias toward explicit scope, structured logs, low operational complexity, and maintainable zero-dependency implementation.
+
 Here’s the clean version: a **build-oriented feature list** organized so you can turn it into prompts, tickets, or specs yourself.
 
 # Core engine

@@ -1,5 +1,12 @@
 Shipping the OpenClaw adapter captures the viral, open-source "agent hacker" market. But if you want to capture the broader enterprise market and the developers building serious local tooling, you need to place Guardrail exactly where the most dangerous execution happens.
 
+This document is GTM and adapter strategy, not a security guarantee. Every adapter still has to preserve Guardrail's actual boundary:
+
+- Guardrail approves declared scope and blocks drift.
+- Guardrail does not sandbox hostile code or certify third-party integrations as safe.
+- Open-source adapters should prefer small, explicit, maintainable integration surfaces over adapter-specific magic.
+- Any adapter claim about CI, IDEs, or orchestration frameworks should be backed by the same structured logging, fail-closed behavior, and approval semantics as core Guardrail.
+
 If OpenClaw is your wedge into consumer AI, here are the three adapters you should ship to capture the rest of the ecosystem.
 
 1. The IDE Swarm Adapter: Cline (Claude Dev) / Aider

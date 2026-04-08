@@ -230,10 +230,10 @@ docs/                    Product requirements, specs, invariants, implementation
 | Shared manifests | Done | Team-level recipe/policy/profile sync, versioned, pin, conflict detection |
 | Approval queue | Done | Pending/approved/rejected/changes_requested state machine, persistence |
 | Multi-stage approval | Done | Sequential chains (dev → lead → security), conditional routing |
-| Org policy engine | Done | Org-wide enforcement overrides local; forbidden ops, allowed actions |
-| RBAC | Done | 4 roles (admin/approver/developer/viewer), 9 permissions, enforcement |
-| Key management | Done | AES-256-GCM encrypted storage, scoped access, redact for logging |
-| Notifications | Done | Webhook/Slack/email/log adapters, event-driven dispatch |
+| Org policy engine | Logic only | Hierarchy resolution logic exists; not wired into CLI enforcement path |
+| RBAC | Logic only | 4 roles, 9 permissions, enforcement function — not wired into CLI or supervisor |
+| Key management | Partial | AES-256-GCM client-side only; no HSM/KMS integration |
+| Notifications | Stub | Webhook/Slack/email/log dispatch framework; all adapters are mocks (no HTTP/SMTP calls) |
 | Deployment modes | Done | local/team/enterprise with per-mode feature flags |
 | Compliance exports | Done | JSON + CSV export of audit logs, compliance summary reports |
 | Environment separation | Done | dev/staging/prod isolation, cross-env access blocked (dev ✗ prod) |
@@ -250,6 +250,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | Concurrency lock model | Done | Lock is per manifest hash; same approved execution is single-flight, different hashes can run concurrently |
 | Recipe install (local) | Done | `guardrail recipe install <path>` to `~/.guardrail/recipes/` |
 | Recipe install (remote) | Done | `guardrail recipe install <url>` with fail-closed trusted source enforcement |
+| GitHub recipe distribution (`github://`, public publish flow) | Not started | Design only today — see `docs/github-recipe-distribution.md` |
 | Local recipe registry | Done | `~/.guardrail/recipes/`, duplicate/version conflict handling |
 | Trusted source config | Done | `~/.guardrail/config.json` with `trusted_sources` array |
 | Self-verification | Done | `guardrail verify` — 7 checks: modules, validation, signing, safe defaults, risk, dangerous, recipes |
@@ -323,7 +324,7 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Workflow engine (Bucket 2 MVP)
 - [x] Template system (individual + workflow templates)
 - [x] Adversarial test suite
-- [x] Initial MVP closed; current full suite is 891 passing tests, 0 dependencies
+- [x] Initial MVP closed; current full suite is 957 passing tests, 0 dependencies
 
 ### Phase 2 — Hardening
 
@@ -396,10 +397,10 @@ docs/                    Product requirements, specs, invariants, implementation
 
 - [x] Shared manifests (sync, versioning, pin, conflict detection)
 - [x] Approval queue + multi-stage chains (dev → lead → security)
-- [x] Org policy engine (hierarchy: org > team > user, forbidden ops override)
-- [x] RBAC (admin/approver/developer/viewer, 9 permissions)
-- [x] Key management (AES-256-GCM encrypted, scoped access, redact)
-- [x] Notifications (webhook/slack/email/log adapters)
+- [x] Org policy engine (hierarchy: org > team > user, forbidden ops override — logic exists, not wired into CLI)
+- [x] RBAC (admin/approver/developer/viewer, 9 permissions — enforcement logic exists, not wired into CLI/supervisor)
+- [x] Key management (AES-256-GCM client-side encrypted, scoped access, redact — no HSM/KMS integration)
+- [x] Notifications (webhook/slack/email/log adapters — dispatch framework only, all adapters are mocks)
 - [x] Deployment modes (local/team/enterprise feature flags)
 - [x] Compliance exports (JSON + CSV, summary reports)
 - [x] Environment separation (dev/staging/prod isolation)
@@ -444,25 +445,49 @@ Three product phases, each with its own go-to-market motion.
 | 1 | `guardrail init` learning mode | Individual retention | In code (learning-mode.js), needs CLI init flow |
 | 2 | Free tier definition + offline guarantee | Word of mouth | Architecture supports (0 deps, local-only mode) |
 
-### Paid Tier (team adoption)
+### Portability & Offboarding
 
 | # | Feature | Unlocks | Status |
 |---|---------|---------|--------|
-| 3 | Shared manifest registry (minimal backend) | Team adoption | Local sync done (shared-manifest.js), needs backend |
-| 4 | Slack/email approval notifications | Team RED workflows | Adapters done (notifications.js), needs live integration |
-| 5 | GitHub OAuth / Google SSO | Team login | Not started |
-| 6 | Usage dashboard | Manager buy-in | Metrics collection done (metrics.js), needs UI |
-| 7 | Private recipe namespace | Business stickiness | Marketplace done (marketplace.js), needs auth |
+| P1 | Manifests are plain JSON (no proprietary format) | Zero lock-in | Done — `.guardrail/*.approved.json`, human-readable, works without Guardrail |
+| P2 | Audit logs are standard JSONL | Data portability | Done — NDJSON with hash-chaining, `guardrail audit export` via compliance.js |
+| P3 | Recipes are portable JSON | Ecosystem independence | Done — self-contained with content hash, no registry dependency |
+| P4 | Data deletion on request (30 days) | Enterprise trust | Not started — no cloud backend or account system exists yet; planned SaaS policy |
 
-### Enterprise
+### Paid Tier — Team (v0.3)
 
 | # | Feature | Unlocks | Status |
 |---|---------|---------|--------|
-| 8 | RBAC four roles | Enterprise security review | Done (rbac.js) — needs backend enforcement |
-| 9 | SAML / SCIM | Enterprise IT approval | Not started |
-| 10 | Audit log shipping + retention | Enterprise compliance | Local audit done (audit.js), needs remote shipping |
-| 11 | VPC / on-prem deployment | Regulated industries | Deployment modes done (deployment-mode.js), needs packaging |
-| 12 | SOC 2 Type II | Large enterprise contracts | Compliance exports done (compliance.js), needs process |
+| 3 | Shared manifest registry (encrypted at rest) | Team adoption | Local sync done (shared-manifest.js), needs backend |
+| 4 | Team approval flows (multi-identity) | Team RED workflows | Logic done (approval-queue.js), needs backend persistence |
+| 5 | Slack/email approval notifications | Team RED workflows | Mock adapters only (notifications.js), needs live integration |
+| 6 | GitHub OAuth / Google Workspace SSO | Team login | Not started — zero auth code |
+| 7 | Cloud audit log shipping (opt-in) | Team compliance | Not started — no Datadog/Splunk/CloudWatch code |
+| 8 | Private recipe namespace | Business stickiness | Channel system is signature-based, needs org-scoped namespaces |
+| 9 | Usage dashboard | Manager buy-in | Metrics collection done (metrics.js), needs UI |
+
+### Enterprise (v0.4–v0.5)
+
+| # | Feature | Target | Unlocks | Status |
+|---|---------|--------|---------|--------|
+| 10 | SAML 2.0 / SCIM provisioning | v0.4 | Enterprise IT approval | Not started — zero code |
+| 11 | RBAC four roles, 9 permissions | v0.4 | Enterprise security review | Logic done (rbac.js), not wired into CLI/supervisor enforcement |
+| 12 | Org-level policy inheritance | v0.4 | Security team governance | Logic done (org-policy.js), not wired into CLI enforcement |
+| 13 | VPC / on-prem deployment | v0.5 | Regulated industries | Deployment modes done (deployment-mode.js), no Docker/Helm artifacts |
+| 14 | Immutable audit log + compliance exports | v0.5 | Enterprise compliance | JSON/CSV export done (compliance.js), needs write-once storage backend |
+| 15 | Cloud audit log shipping + retention | v0.5 | Enterprise compliance | Not started — no remote shipping code |
+| 16 | HSM / KMS key management | v0.5 | Enterprise key governance | Client-side AES-256-GCM done (key-management.js), no HSM/AWS KMS integration |
+| 17 | SOC 2 Type II certification | v0.5 | Large enterprise contracts | Compliance exports done, needs process + audit |
+
+### Recipe Distribution (v0.2–v0.5)
+
+| # | Feature | Target | Unlocks | Status |
+|---|---------|--------|---------|--------|
+| D0a | GitHub SHA-pinned install (`github://owner/repo/path@sha`) | v0.2 | Immutable community recipes | Not started — spec in docs/github-recipe-distribution.md. Fetches from raw.githubusercontent.com, pins content hash in .pin.json sidecar, re-verifies on run. |
+| D0b | Recipe publish (`guardrail recipe publish`) | v0.2 | One-command community contribution | Not started — spec in docs/github-recipe-distribution.md. Lint → scrub → fork → PR against guardrail-dev/recipes. RED blocked from public registry. |
+| D0c | Template → recipe bridge (`template create --from-manifest`, `template publish`, `template list`, trust hash comparison) | v0.2 | Local-first authoring flow | Not started — spec in docs/github-recipe-distribution.md. Templates live in `.guardrail/templates/`, become recipes via publish. Modified templates lose source trust. |
+| D1 | npm registry (`@guardrail/recipes`) | v0.3 | Developer ergonomics | Not started — convenience layer on top of GitHub repo, not a replacement. npm versions are immutable once published; content hash is stable. Requires publish pipeline. Ship after GitHub-based distribution is proven. |
+| D2 | Self-hosted recipe registry (JSON API) | v0.5 | Enterprise air-gap | Not started — thin static API: `GET /v1/recipes`, `GET /v1/recipes/{category}/{name}`, `GET /v1/recipes/{category}/{name}/versions`. Simplest impl is S3+CloudFront or R2, write-once, no database. Becomes `registry.guardrail.dev`; enterprise customers run on-prem instances declared in org policy `trusted_registries`. |
 
 ---
 
@@ -573,6 +598,8 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 
 ## Test Matrix
 
+`npm test` is the source of truth for exact totals. The table below is a maintained map of the major suites and what they prove, not a promise that every per-file count stays frozen as new focused suites are added.
+
 | Suite | Tests | Focus |
 |-------|-------|-------|
 | test-core.js | 95 | Contract, manifest, risk, approval, drift, validator, logger |
@@ -593,6 +620,7 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 | test-adversarial-e2e.js | 37 | Adversarial e2e: path traversal (5 vectors), wildcard deletes, hidden destructive flags, misleading recipe descriptions, agent outside approved recipe, dev-targeting-prod, version swap attacks, audit log tampering, resource bounds exhaustion, schema bypass attempts |
 | test-gap-closure.js | 43 | Gap closure: recipe runner, install, verify, demo scenarios, versioned storage, version resolution, runbook |
 | test-feature-acceptance.js | 54 | README-derived acceptance coverage, including recipe non-interactive enforcement |
-| **Total** | **891** | |
+| test-input-validator.js | 91 | Shared input parsing, coercion, enum/range/pattern validation, exact-value approval edge cases |
+| **Current runner total** | **957 tests / 211 suites** | Reported by `npm test`; use the command output as the canonical count |
 
-Run: `npm test` (all 957), `npm run test:e2e` (verification/e2e/adversarial suites), `npm run test:core` (core unit/integration suites), `npm run test:acceptance` (51 feature acceptance tests)
+Run: `npm test` (all 957), `npm run test:e2e` (verification/e2e/adversarial suites), `npm run test:core` (core unit/integration suites), `npm run test:acceptance` (54 feature acceptance tests)
