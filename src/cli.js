@@ -68,6 +68,7 @@ Flags:
   --approved-manifest <path>  Approved manifest path (CI)
   --non-interactive           Never prompt, fail on missing approval
   --json                      Emit JSON output
+  --json-stream               Emit machine-readable workflow progress stream (and structured workflow result)
   --trust <class>             Override trust class
   --validator <mode>          Validator mode: exit_code | ndjson
   --update-source <source>    Update source: none | worker_proposal | demo
@@ -103,6 +104,7 @@ export function parseArgs(argv) {
     manifest: null,
     nonInteractive: false,
     json: false,
+    jsonStream: false,
     trust: null,
     validator: null,
     updateSource: null,
@@ -189,6 +191,12 @@ export function parseArgs(argv) {
         i++;
         continue;
       }
+
+      if (arg === '--json-stream') {
+        result.jsonStream = true;
+        i++;
+        continue;
+      }
       if (arg.startsWith('--')) return { error: 'usage' };
       return { error: 'usage' };
     }
@@ -267,6 +275,12 @@ export function parseArgs(argv) {
 
       if (arg === '--json') {
         result.json = true;
+        i++;
+        continue;
+      }
+
+      if (arg === '--json-stream') {
+        result.jsonStream = true;
         i++;
         continue;
       }
@@ -1533,18 +1547,21 @@ async function main() {
 
     const { runWorkflowSupervisor } = await import('./workflow-supervisor.js');
 
+    const wantStructuredResult = parsed.json || parsed.jsonStream;
+
     const result = await runWorkflowSupervisor({
       definitionPath: parsed.definition,
       manifestPath: parsed.manifest || '.guardrail/workflows/default.approved.json',
       nonInteractive: parsed.nonInteractive,
-      jsonOutput: parsed.json,
+      jsonOutput: parsed.json || parsed.jsonStream,
       trustClass: parsed.trust,
       recipeSearchDirs: parsed.recipeSearchDirs,
       allowUnverified: parsed.allowUnverified || false,
+      progressSink: parsed.jsonStream ? (event) => process.stdout.write(`${JSON.stringify(event)}\n`) : null,
     });
 
-    if (parsed.json) {
-      console.log(JSON.stringify(result, null, 2));
+    if (wantStructuredResult) {
+      console.log(JSON.stringify(result, null, parsed.json ? 2 : 0));
     }
 
     const exitCode = STATUS_EXIT_CODES[result.status] ?? 1;

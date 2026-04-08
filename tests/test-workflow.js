@@ -1773,6 +1773,47 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
     assert.equal(result.exitCode, STATUS_EXIT_CODES.drift_detected);
     assert.ok(result.terminalReason);
   });
+
+  it('emits stable workflow progress events for JSON-stream consumption', async () => {
+    const def = makeDefinition();
+    const defPath = writeDefFile(tmpDir, def, 'workflow-progress.json');
+    const manifest = buildManifest(def, tmpDir);
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    const manifestPath = join(tmpDir, 'approved.workflow.progress.json');
+    saveManifest(manifest, manifestPath);
+
+    const events = [];
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+      progressSink: (event) => {
+        events.push(event);
+      },
+    });
+
+    assert.equal(result.status, 'success');
+    const eventNames = events.map((event) => event.event);
+
+    assert.ok(eventNames.includes('execution_start'), 'execution_start should be emitted');
+    assert.ok(eventNames.includes('step_started'), 'step_started should be emitted');
+    assert.ok(eventNames.includes('step_completed'), 'step_completed should be emitted');
+    assert.ok(eventNames.includes('execution_end'), 'execution_end should be emitted');
+
+    const stepStarted = events.find((event) => event.event === 'step_started');
+    const executionEnd = events.find((event) => event.event === 'execution_end');
+
+    assert.equal(stepStarted.mode, 'workflow');
+    assert.equal(stepStarted.runId, result.runId);
+    assert.equal(stepStarted.stepType, 'task');
+    assert.equal(stepStarted.status, 'running');
+    assert.equal(executionEnd.status, 'success');
+    assert.equal(executionEnd.runId, result.runId);
+    assert.equal(executionEnd.stepsExecuted, 1);
+  });
 });
 
 // ===========================================================================

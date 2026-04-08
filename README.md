@@ -476,6 +476,40 @@ JSON output for structured logging and CI integration:
 guardrail run --json --non-interactive --approved-manifest .guardrail/approved.json -- npm test
 ```
 
+### Workflow progress stream
+
+For machine consumers, stream workflow execution progress with `--json-stream`:
+
+```bash
+guardrail workflow run --definition workflows/server-cycle.json \
+  --non-interactive --approved-manifest .guardrail/workflows/server-cycle.approved.json \
+  --json-stream
+```
+
+Use both `--json` and `--json-stream` when you want a pretty final structured result and a live stream:
+
+```bash
+guardrail workflow run --definition workflows/server-cycle.json \
+  --non-interactive --approved-manifest .guardrail/workflows/server-cycle.approved.json \
+  --json --json-stream
+```
+
+Stream events are one JSON object per line (NDJSON) and include:
+
+- `event`: one of `approval_pending`, `execution_start`, `step_started`, `step_completed`, `step_failed`, `step_blocked`, `execution_end`
+- `runId`: workflow run identifier
+- `mode`: supervisor mode (`workflow`)
+- `status`: `pending`, `running`, `success`, `failed`, or `blocked`
+- `stepId` / `stepType` when a step event applies
+- `message` and optional `reason` (human-readable detail)
+- `finalStatus` for `execution_end`
+
+Guaranteed:
+
+- `execution_start` is emitted once just before runtime execution.
+- `execution_end` is emitted exactly once on every terminal path when `--json-stream` is enabled.
+- `workflow` events are emitted only for workflow mode.
+
 ---
 
 ## Adapter System

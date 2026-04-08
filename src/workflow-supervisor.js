@@ -53,6 +53,69 @@ import { classifyTrust } from './recipe-channel.js';
 // Pure helpers
 // ---------------------------------------------------------------------------
 
+const PROGRESS_EVENT_STATUS = {
+  approval_pending: 'pending',
+  execution_start: 'running',
+  step_started: 'running',
+  step_completed: 'success',
+  step_failed: 'failed',
+  step_blocked: 'blocked',
+  execution_end: 'success',
+};
+
+const PROGRESS_RESULT_STATUS = {
+  success: 'success',
+  approval_required: 'blocked',
+  approval_denied: 'blocked',
+  drift_detected: 'blocked',
+  validation_failed: 'failed',
+  policy_violation: 'failed',
+  update_denied: 'blocked',
+  protocol_error: 'failed',
+  unsupported: 'failed',
+  internal_error: 'failed',
+  time_policy_violated: 'failed',
+  concurrent_blocked: 'blocked',
+  audit_chain_broken: 'failed',
+};
+
+function emitProgress(progressSink, runId, event, data = {}) {
+  if (typeof progressSink !== 'function') return;
+
+  const eventData = {
+    event,
+    mode: 'workflow',
+    runId,
+    status: data.status ?? PROGRESS_EVENT_STATUS[event] ?? 'unknown',
+  };
+
+  if (data.workflowName) eventData.workflowName = data.workflowName;
+  if (data.stepId) eventData.stepId = data.stepId;
+  if (data.stepType) eventData.stepType = data.stepType;
+  if (data.message) eventData.message = data.message;
+  if (data.reason) eventData.reason = data.reason;
+  if (data.stepResult) eventData.stepResult = data.stepResult;
+  if (data.finalStatus) eventData.finalStatus = data.finalStatus;
+  if (data.stepsExecuted !== undefined) eventData.stepsExecuted = data.stepsExecuted;
+  if (data.attempt !== undefined) eventData.attempt = data.attempt;
+
+  progressSink(eventData);
+}
+
+function mapResultStatusToProgressStatus(status = '') {
+  return PROGRESS_RESULT_STATUS[status] ?? 'unknown';
+}
+
+function emitExecutionEnd(progressSink, runId, finalStatus, context = {}) {
+  emitProgress(progressSink, runId, 'execution_end', {
+    finalStatus,
+    status: mapResultStatusToProgressStatus(finalStatus),
+    workflowName: context.workflowName,
+    stepsExecuted: context.stepsExecuted,
+    message: context.message,
+  });
+}
+
 function buildResult(runId, status, opts = {}) {
   return {
     runId,
@@ -644,7 +707,10 @@ async function executeRollbackSteps(rollbackSteps, logger, jsonOutput) {
 // Phase D: Execution loop
 // ---------------------------------------------------------------------------
 
-async function executeWorkflow(workflow, { serviceRegistry, logger, jsonOutput, state, recipeSearchDirs, auditLog, runId, workflowHash, stateDir }) {
+async function executeWorkflow(workflow, {
+  serviceRegistry, logger, jsonOutput, state, recipeSearchDirs,
+  auditLog, runId, workflowHash, stateDir, progressSink,
+}) {
   const stepMap = indexById(workflow.steps);
   const totalSteps = workflow.steps.length;
   let currentStep = workflow.entryStep;
@@ -678,6 +744,12 @@ async function executeWorkflow(workflow, { serviceRegistry, logger, jsonOutput, 
     state.iteration = iteration;
 
     logger.info('step_start', { stepId: currentStep, type: stepDef.type, iteration });
+    emitProgress(progressSink, runId, 'step_started', {
+      stepId: currentStep,
+      stepType: stepDef.type,
+      message: `Starting step "${currentStep}"`,
+      attempt: iteration,
+    });
     if (!jsonOutput) printStepProgress(`[step ${stepsExecuted}/${totalSteps}] ${currentStep}`, stepDef.type, 'running');
 
     let outcome = 'success';
@@ -711,8 +783,34 @@ async function executeWorkflow(workflow, { serviceRegistry, logger, jsonOutput, 
       stepId: currentStep, type: stepDef.type, iteration, outcome, timestamp: new Date().toISOString(),
     });
 
-    if (!jsonOutput) {
-      printStepProgress(`[step ${stepsExecuted}/${totalSteps}] ${currentStep}`, stepDef.type, outcome === 'success' ? 'done' : 'failed');
+    if (outcome === 'success') {
+      emitProgress(progressSink, runId, 'step_completed', {
+        stepId: currentStep,
+        stepType: stepDef.type,
+        stepResult: outcome,
+        message: `Step "${currentStep}" completed`,
+        attempt: iteration,
+      });
+      if (!jsonOutput) {
+        printStepProgress(`[step ${stepsExecuted}/${totalSteps}] ${currentStep}`, stepDef.type, 'done');
+      }
+    } else {
+      emitProgress(progressSink, runId, 'step_failed', {
+        stepId: currentStep,
+        stepType: stepDef.type,
+        stepResult: outcome,
+        message: `Step "${currentStep}" failed with outcome "${outcome}"`,
+        attempt: iteration,
+      });
+      if (!jsonOutput) {
+        printStepProgress(`[step ${stepsExecuted}/${totalSteps}] ${currentStep}`, stepDef.type, 'failed');
+      }
+    }
+
+    if (!jsonOutput && outcome === 'success') {
+      printStepProgress(`[step ${stepsExecuted}/${totalSteps}] ${currentStep}`, stepDef.type, 'done');
+    } else if (!jsonOutput) {
+      printStepProgress(`[step ${stepsExecuted}/${totalSteps}] ${currentStep}`, stepDef.type, 'failed');
     }
 
     // I-W4: Non-idempotent step failure forces rollback and abort
@@ -720,6 +818,12 @@ async function executeWorkflow(workflow, { serviceRegistry, logger, jsonOutput, 
       failedStep = currentStep;
       finalStatus = 'validation_failed';
       terminalReason = terminalReason || `Non-idempotent step "${currentStep}" failed — rollback required`;
+      emitProgress(progressSink, runId, 'step_blocked', {
+        stepId: currentStep,
+        stepType: stepDef.type,
+        message: terminalReason,
+        attempt: iteration,
+      });
       logger.warn('non_idempotent_failure', { stepId: currentStep });
       break;
     }
@@ -773,6 +877,7 @@ export async function runWorkflowSupervisor(options) {
     manifestPath: rawManifestPath,
     nonInteractive = false,
     jsonOutput     = false,
+    progressSink   = null,
     allowUnverified = false,
     trustClass     = null,
   } = options;
@@ -806,7 +911,11 @@ export async function runWorkflowSupervisor(options) {
     } catch (err) {
       logger.error('definition_load_error', { path: definitionPath, error: err.message });
       persistStateSafe(stateDir, state);
-      return buildResult(runId, 'internal_error', resultOpts);
+      const result = buildResult(runId, 'internal_error', resultOpts);
+      emitExecutionEnd(progressSink, runId, result.status, {
+        message: `Failed to load workflow definition: ${err.message}`,
+      });
+      return result;
     }
 
     const { workflow, workflowHash, riskAssessment } = prepared;
@@ -836,14 +945,32 @@ export async function runWorkflowSupervisor(options) {
       if (!approved.riskAssessment?.acknowledgedBy) {
         logger.error('non_interactive_unacknowledged_risk', { path: manifestPath });
         resultOpts.terminalReason = 'Approved workflow manifest has no acknowledged risk assessment. Run interactively first.';
+        emitProgress(progressSink, runId, 'approval_pending', {
+          workflowName: workflow.name,
+          message: resultOpts.terminalReason,
+          reason: resultOpts.terminalReason,
+        });
         state.terminalReason = resultOpts.terminalReason;
         persistStateSafe(stateDir, state);
-        return buildResult(runId, 'approval_required', resultOpts);
+        const result = buildResult(runId, 'approval_required', resultOpts);
+        emitExecutionEnd(progressSink, runId, result.status, { workflowName: workflow.name, message: resultOpts.terminalReason });
+        return result;
       }
     }
 
     // Phase C: Approval
     if (needsApproval) {
+      emitProgress(progressSink, runId, 'approval_pending', {
+        workflowName: workflow.name,
+        reason:
+          driftDiffs.length > 0
+            ? 'Workflow approval required: workflow drift detected.'
+            : 'Workflow approval required.',
+        message:
+          driftDiffs.length > 0
+            ? 'Workflow drift detected.'
+            : reviewEachTimeReason ?? 'Workflow review required.',
+      });
       const approvalResult = await handleApproval(candidate, manifestPath, driftDiffs, approved, riskAssessment, {
         nonInteractive,
         jsonOutput,
@@ -854,10 +981,23 @@ export async function runWorkflowSupervisor(options) {
         resultOpts,
         reviewEachTimeReason: reviewEachTimeReason,
       });
-      if (approvalResult !== null) return approvalResult;
+      if (approvalResult !== null) {
+        emitExecutionEnd(progressSink, runId, approvalResult.status, {
+          workflowName: workflow.name,
+          message: approvalResult.terminalReason || 'Workflow did not pass approval gate.',
+          stepsExecuted: approvalResult.stepsExecuted ?? 0,
+        });
+        return approvalResult;
+      }
     }
 
     // Phase D-pre: Runtime policy — time limits and concurrency lock
+    emitProgress(progressSink, runId, 'execution_start', {
+      workflowName: workflow.name,
+      message: 'Workflow execution started',
+      stepsExecuted: 0,
+    });
+
     const runtimeLimits = options.runtimeLimits ?? null;
     const auditLog = createAuditLog(resolve(stateDir, 'audit.jsonl'));
 
@@ -870,7 +1010,13 @@ export async function runWorkflowSupervisor(options) {
         resultOpts.terminalReason = `Time policy violated: ${detail}`;
         state.terminalReason = resultOpts.terminalReason;
         persistStateSafe(stateDir, state);
-        return buildResult(runId, 'time_policy_violated', resultOpts);
+        const result = buildResult(runId, 'time_policy_violated', resultOpts);
+        emitExecutionEnd(progressSink, runId, result.status, {
+          workflowName: workflow.name,
+          message: resultOpts.terminalReason,
+          stepsExecuted: resultOpts.stepsExecuted,
+        });
+        return result;
       }
     }
 
@@ -881,7 +1027,13 @@ export async function runWorkflowSupervisor(options) {
       resultOpts.terminalReason = `Concurrent execution blocked: ${lockResult.detail}`;
       state.terminalReason = resultOpts.terminalReason;
       persistStateSafe(stateDir, state);
-      return buildResult(runId, 'concurrent_blocked', resultOpts);
+      const result = buildResult(runId, 'concurrent_blocked', resultOpts);
+      emitExecutionEnd(progressSink, runId, result.status, {
+        workflowName: workflow.name,
+        message: resultOpts.terminalReason,
+        stepsExecuted: resultOpts.stepsExecuted,
+      });
+      return result;
     }
     lockRelease = lockResult.release;
 
@@ -892,6 +1044,7 @@ export async function runWorkflowSupervisor(options) {
 
     const execResult = await executeWorkflow(workflow, {
       serviceRegistry, logger, jsonOutput, state, recipeSearchDirs, auditLog, runId, workflowHash, stateDir,
+      progressSink,
     });
 
     resultOpts.attempt = execResult.stepsExecuted;
@@ -912,6 +1065,11 @@ export async function runWorkflowSupervisor(options) {
     persistStateSafe(stateDir, state);
 
     const result = buildResult(runId, execResult.finalStatus, resultOpts);
+    emitExecutionEnd(progressSink, runId, result.status, {
+      workflowName: workflow.name,
+      message: result.terminalReason || `Workflow finished with status ${result.status}`,
+      stepsExecuted: result.stepsExecuted,
+    });
 
     if (!jsonOutput) {
       printWorkflowResult({
@@ -934,7 +1092,13 @@ export async function runWorkflowSupervisor(options) {
     resultOpts.terminalReason = `Internal error: ${err.message}`;
     state.terminalReason = resultOpts.terminalReason;
     persistStateSafe(stateDir, state);
-    return buildResult(runId, 'internal_error', resultOpts);
+    const result = buildResult(runId, 'internal_error', resultOpts);
+    emitExecutionEnd(progressSink, runId, result.status, {
+      workflowName: null,
+      message: result.terminalReason,
+      stepsExecuted: resultOpts.stepsExecuted,
+    });
+    return result;
   }
 }
 
