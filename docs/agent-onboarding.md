@@ -79,6 +79,24 @@ Recipe version rules:
 - Recipe dry-run remains a preview path and does not require an approved manifest.
 - Recipe input constraints validate what values are allowed, but approval reuse still binds to the exact resolved input values saved in the manifest.
 
+Public GitHub recipe install rules:
+
+- Use `guardrail recipe install github://owner/repo/path.json@sha` with an explicit commit SHA.
+- Short SHAs are input sugar only; Guardrail resolves and stores a full 40-character SHA before pinning.
+- Do not assume a GitHub recipe is trusted just because it is pinned. Trusted-source config and later execution approval still apply.
+- The agent runtime must have access to Guardrail trusted-source config for that `github://` prefix.
+- Public repos can install through raw GitHub fetch alone. Private repos require `gh` to be installed and authenticated in the same runtime the agent uses.
+- If the agent runs with a different `HOME`, container, or sandbox profile, make sure GitHub CLI auth is still reachable there. In practice this may mean setting `GH_CONFIG_DIR` explicitly.
+- If neither raw GitHub access nor authenticated `gh` access is available, Guardrail fails closed and the agent must stop instead of bypassing the install path.
+
+Private-repo agent install example:
+
+```bash
+GH_CONFIG_DIR=/path/to/gh-config \
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js recipe install \
+  github://owner/repo/recipes/safe.recipe.json@<full-commit-sha>
+```
+
 ## Workflow Authoring Note
 
 When creating a first workflow for Phalanx-style lifecycle automation, do not guess the JSON shape from prose docs. Use the workflow schema patterns in `tests/test-workflow.js` as the source of truth.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { runSupervisor, STATUS_EXIT_CODES } from './supervisor.js';
 import { hasShellMetacharacters } from './contract.js';
 import { DEFAULT_MANIFEST_PATH } from './manifest.js';
@@ -41,8 +41,9 @@ Commands:
   pack <recipe.json> [--output <path>]   Package a recipe for distribution
   recipe validate <recipe.json>         Validate a recipe file
   recipe inspect <packed.json>          Inspect a packaged recipe (verify hash)
-  recipe install <path|url>             Install a recipe to local registry
+  recipe install <path|url|github://>   Install a recipe to local registry
   recipe versions <id>                  List installed versions of a recipe
+  recipe publish --name <n> --category <c> [--manifest <path>] [--description <d>] [--dry-run]
   create --name <n> --category <c>      Generate a recipe skeleton
   profile create|use|list|show          Manage user profiles
   policy list|inspect|validate          Manage and enforce policies
@@ -83,7 +84,7 @@ Examples:
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const result = {
     subcommand: null,
     shell: null,
@@ -419,11 +420,32 @@ function parseArgs(argv) {
   // --- recipe subcommand ----------------------------------------------------
 
   if (sub === 'recipe') {
-    if (i >= argv.length || !['validate', 'inspect', 'install', 'versions'].includes(argv[i])) {
+    if (i >= argv.length || !['validate', 'inspect', 'install', 'versions', 'publish'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
     result.subcommand = `recipe-${action}`;
+
+    if (action === 'publish') {
+      // parse --name, --category, --description, --version, --author, --dry-run, --manifest/--manifest-path
+      while (i < argv.length) {
+        if (argv[i] === '--name' && i + 1 < argv.length) { result.name = argv[++i]; i++; continue; }
+        if (argv[i] === '--category' && i + 1 < argv.length) { result.category = argv[++i]; i++; continue; }
+        if (argv[i] === '--description' && i + 1 < argv.length) { result.description = argv[++i]; i++; continue; }
+        if (argv[i] === '--version' && i + 1 < argv.length) { result.version = argv[++i]; i++; continue; }
+        if (argv[i] === '--author' && i + 1 < argv.length) { result.author = argv[++i]; i++; continue; }
+        if ((argv[i] === '--manifest-path' || argv[i] === '--manifest') && i + 1 < argv.length) {
+          result.manifestPath = argv[++i];
+          i++;
+          continue;
+        }
+        if (argv[i] === '--dry-run') { result.dryRun = true; i++; continue; }
+        if (argv[i] === '--json') { result.json = true; i++; continue; }
+        return { error: 'usage' };
+      }
+      return result;
+    }
+
     if (i >= argv.length) return { error: 'usage' };
     result.recipePath = argv[i++];
     while (i < argv.length) {
@@ -1295,9 +1317,21 @@ async function main() {
     const source = parsed.recipePath;
     try {
       let result;
-      if (source.startsWith('http://') || source.startsWith('https://')) {
+      if (source.startsWith('github://')) {
+        const { installFromGitHub } = await import('./recipe-install.js');
+        result = await installFromGitHub(source, { force: parsed.force });
+      } else if (source.startsWith('http://') || source.startsWith('https://')) {
         const { installFromUrl } = await import('./recipe-install.js');
         result = await installFromUrl(source, { force: parsed.force });
+      } else if (/^[a-z][a-z0-9-]*$/.test(source) && !existsSync(source)) {
+        // Looks like a recipe name, not a file path
+        console.error(
+          `Recipe "${source}" is not a local path, URL, or github:// source.\n` +
+          'To install from the public registry, use the full GitHub URL:\n' +
+          `  guardrail recipe install github://guardrail-dev/recipes/<category>/${source}.json@<sha>\n` +
+          'Browse available recipes at: https://github.com/guardrail-dev/recipes'
+        );
+        process.exit(1);
       } else {
         const { installFromPath } = await import('./recipe-install.js');
         result = installFromPath(source, { force: parsed.force });
@@ -1308,6 +1342,33 @@ async function main() {
         console.log(`Installed recipe "${result.id}" v${result.version}`);
         console.log(`  Path: ${result.path}`);
         console.log(`  Hash: ${result.hash}`);
+        if (result.pin) {
+          console.log(`  SHA:  ${result.pin.sha}`);
+        }
+      }
+      process.exit(0);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  }
+
+  // --- recipe publish -------------------------------------------------------
+
+  if (parsed.subcommand === 'recipe-publish') {
+    try {
+      const { publishRecipe } = await import('./recipe-publish.js');
+      const result = await publishRecipe({
+        name: parsed.name,
+        category: parsed.category,
+        description: parsed.description,
+        version: parsed.version,
+        author: parsed.author,
+        dryRun: parsed.dryRun,
+        manifestPath: parsed.manifestPath,
+      });
+      if (parsed.json) {
+        console.log(JSON.stringify(result, null, 2));
       }
       process.exit(0);
     } catch (err) {
@@ -1553,7 +1614,14 @@ async function main() {
   process.exit(exitCode);
 }
 
-main().catch((err) => {
-  console.error(err.message ?? err);
-  process.exit(1);
-});
+// Only run main() when executed directly (not when imported for testing)
+import { resolve as _resolvePath } from 'node:path';
+import { fileURLToPath as _fileURLToPath } from 'node:url';
+const _thisFile = _fileURLToPath(import.meta.url);
+const _entryFile = process.argv[1] ? _resolvePath(process.argv[1]) : '';
+if (_thisFile === _entryFile) {
+  main().catch((err) => {
+    console.error(err.message ?? err);
+    process.exit(1);
+  });
+}

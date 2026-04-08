@@ -248,6 +248,36 @@ describe('README Feature: Recipe System', () => {
     assert.equal(r.exitCode, 0);
     assert.ok(r.stdout.includes('1.0.0'));
   });
+
+  it('guardrail recipe install <bare-name> points users to github:// install form', () => {
+    const r = run(`${CLI} recipe install open-pr`);
+    assert.ok(r.exitCode !== 0);
+    assert.ok((r.stderr || '').includes('github://guardrail-dev/recipes/'));
+  });
+
+  it('guardrail recipe publish --dry-run converts an approved manifest into a publishable recipe', () => {
+    const dir = tmpDir();
+    const manifestPath = join(dir, 'approved.json');
+    const manifest = {
+      contract: {
+        command: 'npm',
+        args: ['install', '--save-dev'],
+        mode: 'structured',
+        writablePaths: ['./node_modules'],
+        allowedBinaries: ['npm'],
+      },
+      riskAssessment: {
+        riskLevel: 'yellow',
+      },
+    };
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+    const r = run(`${CLI} recipe publish --name npm-install-safe --category packages --manifest ${manifestPath} --dry-run`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.ok(r.stdout.includes('Dry run'));
+    assert.ok(r.stdout.includes('"id": "npm-install-safe"'));
+    assert.ok(r.stdout.includes('"channel": "community"'));
+  });
 });
 
 // ==========================================================================

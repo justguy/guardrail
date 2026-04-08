@@ -1,7 +1,11 @@
 import { existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { resolve, join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
-import { loadRecipe, loadRemoteRecipe, hashRecipe } from './recipe.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { loadRecipe, loadRemoteRecipe, hashRecipe, loadRawJson, validateRecipe } from './recipe.js';
+
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Registry directory management
@@ -69,7 +73,7 @@ export function checkTrustedSource(source, trustedSources) {
 // Core install logic (shared by path and URL install)
 // ---------------------------------------------------------------------------
 
-function installRecipe(recipe, opts = {}) {
+function _installRecipeToStore(recipe, opts = {}) {
   const registryDir = ensureRegistryDir(opts.registryDir);
   const idDir = recipeDir(registryDir, recipe.id);
   const targetPath = versionedPath(registryDir, recipe.id, recipe.version);
@@ -111,7 +115,7 @@ function installRecipe(recipe, opts = {}) {
  */
 export function installFromPath(filePath, opts = {}) {
   const recipe = loadRecipe(resolve(filePath));
-  return installRecipe(recipe, opts);
+  return _installRecipeToStore(recipe, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +141,7 @@ export async function installFromUrl(url, opts = {}) {
   }
   const remoteLoader = opts.loadRemoteRecipe ?? loadRemoteRecipe;
   const recipe = await remoteLoader(url);
-  return installRecipe(recipe, opts);
+  return _installRecipeToStore(recipe, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +163,7 @@ export function listInstalled(registryDir) {
     if (entry.isDirectory()) {
       // Versioned: <id>/<version>.json
       const idDir = join(dir, entry.name);
-      const versionFiles = readdirSync(idDir).filter(f => f.endsWith('.json'));
+      const versionFiles = readdirSync(idDir).filter(f => f.endsWith('.json') && !f.startsWith('.'));
       for (const vf of versionFiles) {
         try {
           const recipe = JSON.parse(readFileSync(join(idDir, vf), 'utf8'));
@@ -199,9 +203,209 @@ export function listVersions(recipeId, registryDir) {
   if (!existsSync(idDir)) return [];
 
   return readdirSync(idDir)
-    .filter(f => f.endsWith('.json'))
+    .filter(f => f.endsWith('.json') && !f.startsWith('.'))
     .map(f => f.replace('.json', ''))
     .sort(compareSemver);
+}
+
+// ---------------------------------------------------------------------------
+// GitHub URL parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a github:// URL into components.
+ *
+ * Format: github://owner/repo/path/to/file.json@sha
+ * Returns: { owner, repo, path, sha, rawUrl }
+ * Throws on missing sha or invalid format.
+ */
+export function parseGitHubUrl(source) {
+  const rest = source.replace(/^github:\/\//, '');
+
+  const atIdx = rest.lastIndexOf('@');
+  if (atIdx === -1) {
+    throw new Error(
+      `GitHub recipe URL must include a commit SHA: ${source}\n` +
+      'Format: github://owner/repo/path/to/file.json@<sha>'
+    );
+  }
+
+  const pathPart = rest.slice(0, atIdx);
+  const sha = rest.slice(atIdx + 1);
+
+  if (!sha || !/^[0-9a-f]{7,40}$/i.test(sha)) {
+    throw new Error(`Invalid commit SHA "${sha}" in: ${source}`);
+  }
+
+  const segments = pathPart.split('/');
+  if (segments.length < 3) {
+    throw new Error(
+      `GitHub URL must include owner/repo/path: ${source}\n` +
+      'Format: github://owner/repo/path/to/file.json@<sha>'
+    );
+  }
+
+  const owner = segments[0];
+  const repo = segments[1];
+  const path = segments.slice(2).join('/');
+
+  return {
+    owner,
+    repo,
+    path,
+    sha,
+    rawUrl: `https://raw.githubusercontent.com/${owner}/${repo}/${sha}/${path}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// SHA resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a short SHA to a full 40-character SHA via the GitHub API.
+ * Fails closed if the full SHA cannot be resolved.
+ */
+async function resolveFullSha(parsed) {
+  if (parsed.sha.length === 40) return parsed.sha.toLowerCase();
+
+  // Try gh CLI first — authenticated requests, 5000/hr rate limit
+  try {
+    const { stdout } = await execFileAsync('gh', [
+      'api', `repos/${parsed.owner}/${parsed.repo}/commits/${parsed.sha}`,
+      '--jq', '.sha',
+    ], { timeout: 10000 });
+    const fullSha = stdout.trim();
+    if (/^[0-9a-f]{40}$/i.test(fullSha)) return fullSha;
+  } catch { /* gh not available or API error */ }
+
+  // Fallback: GitHub API via loadRawJson
+  try {
+    const url = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/commits/${parsed.sha}`;
+    const obj = await loadRawJson(url, {
+      headers: { Accept: 'application/vnd.github+json' },
+    });
+    if (obj.sha && /^[0-9a-f]{40}$/i.test(obj.sha)) return obj.sha;
+  } catch { /* try next path */ }
+
+  throw new Error(
+    `Could not resolve short SHA "${parsed.sha}" for github://${parsed.owner}/${parsed.repo}/${parsed.path}.\n` +
+    'Use a full 40-character SHA, or retry with GitHub API access available.'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GitHub API content fallback
+// ---------------------------------------------------------------------------
+
+/**
+ * Load a recipe file through the authenticated GitHub contents API.
+ * This is the fallback path when raw.githubusercontent.com is unavailable,
+ * which commonly happens for private repositories.
+ */
+export async function loadGitHubRecipeFromApi(parsed, fullSha) {
+  const { stdout } = await execFileAsync('gh', [
+    'api',
+    `repos/${parsed.owner}/${parsed.repo}/contents/${parsed.path}?ref=${fullSha}`,
+    '--jq',
+    '.content',
+  ], { timeout: 10000 });
+
+  const content = stdout.replace(/\s+/g, '');
+  if (!content) {
+    throw new Error(
+      `GitHub contents API returned no content for github://${parsed.owner}/${parsed.repo}/${parsed.path}@${fullSha}`
+    );
+  }
+
+  let recipe;
+  try {
+    recipe = JSON.parse(Buffer.from(content, 'base64').toString('utf8'));
+  } catch (err) {
+    throw new Error(`Invalid JSON from GitHub contents API: ${err.message}`);
+  }
+
+  validateRecipe(recipe);
+  return recipe;
+}
+
+// ---------------------------------------------------------------------------
+// Pin path helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the pin metadata path for a recipe file path.
+ * Pin metadata lives under a hidden .pins/ directory.
+ */
+export function pinPathForRecipePath(recipePath) {
+  const version = basename(recipePath, '.json');
+  return join(dirname(recipePath), '.pins', `${version}.json`);
+}
+
+// ---------------------------------------------------------------------------
+// Install from GitHub
+// ---------------------------------------------------------------------------
+
+/**
+ * Install a recipe from a github:// URL with SHA pinning.
+ *
+ * Fetches from raw.githubusercontent.com at the exact commit SHA,
+ * validates the recipe, stores it locally, and writes pin metadata.
+ */
+export async function installFromGitHub(source, opts = {}) {
+  const config = loadConfig(opts.configPath);
+  const configPath = opts.configPath || resolve(homedir(), '.guardrail', 'config.json');
+
+  if (!config.trusted_sources || config.trusted_sources.length === 0) {
+    throw new Error(
+      `No trusted sources configured. Add a trusted_sources array to ${configPath}.\n` +
+      `Example: { "trusted_sources": ["github://guardrail-dev/recipes/"] }`
+    );
+  }
+  if (!checkTrustedSource(source, config.trusted_sources)) {
+    throw new Error(
+      `Source "${source}" is not in trusted sources.\n` +
+      `Add a matching prefix to ${configPath}.`
+    );
+  }
+
+  const parsed = parseGitHubUrl(source);
+
+  // Resolve short SHA to full 40-char SHA
+  const fullSha = await resolveFullSha(parsed);
+  const resolvedRawUrl = `https://raw.githubusercontent.com/${parsed.owner}/${parsed.repo}/${fullSha}/${parsed.path}`;
+
+  const remoteLoader = opts.loadRemoteRecipe ?? loadRemoteRecipe;
+  let recipe;
+  try {
+    recipe = await remoteLoader(resolvedRawUrl);
+  } catch (rawErr) {
+    const githubApiLoader = opts.loadGitHubRecipeFromApi ?? loadGitHubRecipeFromApi;
+    try {
+      recipe = await githubApiLoader(parsed, fullSha);
+    } catch {
+      throw rawErr;
+    }
+  }
+  const result = _installRecipeToStore(recipe, opts);
+
+  // Write pin metadata
+  const pinPath = pinPathForRecipePath(result.path);
+  mkdirSync(dirname(pinPath), { recursive: true });
+  const pin = {
+    source,
+    owner: parsed.owner,
+    repo: parsed.repo,
+    path: parsed.path,
+    sha: fullSha,
+    input_sha: parsed.sha,
+    rawUrl: resolvedRawUrl,
+    content_hash: result.hash,
+    installed_at: new Date().toISOString(),
+  };
+  writeFileSync(pinPath, JSON.stringify(pin, null, 2) + '\n');
+
+  return { ...result, pin };
 }
 
 // ---------------------------------------------------------------------------

@@ -93,7 +93,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~14,500 lines of source, ~14,000 lines of tests, 957 passing tests, 0 dependencies.
+**Stats:** ~14,500 lines of source, ~14,000 lines of tests, 1044 passing tests, 0 dependencies.
 
 ---
 
@@ -250,7 +250,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | Concurrency lock model | Done | Lock is per manifest hash; same approved execution is single-flight, different hashes can run concurrently |
 | Recipe install (local) | Done | `guardrail recipe install <path>` to `~/.guardrail/recipes/` |
 | Recipe install (remote) | Done | `guardrail recipe install <url>` with fail-closed trusted source enforcement |
-| GitHub recipe distribution (`github://`, public publish flow) | Not started | Design only today — see `docs/github-recipe-distribution.md` |
+| GitHub recipe distribution (`github://`, public publish flow) | Done | SHA-pinned install, `.pins/<version>.json` metadata, publish dry-run/PR flow |
 | Adapter system (`adapter run`, profile install, shim flow) | Not started | Design only today — see `docs/adapter-implementation-plan.md` |
 | Local recipe registry | Done | `~/.guardrail/recipes/`, duplicate/version conflict handling |
 | Trusted source config | Done | `~/.guardrail/config.json` with `trusted_sources` array |
@@ -312,8 +312,8 @@ docs/                    Product requirements, specs, invariants, implementation
 |---------|--------|----------|
 | Range-based recipe approvals | Not started | High — recipe inputs are schema-validated, but approval reuse is still exact-value based |
 | Recipe execution via `guardrail run <recipe-id>` | Done | `run --recipe <id> --input k=v [--dry-run]` |
-| Recipe install (local + remote) | Done | `recipe install <path\|url>` with trusted source config; remote install blocked when config is missing or unmatched |
-| Recipe registry / remote publishing | Partial | Local registry done; remote publishing deferred to SaaS |
+| Recipe install (local + remote) | Done | `recipe install <path\|url\|github://...@sha>` with trusted source config; GitHub installs support authenticated fallback for private repos |
+| Recipe registry / remote publishing | Done | Local registry plus GitHub-backed community publish/install; broader hosted registry remains deferred to SaaS |
 
 ---
 
@@ -325,7 +325,7 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Workflow engine (Bucket 2 MVP)
 - [x] Template system (individual + workflow templates)
 - [x] Adversarial test suite
-- [x] Initial MVP closed; current full suite is 957 passing tests, 0 dependencies
+- [x] Initial MVP closed; current full suite is 1044 passing tests, 0 dependencies
 
 ### Phase 2 — Hardening
 
@@ -416,6 +416,8 @@ docs/                    Product requirements, specs, invariants, implementation
 - [x] Recipe supervisor: manifest-backed approval, drift detection, acknowledged-risk reuse in non-interactive mode
 - [x] Recipe install from local path (`recipe install <path> [--overwrite]`)
 - [x] Recipe install from URL (`recipe install <url>`) with fail-closed trusted source enforcement
+- [x] Recipe install from GitHub (`recipe install github://owner/repo/path@sha`) with `.pins/` metadata and authenticated fallback for private repos
+- [x] Recipe publish (`recipe publish --name <n> --category <c> [--manifest <path>] [--dry-run]`)
 - [x] Local recipe registry (`~/.guardrail/recipes/`, duplicate/version handling)
 - [x] Trusted source configuration (`~/.guardrail/config.json` with `trusted_sources`)
 - [x] Self-verification command (`guardrail verify [--json]` — 7 async checks)
@@ -484,8 +486,8 @@ Three product phases, each with its own go-to-market motion.
 
 | # | Feature | Target | Unlocks | Status |
 |---|---------|--------|---------|--------|
-| D0a | GitHub SHA-pinned install (`github://owner/repo/path@sha`) | v0.2 | Immutable community recipes | Not started — spec in docs/github-recipe-distribution.md. Fetches from GitHub, requires full commit pinning, stores remote metadata in `.pins/<version>.json`, and re-verifies source hash on run. |
-| D0b | Recipe publish (`guardrail recipe publish`) | v0.2 | One-command community contribution | Not started — spec in docs/github-recipe-distribution.md. Lint → scrub metadata only → fork → PR against guardrail-dev/recipes. Shell manifests are rejected; RED is blocked from public registry. |
+| D0a | GitHub SHA-pinned install (`github://owner/repo/path@sha`) | v0.2 | Immutable community recipes | Done — fetches from GitHub, requires full commit pinning, stores remote metadata in `.pins/<version>.json`, re-verifies source hash on run, and falls back to authenticated GitHub contents API when raw fetches are unavailable. |
+| D0b | Recipe publish (`guardrail recipe publish`) | v0.2 | One-command community contribution | Done — lint → scrub metadata only → fork → PR against guardrail-dev/recipes. Shell manifests are rejected; RED is blocked from public registry. |
 | D0c | Template → recipe bridge (`template create --from-manifest`, `template publish`, `template list`, trust hash comparison) | v0.2 | Local-first authoring flow | Not started — spec in docs/github-recipe-distribution.md. Templates live in `.guardrail/templates/`, become recipes via publish, and modified templates lose source trust via definition-hash comparison. |
 | D1 | npm registry (`@guardrail/recipes`) | v0.3 | Developer ergonomics | Not started — convenience layer on top of GitHub repo, not a replacement. npm versions are immutable once published; content hash is stable. Requires publish pipeline. Ship after GitHub-based distribution is proven. |
 | D2 | Self-hosted recipe registry (JSON API) | v0.5 | Enterprise air-gap | Not started — thin static API: `GET /v1/recipes`, `GET /v1/recipes/{category}/{name}`, `GET /v1/recipes/{category}/{name}/versions`. Simplest impl is S3+CloudFront or R2, write-once, no database. Becomes `registry.guardrail.dev`; enterprise customers run on-prem instances declared in org policy `trusted_registries`. |
@@ -592,8 +594,9 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 | `pack <recipe.json>` | Done | Package a recipe with content hash |
 | `recipe validate <file>` | Done | Validate a recipe JSON |
 | `recipe inspect <packed.json>` | Done | Inspect packed recipe, verify hash |
-| `recipe install <path\|url> [--overwrite]` | Done | Install to versioned local registry |
+| `recipe install <path\|url\|github://...@sha> [--overwrite]` | Done | Install to versioned local registry, including SHA-pinned GitHub sources |
 | `recipe versions <id>` | Done | List installed versions of a recipe |
+| `recipe publish --name <n> --category <c> [--manifest <path>] [--dry-run]` | Done | Convert a structured approved command manifest into a community recipe PR flow |
 | `profile create\|use\|list\|show` | Done | Manage user profiles |
 | `policy list\|inspect\|validate` | Done | Manage and enforce policies |
 | `audit verify [--path]` | Done | Verify audit log chain integrity |
@@ -630,8 +633,10 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 | test-golden-demos.js | 31 | Golden demo regressions: accidental rm -rf, broken PR bulk merge, dep upgrade major bump, infra rollout targeting prod, OpenClaw beyond scope, recipe tamper detection, version swap detection |
 | test-adversarial-e2e.js | 37 | Adversarial e2e: path traversal (5 vectors), wildcard deletes, hidden destructive flags, misleading recipe descriptions, agent outside approved recipe, dev-targeting-prod, version swap attacks, audit log tampering, resource bounds exhaustion, schema bypass attempts |
 | test-gap-closure.js | 43 | Gap closure: recipe runner, install, verify, demo scenarios, versioned storage, version resolution, runbook |
-| test-feature-acceptance.js | 54 | README-derived acceptance coverage, including recipe non-interactive enforcement |
+| test-feature-acceptance.js | 56 | README-derived acceptance coverage, including recipe non-interactive enforcement and recipe distribution UX |
 | test-input-validator.js | 91 | Shared input parsing, coercion, enum/range/pattern validation, exact-value approval edge cases |
-| **Current runner total** | **957 tests / 211 suites** | Reported by `npm test`; use the command output as the canonical count |
+| test-github-install.js | 38 | GitHub SHA-pinned install, pin metadata, CLI parsing, remote verification, authenticated fallback, loadRawJson |
+| test-recipe-publish.js | 47 | Manifest-to-recipe conversion, personal-data scrub, PR body, publish dry-run guards |
+| **Current runner total** | **1044 tests / 224 suites** | Reported by `npm test`; use the command output as the canonical count |
 
-Run: `npm test` (all 957), `npm run test:e2e` (verification/e2e/adversarial suites), `npm run test:core` (core unit/integration suites), `npm run test:acceptance` (54 feature acceptance tests)
+Run: `npm test` (all 1044), `npm run test:e2e` (verification/e2e/adversarial suites), `npm run test:core` (core unit/integration suites), `npm run test:acceptance` (56 feature acceptance tests)

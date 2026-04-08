@@ -1,6 +1,6 @@
 # GitHub Recipe Distribution — Implementation Spec
 
-**Status:** Not started
+**Status:** GitHub install and `recipe publish` are shipped; signed index and registry follow-ons remain planned
 **Target:** v0.2 (pre-SaaS, open source launch)
 **Depends on:** recipe.js, recipe-install.js, recipe-runner.js, cli.js
 
@@ -24,6 +24,7 @@ This distribution design improves provenance and reproducibility. It does **not*
 - Maintainers review recipe metadata, lint signals, and registry policy compliance. They are not acting as a security firm or giving a blanket safety warranty.
 - Users remain responsible for what they install and what they approve for execution.
 - Missing trust config, failed SHA resolution, invalid signatures, lint failures, or publish-policy failures must fail closed.
+- Private-repo installs may need authenticated GitHub API fallback when raw GitHub fetches are unavailable. That only works if `gh` is installed and authenticated in the caller's runtime context.
 
 ### Name-Based Install (v0.2 vs v0.3)
 
@@ -239,6 +240,26 @@ function pinPathForRecipePath(recipePath) {
   return join(dirname(recipePath), '.pins', `${version}.json`);
 }
 
+export async function loadGitHubRecipeFromApi(parsed, fullSha) {
+  const { stdout } = await execFileAsync('gh', [
+    'api',
+    `repos/${parsed.owner}/${parsed.repo}/contents/${parsed.path}?ref=${fullSha}`,
+    '--jq',
+    '.content',
+  ], { timeout: 10000 });
+
+  const content = stdout.replace(/\s+/g, '');
+  if (!content) {
+    throw new Error(
+      `GitHub contents API returned no content for github://${parsed.owner}/${parsed.repo}/${parsed.path}@${fullSha}`
+    );
+  }
+
+  const recipe = JSON.parse(Buffer.from(content, 'base64').toString('utf8'));
+  validateRecipe(recipe);
+  return recipe;
+}
+
 export async function installFromGitHub(source, opts = {}) {
   // Trust check — github:// URLs go through the same trusted_sources gate
   const config = loadConfig(opts.configPath);
@@ -264,7 +285,17 @@ export async function installFromGitHub(source, opts = {}) {
   const resolvedRawUrl = `https://raw.githubusercontent.com/${parsed.owner}/${parsed.repo}/${fullSha}/${parsed.path}`;
 
   const remoteLoader = opts.loadRemoteRecipe ?? loadRemoteRecipe;
-  const recipe = await remoteLoader(resolvedRawUrl);
+  let recipe;
+  try {
+    recipe = await remoteLoader(resolvedRawUrl);
+  } catch (rawErr) {
+    const githubApiLoader = opts.loadGitHubRecipeFromApi ?? loadGitHubRecipeFromApi;
+    try {
+      recipe = await githubApiLoader(parsed, fullSha);
+    } catch {
+      throw rawErr;
+    }
+  }
   const result = _installRecipeToStore(recipe, opts);
 
   // Write pin metadata under a hidden directory so recipe indexing
@@ -326,7 +357,28 @@ async function verifyPinnedRecipeSource(recipe, sourcePath, opts = {}) {
   // or severe upstream corruption.
   if (!opts.skipRemoteVerify) {
     try {
-      const remoteRecipe = await loadRemoteRecipe(pin.rawUrl);
+      const remoteLoader = opts.loadRemoteRecipe ?? loadRemoteRecipe;
+      const githubApiLoader = opts.loadGitHubRecipeFromApi ?? loadGitHubRecipeFromApi;
+      let remoteRecipe = null;
+
+      try {
+        remoteRecipe = await remoteLoader(pin.rawUrl);
+      } catch (rawErr) {
+        if (pin.owner && pin.repo && pin.path && pin.sha) {
+          try {
+            remoteRecipe = await githubApiLoader({
+              owner: pin.owner,
+              repo: pin.repo,
+              path: pin.path,
+            }, pin.sha);
+          } catch {
+            throw rawErr;
+          }
+        } else {
+          throw rawErr;
+        }
+      }
+
       const remoteHash = hashRecipe(remoteRecipe);
       if (remoteHash !== pin.content_hash) {
         throw Object.assign(
@@ -429,6 +481,17 @@ Install and publish flows should emit the same kind of structured, low-surprise 
 
 These logs must never print auth tokens, GitHub CLI credentials, or raw secret values. For open-source maintainability, failures should be diagnosable from structured fields rather than from verbose ad hoc console output.
 
+### Agent and CI Runtime Note
+
+The `github://` flow behaves the same for humans, CI, and agents, but the environment matters:
+
+- the runtime still needs a matching `trusted_sources` entry
+- public repositories can often rely on raw GitHub fetch alone
+- private repositories require `gh` authentication in that same runtime
+- if the runtime overrides `HOME`, moves into a container, or runs under a different service account, `GH_CONFIG_DIR` may need to be set explicitly so the authenticated fallback can work
+
+If those conditions are not met, Guardrail must fail closed rather than silently bypassing GitHub provenance checks.
+
 ### Migration Path
 
 Recipes installed before v0.2 (without `.pins/<version>.json` metadata) continue to work normally. Pin verification only activates when matching pin metadata exists. No re-install required. Users who want pin protection on existing recipes can re-install them with a `github://` URL.
@@ -505,10 +568,9 @@ Developer runs: guardrail recipe publish --name open-pr --category github
 ```js
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { loadManifest } from './manifest.js';
 import { validateRecipe, hashRecipe } from './recipe.js';
-import { evaluateRisk } from './policy-engine.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -528,7 +590,7 @@ const PUBLISH_VERSION = '0.1.0';
  */
 function requireGhCli() {
   try {
-    execSync('gh auth status', {
+    execFileSync('gh', ['auth', 'status'], {
       encoding: 'utf8',
       timeout: 10000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -708,11 +770,13 @@ function buildGuardrailsFromContract(contract) {
 
 /**
  * Run a gh CLI command and return stdout.
- * Requires gh to be installed and authenticated (checked by requireGhCli).
  */
 function gh(args, opts = {}) {
   try {
-    return execSync(`gh ${args}`, {
+    if (!Array.isArray(args) || args.length === 0) {
+      throw new Error('gh() requires a non-empty argv array');
+    }
+    return execFileSync('gh', args, {
       encoding: 'utf8',
       timeout: 30000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -729,17 +793,16 @@ function gh(args, opts = {}) {
  * Returns the fork's owner/repo string.
  */
 export function ensureFork() {
-  // Get current authenticated user
-  const username = gh('api user --jq .login');
+  const username = gh(['api', 'user', '--jq', '.login']);
 
   // Check if fork already exists
   try {
-    gh(`api repos/${username}/${UPSTREAM_REPO} --jq .fork`);
+    gh(['api', `repos/${username}/${UPSTREAM_REPO}`, '--jq', '.fork']);
     return `${username}/${UPSTREAM_REPO}`;
   } catch { /* fork doesn't exist yet */ }
 
   // Create fork
-  gh(`repo fork ${UPSTREAM_OWNER}/${UPSTREAM_REPO} --clone=false`);
+  gh(['repo', 'fork', `${UPSTREAM_OWNER}/${UPSTREAM_REPO}`, '--clone=false']);
   return `${username}/${UPSTREAM_REPO}`;
 }
 
@@ -756,45 +819,62 @@ export function createRecipePR(fork, recipe, opts) {
   const hash = hashRecipe(recipe);
 
   // Create branch from upstream main
-  const mainSha = gh(
-    `api repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/git/refs/heads/main --jq .object.sha`
-  );
+  const mainSha = gh([
+    'api',
+    `repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/git/refs/heads/main`,
+    '--jq',
+    '.object.sha',
+  ]);
   try {
-    gh(`api repos/${fork}/git/refs -f ref=refs/heads/${branch} -f sha=${mainSha}`);
+    gh(['api', `repos/${fork}/git/refs`, '-f', `ref=refs/heads/${branch}`, '-f', `sha=${mainSha}`]);
   } catch {
     // Branch may already exist — update it
-    gh(`api repos/${fork}/git/refs/heads/${branch} -X PATCH -f sha=${mainSha} -f force=true`);
+    gh(['api', `repos/${fork}/git/refs/heads/${branch}`, '-X', 'PATCH', '-f', `sha=${mainSha}`, '-f', 'force=true']);
   }
 
   // Write file to branch
-  gh(
-    `api repos/${fork}/contents/${filePath} -X PUT ` +
-    `-f message="Add recipe: ${recipe.id}" ` +
-    `-f content="${contentBase64}" ` +
-    `-f branch=${branch}`
-  );
+  gh([
+    'api',
+    `repos/${fork}/contents/${filePath}`,
+    '-X',
+    'PUT',
+    '-f',
+    `message=Add recipe: ${recipe.id}`,
+    '-f',
+    `content=${contentBase64}`,
+    '-f',
+    `branch=${branch}`,
+  ]);
 
   // Build PR body
   const body = buildPRBody(recipe, hash, opts);
 
   // Check if PR already exists for this branch
-  const existingPr = gh(
-    `api repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/pulls ` +
-    `--jq '.[] | select(.head.label == "${fork.split('/')[0]}:${branch}") | .html_url'`
-  );
+  const existingPr = gh([
+    'api',
+    `repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/pulls`,
+    '--jq',
+    `.[] | select(.head.label == "${fork.split('/')[0]}:${branch}") | .html_url`,
+  ]);
   if (existingPr) {
     return { prUrl: existingPr, branch, filePath, hash, updated: true };
   }
 
-  // Open PR — use heredoc-style body to avoid shell escaping issues
-  const prUrl = gh(
-    `api repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/pulls ` +
-    `-f title="Recipe: ${recipe.id}" ` +
-    `-f head="${fork.split('/')[0]}:${branch}" ` +
-    `-f base=main ` +
-    `--input - --jq .html_url`,
-    { input: JSON.stringify({ body }) }
-  );
+  // Open PR
+  const prUrl = gh([
+    'api',
+    `repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/pulls`,
+    '-f',
+    `title=Recipe: ${recipe.id}`,
+    '-f',
+    `head=${fork.split('/')[0]}:${branch}`,
+    '-f',
+    'base=main',
+    '--input',
+    '-',
+    '--jq',
+    '.html_url',
+  ], { input: JSON.stringify({ body }) });
 
   return { prUrl, branch, filePath, hash };
 }
@@ -1014,12 +1094,12 @@ Add to argument parsing (near existing `recipe-validate`, `recipe-inspect`):
 
 ```js
 // In help text:
-'  recipe publish --name <name> --category <cat> [--description <desc>] [--dry-run]'
+'  recipe publish --name <name> --category <cat> [--manifest <path>] [--description <desc>] [--dry-run]'
 
 // In argument parsing:
 case 'publish':
   result.subcommand = 'recipe-publish';
-  // parse --name, --category, --description, --version, --author, --dry-run
+  // parse --name, --category, --manifest, --description, --version, --author, --dry-run
   break;
 
 // In command routing:
@@ -1297,8 +1377,8 @@ These features belong in **Open Source Launch (v0.2)** — they require no infra
 
 | # | Feature | Target | Status |
 |---|---------|--------|--------|
-| D0a | GitHub SHA-pinned install (`github://`) | v0.2 | Not started |
-| D0b | Recipe publish (`guardrail recipe publish`) | v0.2 | Not started |
+| D0a | GitHub SHA-pinned install (`github://`) | v0.2 | Done |
+| D0b | Recipe publish (`guardrail recipe publish`) | v0.2 | Done |
 | D0c | Signed index for name-based install | v0.3 | Not started |
 | D1 | npm registry (`@guardrail/recipes`) | v0.3 | Not started — ships after GitHub distribution is proven |
 | D2 | Self-hosted recipe registry | v0.5 | Not started — enterprise air-gap |

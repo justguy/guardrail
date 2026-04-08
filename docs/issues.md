@@ -228,6 +228,27 @@ The CLI routed recipe execution to `runRecipeById()` / `executeRecipe()` without
 
 ---
 
+### ISSUE-017: `github://` recipe installs failed for private repos even when `gh` could access them
+
+**Found:** 2026-04-07, during live install testing against a private GitHub repo
+**Severity:** High — documented GitHub install flow failed in authenticated private-repo environments
+
+**Problem:**
+`guardrail recipe install github://owner/repo/path@sha` fetched from `raw.githubusercontent.com` only. For private repos, raw fetch returned 404 even when the same runtime had authenticated `gh` access and could read the file through the GitHub API.
+
+**Root cause:**
+`installFromGitHub()` assumed raw GitHub fetch was the only source path after SHA resolution. Runtime pin verification in `recipe-runner.js` made the same assumption when re-checking pinned source content.
+
+**Fix:**
+1. Added authenticated GitHub contents API fallback in `installFromGitHub()` when raw fetch fails
+2. Added the same authenticated fallback to runtime pinned-source verification
+3. Added tests for private-repo fallback behavior and updated agent/onboarding docs to call out the runtime requirement for `gh` auth and `GH_CONFIG_DIR` when needed
+
+**Files changed:** `src/recipe-install.js`, `src/recipe-runner.js`, `tests/test-github-install.js`, `README.md`, `docs/agent-onboarding.md`, `docs/github-recipe-distribution.md`, `docs/technical-status.md`
+**Status:** Resolved — private `github://` installs work when the runtime has matching `trusted_sources` and authenticated `gh` access
+
+---
+
 ### ISSUE-010: Recipe storage was flat (no versioning)
 
 **Found:** 2026-04-07, during recipe model design

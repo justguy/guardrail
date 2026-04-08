@@ -255,6 +255,55 @@ export function loadRecipe(filePath) {
   return recipe;
 }
 
+// ---------------------------------------------------------------------------
+// Public API — raw JSON fetch (reusable for GitHub API, signed index, etc.)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch and parse JSON from a URL with safety limits.
+ *
+ * - Rejects non-2xx responses with status code
+ * - Limits response body to maxBytes (default 1MB) to prevent memory exhaustion
+ * - Returns parsed JSON object
+ *
+ * @param {string} url - HTTPS URL to fetch
+ * @param {object} [opts] - { headers, maxBytes, timeout }
+ * @returns {Promise<object>} Parsed JSON
+ */
+export async function loadRawJson(url, opts = {}) {
+  const { get } = await import(url.startsWith('https') ? 'node:https' : 'node:http');
+  const maxBytes = opts.maxBytes || 1024 * 1024; // 1MB default
+  const headers = { 'User-Agent': 'guardrail-cli', ...opts.headers };
+
+  return new Promise((resolve, reject) => {
+    const req = get(url, { headers, timeout: opts.timeout || 10000 }, (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode} fetching ${url}`));
+        return;
+      }
+      let body = '';
+      let bytes = 0;
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        bytes += Buffer.byteLength(chunk);
+        if (bytes > maxBytes) {
+          res.destroy();
+          reject(new Error(`Response exceeded ${maxBytes} bytes from ${url}`));
+          return;
+        }
+        body += chunk;
+      });
+      res.on('end', () => {
+        try { resolve(JSON.parse(body)); }
+        catch (err) { reject(new Error(`Invalid JSON from ${url}: ${err.message}`)); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error(`Timeout fetching ${url}`)); });
+  });
+}
+
 /**
  * Load a recipe from a URL. Fetches, parses, and validates.
  * Returns a promise.

@@ -1,11 +1,12 @@
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { buildIndex, buildVersionIndex, deduplicateLatest } from './recipe-index.js';
 import { executeRecipe, dryRun } from './recipe-executor.js';
-import { hashRecipe } from './recipe.js';
+import { hashRecipe, loadRemoteRecipe } from './recipe.js';
 import { validateInputValue, inferApprovalMode } from './input-validator.js';
 import { classifyBucket, summarizeCapabilities, escalateTraits } from './risk-traits.js';
+import { pinPathForRecipePath, loadGitHubRecipeFromApi } from './recipe-install.js';
 
 // ---------------------------------------------------------------------------
 // Default search directories for recipe resolution
@@ -178,6 +179,7 @@ export function resolveInputs(recipe, cliInputs = {}, opts = {}) {
  */
 export async function runRecipeById(specifier, opts = {}) {
   const { recipe, sourcePath, version } = resolveRecipeById(specifier, opts.searchDirs);
+  await verifyPinnedRecipeSource(recipe, sourcePath, opts);
   const { resolved, flagged } = resolveInputs(recipe, opts.inputs || {}, {
     execution_shape: opts.execution_shape,
   });
@@ -272,4 +274,77 @@ export async function runRunbook(steps, opts = {}) {
   }
 
   return { status: 'success', stepsCompleted: results.length, results };
+}
+
+// ---------------------------------------------------------------------------
+// Pin verification — GitHub-installed recipes
+// ---------------------------------------------------------------------------
+
+/**
+ * Verify a recipe against its GitHub pin metadata (if present).
+ *
+ * - No pin file → no-op (pre-v0.2 or non-GitHub install)
+ * - Local hash mismatch → exit 12 (tamper)
+ * - Remote hash mismatch → exit 12 (upstream compromise)
+ * - Network failure on remote check → warning, continue (offline-first)
+ */
+export async function verifyPinnedRecipeSource(recipe, sourcePath, opts = {}) {
+  const pinPath = pinPathForRecipePath(sourcePath);
+  if (!existsSync(pinPath)) return;
+
+  const pin = JSON.parse(readFileSync(pinPath, 'utf8'));
+  const currentHash = hashRecipe(recipe);
+  if (currentHash !== pin.content_hash) {
+    throw Object.assign(
+      new Error(
+        `Pin verification failed for "${recipe.id}": local content hash does not match ` +
+        `pinned hash from ${pin.source}. Recipe may have been tampered with.\n` +
+        `Expected: ${pin.content_hash}\n` +
+        `Got:      ${currentHash}\n` +
+        'Re-install the recipe to fix: guardrail recipe install ' + pin.source
+      ),
+      { exitCode: 12 }
+    );
+  }
+
+  // Re-fetch from GitHub to verify remote hasn't changed
+  if (!opts.skipRemoteVerify) {
+    try {
+      const remoteLoader = opts.loadRemoteRecipe ?? loadRemoteRecipe;
+      const githubApiLoader = opts.loadGitHubRecipeFromApi ?? loadGitHubRecipeFromApi;
+      let remoteRecipe = null;
+
+      try {
+        remoteRecipe = await remoteLoader(pin.rawUrl);
+      } catch (rawErr) {
+        if (pin.owner && pin.repo && pin.path && pin.sha) {
+          try {
+            remoteRecipe = await githubApiLoader({
+              owner: pin.owner,
+              repo: pin.repo,
+              path: pin.path,
+            }, pin.sha);
+          } catch {
+            throw rawErr;
+          }
+        } else {
+          throw rawErr;
+        }
+      }
+
+      const remoteHash = hashRecipe(remoteRecipe);
+      if (remoteHash !== pin.content_hash) {
+        throw Object.assign(
+          new Error(
+            `Remote verification failed for "${recipe.id}": content at ${pin.source} ` +
+            `no longer matches pinned hash. Possible upstream compromise. Exit 12.`
+          ),
+          { exitCode: 12 }
+        );
+      }
+    } catch (err) {
+      if (err.exitCode === 12) throw err;
+      // Network failure is not fatal — local pin still protects
+    }
+  }
 }

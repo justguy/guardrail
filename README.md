@@ -201,6 +201,9 @@ guardrail recipe install ./my-recipe.recipe.json
 # Install from a URL (trusted sources required in ~/.guardrail/config.json)
 guardrail recipe install https://registry.example.com/recipes/deploy.recipe.json
 
+# Install from GitHub with an immutable commit pin
+guardrail recipe install github://guardrail-dev/recipes/github/open-pr.json@a3f9c12e4b7d8f0a1c2e3d4f5a6b7c8d9e0f1a2b
+
 # List available recipes
 guardrail list
 
@@ -225,6 +228,9 @@ guardrail recipe versions git-branch-cleanup
 # Inspect or validate before running
 guardrail recipe inspect ./packed-recipe.json
 guardrail recipe validate ./my-recipe.recipe.json
+
+# Publish a structured approved command manifest as a community recipe PR
+guardrail recipe publish --name npm-install-safe --category packages --dry-run
 ```
 
 ### How Recipes Work
@@ -234,12 +240,22 @@ Recipes are packaged execution bundles with:
 - typed input validation
 - channel enforcement (`verified` vs `community`)
 - version pinning and immutable install artifacts
+- SHA-pinned GitHub install for public recipe distribution
 - dry-run previews
 - manifest-backed approval and drift detection for real execution
 - runtime dangerous-command and scope checks
 - optional recipe metadata that can request extra approval sensitivity
 
 Recipe execution uses a recipe-specific supervisor in front of the native recipe executor. Dry-runs stay approval-free previews. Real execution stores and reuses a recipe manifest the same way command, workflow, and template mode do.
+
+For public recipe distribution:
+
+- `guardrail recipe install github://owner/repo/path.json@sha` installs from GitHub with a required commit pin
+- short SHAs are resolved to full 40-character SHAs before Guardrail stores pin metadata
+- if raw GitHub fetches are unavailable but `gh` is authenticated, Guardrail falls back to the GitHub contents API so private-repo installs can still work
+- agent or CI runtimes need both the matching `trusted_sources` config and, for private repos, `gh` authentication in that same runtime context
+- Guardrail records `.pins/<version>.json` metadata and re-verifies pinned source content on run when the network is available
+- `guardrail recipe publish` converts a structured approved command manifest into a scrubbed community recipe PR flow
 
 Version resolution works like this:
 
@@ -409,7 +425,7 @@ guardrail demo blocked
 
 ## Testing
 
-957 tests, all passing, zero dependencies. Node.js built-in test runner only.
+1044 tests, all passing, zero dependencies. Node.js built-in test runner only.
 
 ```bash
 npm test              # full suite
