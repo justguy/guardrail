@@ -68,7 +68,7 @@ Flags:
   --approved-manifest <path>  Approved manifest path (CI)
   --non-interactive           Never prompt, fail on missing approval
   --json                      Emit JSON output
-  --json-stream               Emit machine-readable workflow progress stream (and structured workflow result)
+  --json-stream               Emit machine-readable progress stream (and structured result) for supported modes
   --trust <class>             Override trust class
   --validator <mode>          Validator mode: exit_code | ndjson
   --update-source <source>    Update source: none | worker_proposal | demo
@@ -191,7 +191,6 @@ export function parseArgs(argv) {
         i++;
         continue;
       }
-
       if (arg === '--json-stream') {
         result.jsonStream = true;
         i++;
@@ -672,6 +671,12 @@ export function parseArgs(argv) {
 
     if (arg === '--json') {
       result.json = true;
+      i++;
+      continue;
+    }
+
+    if (arg === '--json-stream') {
+      result.jsonStream = true;
       i++;
       continue;
     }
@@ -1580,7 +1585,7 @@ async function main() {
           dryRunOnly: true,
           cwd: process.cwd(),
         });
-        if (parsed.json) {
+        if (parsed.json || parsed.jsonStream) {
           console.log(JSON.stringify(result, null, 2));
         } else {
           console.log(`Recipe: ${result.recipe.name} v${result.recipe.version}`);
@@ -1607,11 +1612,12 @@ async function main() {
         cwd: process.cwd(),
         manifestPath: parsed.manifest || null,
         nonInteractive: parsed.nonInteractive,
-        jsonOutput: parsed.json,
+        jsonOutput: parsed.json || parsed.jsonStream,
         trustClass: parsed.trust,
+        progressSink: parsed.jsonStream ? (event) => process.stdout.write(`${JSON.stringify(event)}\n`) : null,
       });
 
-      if (parsed.json) {
+      if (parsed.json || parsed.jsonStream) {
         console.log(JSON.stringify(result, null, 2));
       }
       const exitCode = STATUS_EXIT_CODES[result.status] ?? 1;
@@ -1637,11 +1643,12 @@ async function main() {
       inputs: parsed.inputs,
       manifestPath: parsed.manifest || null,
       nonInteractive: parsed.nonInteractive,
-      jsonOutput: parsed.json,
+      jsonOutput: parsed.json || parsed.jsonStream,
       envAllow: parsed.envAllow,
+      progressSink: parsed.jsonStream ? (event) => process.stdout.write(`${JSON.stringify(event)}\n`) : null,
     });
 
-    if (parsed.json) {
+    if (parsed.json || parsed.jsonStream) {
       console.log(JSON.stringify(result, null, 2));
     }
 
@@ -1662,11 +1669,12 @@ async function main() {
   const options = {
     manifestPath: parsed.manifest ?? DEFAULT_MANIFEST_PATH,
     nonInteractive: parsed.nonInteractive,
-    jsonOutput: parsed.json,
+    jsonOutput: parsed.json || parsed.jsonStream,
     trustClass: parsed.trust,
     validator: parsed.validator,
     updateSource: parsed.updateSource,
     cwd: process.cwd(),
+    progressSink: parsed.jsonStream ? (event) => process.stdout.write(`${JSON.stringify(event)}\n`) : null,
   };
 
   if (parsed.shell !== null) {
@@ -1680,7 +1688,7 @@ async function main() {
 
   const result = await runSupervisor(options);
 
-  if (parsed.json) {
+  if (parsed.json || parsed.jsonStream) {
     console.log(JSON.stringify(result, null, 2));
   }
 

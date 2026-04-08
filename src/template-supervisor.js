@@ -20,6 +20,11 @@ import {
   generateRunId,
   colorize,
 } from './logger.js';
+import {
+  emitProgress,
+  emitExecutionEnd,
+  mapResultStatusToProgressStatus,
+} from './progress-events.js';
 import { launchWorker, detectInteractiveAttempt } from './worker-interface.js';
 import { validateResult } from './validator.js';
 import { createContract, verifyFileHash } from './contract.js';
@@ -46,6 +51,30 @@ function buildResult(runId, status, opts = {}) {
     rollbackRan:    opts.rollbackRan    ?? false,
     exitCode:       STATUS_EXIT_CODES[status] ?? STATUS_EXIT_CODES.internal_error,
   };
+}
+
+function emitTemplateProgress(progressSink, runId, event, data = {}) {
+  emitProgress(progressSink, runId, 'template', event, data);
+}
+
+function emitTemplateExecutionEnd(progressSink, runId, finalStatus, context = {}) {
+  emitExecutionEnd(progressSink, runId, 'template', finalStatus, context);
+}
+
+function emitTemplateStepResult(progressSink, runId, finalStatus, context = {}) {
+  const progressStatus = mapResultStatusToProgressStatus(finalStatus);
+  const event = progressStatus === 'blocked'
+    ? 'step_blocked'
+    : progressStatus === 'failed'
+      ? 'step_failed'
+      : 'step_completed';
+
+  emitTemplateProgress(progressSink, runId, event, {
+    stepId: context.stepId || 'template',
+    stepType: context.stepType || 'template_step',
+    stepResult: finalStatus,
+    ...context,
+  });
 }
 
 function makeState(runId, templateName) {
@@ -270,6 +299,7 @@ export async function runTemplateSupervisor(options) {
     nonInteractive = false,
     jsonOutput     = false,
     envAllow       = [],
+    progressSink   = null,
   } = options;
 
   const runId = generateRunId();
@@ -282,6 +312,16 @@ export async function runTemplateSupervisor(options) {
     templateName: '', templateHash: '', manifestPath: '',
     riskLevel: '', riskReasons: [],
     stepsExecuted: 0, failedStep: null, rollbackRan: false,
+  };
+  const emitFinalResult = (status, opts = {}) => {
+    const result = buildResult(runId, status, { ...resultOpts, ...opts });
+    emitTemplateExecutionEnd(progressSink, runId, status, {
+      message: result.reason || opts.reason || '',
+      stepsExecuted: opts.stepsExecuted ?? 0,
+      rollbackRan: result.rollbackRan,
+      failedStep: result.failedStep,
+    });
+    return result;
   };
 
   logger.info('template_supervisor_start', { templatePath, nonInteractive, jsonOutput });
@@ -298,7 +338,10 @@ export async function runTemplateSupervisor(options) {
       if (!jsonOutput) {
         printResult({ success: false, exitCode: 1, message: err.message });
       }
-      return buildResult(runId, 'internal_error', resultOpts);
+      return emitFinalResult('internal_error', {
+        ...resultOpts,
+        reason: err.message,
+      });
     }
 
     resultOpts.templateName = def.name;
@@ -312,7 +355,10 @@ export async function runTemplateSupervisor(options) {
       if (!jsonOutput) {
         printResult({ success: false, exitCode: 1, message: msg });
       }
-      return buildResult(runId, 'validation_failed', resultOpts);
+      return emitFinalResult('validation_failed', {
+        ...resultOpts,
+        reason: msg,
+      });
     }
 
     for (const w of inputValidation.warnings) {
@@ -331,7 +377,10 @@ export async function runTemplateSupervisor(options) {
       if (!jsonOutput) {
         printResult({ success: false, exitCode: 1, message: msg });
       }
-      return buildResult(runId, 'policy_violation', resultOpts);
+      return emitFinalResult('policy_violation', {
+        ...resultOpts,
+        reason: msg,
+      });
     }
 
     const envResult = computeEnvIntersection(requiredEnv, envAllow);
@@ -344,7 +393,10 @@ export async function runTemplateSupervisor(options) {
       if (!jsonOutput) {
         printResult({ success: false, exitCode: 1, message: msg });
       }
-      return buildResult(runId, 'policy_violation', resultOpts);
+      return emitFinalResult('policy_violation', {
+        ...resultOpts,
+        reason: msg,
+      });
     }
 
     for (const w of envResult.warnings) {
@@ -399,10 +451,15 @@ export async function runTemplateSupervisor(options) {
     if (nonInteractive && approved !== null && !needsApproval) {
       if (!approved.riskAssessment?.acknowledgedBy) {
         logger.error('non_interactive_unacknowledged_risk', { path: manifestPath });
+        const reason = 'Approved manifest has no acknowledged risk. Run interactively first.';
+        emitTemplateProgress(progressSink, runId, 'approval_pending', { reason, message: reason });
         if (!jsonOutput) {
-          printResult({ success: false, exitCode: 10, message: 'Approved manifest has no acknowledged risk. Run interactively first.' });
+          printResult({ success: false, exitCode: 10, message: reason });
         }
-        return buildResult(runId, 'approval_required', resultOpts);
+        return emitFinalResult('approval_required', {
+          ...resultOpts,
+          reason,
+        });
       }
     }
 
@@ -411,26 +468,32 @@ export async function runTemplateSupervisor(options) {
       if (nonInteractive) {
         if (approved === null) {
           logger.error('non_interactive_no_manifest');
+          const reason = 'No approved manifest. Run interactively to approve.';
+          emitTemplateProgress(progressSink, runId, 'approval_pending', { reason, message: reason });
           if (!jsonOutput) {
-            printResult({ success: false, exitCode: 10, message: 'No approved manifest. Run interactively to approve.' });
+            printResult({ success: false, exitCode: 10, message: reason });
           }
-          return buildResult(runId, 'approval_required', resultOpts);
+          return emitFinalResult('approval_required', { ...resultOpts, reason });
         }
         // Drift in non-interactive
         logger.error('non_interactive_drift', { diffs: driftDiffs });
+        const reason = 'Template drift detected in non-interactive mode.';
+        emitTemplateProgress(progressSink, runId, 'approval_pending', { reason, message: reason });
         if (!jsonOutput) {
           printTemplateDrift(formatDiffs(driftDiffs));
-          printResult({ success: false, exitCode: 12, message: 'Template drift detected in non-interactive mode.' });
+          printResult({ success: false, exitCode: 12, message: reason });
         }
-        return buildResult(runId, 'drift_detected', resultOpts);
+        return emitFinalResult('drift_detected', { ...resultOpts, reason });
       }
 
       if (!process.stdin.isTTY) {
         logger.error('unsupported_no_tty');
+        const reason = 'Interactive approval needed but stdin is not a TTY.';
+        emitTemplateProgress(progressSink, runId, 'approval_pending', { reason, message: reason });
         if (!jsonOutput) {
-          printResult({ success: false, exitCode: 17, message: 'Interactive approval needed but stdin is not a TTY.' });
+          printResult({ success: false, exitCode: 17, message: reason });
         }
-        return buildResult(runId, 'unsupported', resultOpts);
+        return emitFinalResult('unsupported', { ...resultOpts, reason });
       }
 
       // Interactive approval
@@ -444,8 +507,10 @@ export async function runTemplateSupervisor(options) {
 
       if (!userApproved) {
         logger.info('approval_denied', { riskLevel: riskAssessment.riskLevel });
+        const reason = 'User denied approval.';
+        emitTemplateProgress(progressSink, runId, 'approval_pending', { reason, message: reason });
         if (!jsonOutput) printDenied();
-        return buildResult(runId, 'approval_denied', resultOpts);
+        return emitFinalResult('approval_denied', { ...resultOpts, reason });
       }
 
       // Approved — save manifest
@@ -461,7 +526,10 @@ export async function runTemplateSupervisor(options) {
         if (!jsonOutput) {
           printResult({ success: false, exitCode: 19, message: 'Failed to save manifest.' });
         }
-        return buildResult(runId, 'internal_error', resultOpts);
+        return emitFinalResult('internal_error', {
+          ...resultOpts,
+          reason: 'Failed to save manifest.',
+        });
       }
     }
 
@@ -475,10 +543,11 @@ export async function runTemplateSupervisor(options) {
         const detail = timeCheck.errors.map(e => e.detail).join('; ');
         logger.error('time_policy_violated', { errors: timeCheck.errors });
         auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: templateHash, reason: detail });
+        const reason = `Time policy violated: ${detail}`;
         if (!jsonOutput) {
-          printResult({ success: false, exitCode: STATUS_EXIT_CODES.time_policy_violated, message: `Time policy violated: ${detail}` });
+          printResult({ success: false, exitCode: STATUS_EXIT_CODES.time_policy_violated, message: reason });
         }
-        return buildResult(runId, 'time_policy_violated', resultOpts);
+        return emitFinalResult('time_policy_violated', { ...resultOpts, reason });
       }
     }
 
@@ -486,14 +555,21 @@ export async function runTemplateSupervisor(options) {
     if (!lockResult.acquired) {
       logger.error('concurrent_blocked', { detail: lockResult.detail });
       auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: templateHash, reason: lockResult.detail });
+      const reason = `Concurrent execution blocked: ${lockResult.detail}`;
       if (!jsonOutput) {
-        printResult({ success: false, exitCode: STATUS_EXIT_CODES.concurrent_blocked, message: `Concurrent execution blocked: ${lockResult.detail}` });
+        printResult({ success: false, exitCode: STATUS_EXIT_CODES.concurrent_blocked, message: reason });
       }
-      return buildResult(runId, 'concurrent_blocked', resultOpts);
+      return emitFinalResult('concurrent_blocked', { ...resultOpts, reason });
     }
     lockRelease = lockResult.release;
 
     auditLog.append({ event: 'execution_start', trace_id: runId, manifest_hash: templateHash });
+    emitTemplateProgress(progressSink, runId, 'execution_start', {
+      message: `Template execution started`,
+      templateName: def.name,
+      stepId: 'template',
+      stepType: 'template',
+    });
 
     // ---- Execute steps -----------------------------------------------------
     const resolvedSteps = buildResolvedSteps(def, inputValidation.values);
@@ -507,6 +583,12 @@ export async function runTemplateSupervisor(options) {
     for (const step of resolvedSteps) {
       stepsExecuted++;
       logger.info('step_start', { stepId: step.id, stepsExecuted, total: resolvedSteps.length });
+      emitTemplateProgress(progressSink, runId, 'step_started', {
+        stepId: step.id,
+        stepType: 'template_step',
+        attempt: stepsExecuted,
+        message: `Starting template step "${step.id}"`,
+      });
 
       if (!jsonOutput) {
         process.stdout.write(`  [${stepsExecuted}/${resolvedSteps.length}] ${step.id} ... `);
@@ -523,7 +605,19 @@ export async function runTemplateSupervisor(options) {
 
       if (stepResult.success) {
         if (!jsonOutput) process.stdout.write(colorize('done\n', 'green'));
+        emitTemplateStepResult(progressSink, runId, 'success', {
+          stepId: step.id,
+          message: `Template step "${step.id}" completed`,
+          attempt: stepsExecuted,
+          stepType: 'template_step',
+        });
       } else {
+        emitTemplateStepResult(progressSink, runId, 'validation_failed', {
+          stepId: step.id,
+          message: `Template step "${step.id}" failed: ${stepResult.error}`,
+          attempt: stepsExecuted,
+          stepType: 'template_step',
+        });
         if (!jsonOutput) process.stdout.write(colorize(`failed: ${stepResult.error}\n`, 'red'));
         failedStep = step.id;
 
@@ -538,13 +632,18 @@ export async function runTemplateSupervisor(options) {
         resultOpts.rollbackRan = rollbackRan;
         state.terminalReason = `Step "${step.id}" failed: ${stepResult.error}`;
         persistStateSafe(stateDir, state);
-
-        const result = buildResult(runId, 'validation_failed', resultOpts);
+        const reason = `Template execution failed at step "${step.id}"`;
+        const result = emitFinalResult('validation_failed', {
+          ...resultOpts,
+          reason,
+          failedStep,
+          rollbackRan,
+        });
         if (!jsonOutput) {
           printResult({
             success: false,
             exitCode: result.exitCode,
-            message: `Template execution failed at step "${step.id}"`,
+            message: reason,
             errors: stepResult.stderr ? [stepResult.stderr.slice(0, 500)] : [],
           });
         }
@@ -562,7 +661,7 @@ export async function runTemplateSupervisor(options) {
     resultOpts.stepsExecuted = stepsExecuted;
     persistStateSafe(stateDir, state);
 
-    const result = buildResult(runId, 'success', resultOpts);
+    const result = emitFinalResult('success', resultOpts);
     if (!jsonOutput) {
       printResult({ success: true, exitCode: 0, message: 'Template execution completed successfully.' });
     }
@@ -575,6 +674,6 @@ export async function runTemplateSupervisor(options) {
     if (!jsonOutput) {
       printResult({ success: false, exitCode: 19, message: `Internal error: ${err.message}` });
     }
-    return buildResult(runId, 'internal_error', resultOpts);
+    return emitFinalResult('internal_error', { ...resultOpts, reason: `Internal error: ${err.message}` });
   }
 }

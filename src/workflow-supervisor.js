@@ -48,71 +48,25 @@ import { hashRecipe } from './recipe.js';
 import { executeRecipe } from './recipe-executor.js';
 import { verifyRecipeInputContentHashes } from './prompt-inputs.js';
 import { classifyTrust } from './recipe-channel.js';
+import {
+  emitProgress as emitSupervisorProgress,
+  emitExecutionEnd as emitSupervisorExecutionEnd,
+  mapResultStatusToProgressStatus,
+} from './progress-events.js';
 
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-const PROGRESS_EVENT_STATUS = {
-  approval_pending: 'pending',
-  execution_start: 'running',
-  step_started: 'running',
-  step_completed: 'success',
-  step_failed: 'failed',
-  step_blocked: 'blocked',
-  execution_end: 'success',
-};
-
-const PROGRESS_RESULT_STATUS = {
-  success: 'success',
-  approval_required: 'blocked',
-  approval_denied: 'blocked',
-  drift_detected: 'blocked',
-  validation_failed: 'failed',
-  policy_violation: 'failed',
-  update_denied: 'blocked',
-  protocol_error: 'failed',
-  unsupported: 'failed',
-  internal_error: 'failed',
-  time_policy_violated: 'failed',
-  concurrent_blocked: 'blocked',
-  audit_chain_broken: 'failed',
-};
-
 function emitProgress(progressSink, runId, event, data = {}) {
-  if (typeof progressSink !== 'function') return;
-
-  const eventData = {
-    event,
-    mode: 'workflow',
-    runId,
-    status: data.status ?? PROGRESS_EVENT_STATUS[event] ?? 'unknown',
-  };
-
-  if (data.workflowName) eventData.workflowName = data.workflowName;
-  if (data.stepId) eventData.stepId = data.stepId;
-  if (data.stepType) eventData.stepType = data.stepType;
-  if (data.message) eventData.message = data.message;
-  if (data.reason) eventData.reason = data.reason;
-  if (data.stepResult) eventData.stepResult = data.stepResult;
-  if (data.finalStatus) eventData.finalStatus = data.finalStatus;
-  if (data.stepsExecuted !== undefined) eventData.stepsExecuted = data.stepsExecuted;
-  if (data.attempt !== undefined) eventData.attempt = data.attempt;
-
-  progressSink(eventData);
-}
-
-function mapResultStatusToProgressStatus(status = '') {
-  return PROGRESS_RESULT_STATUS[status] ?? 'unknown';
+  emitSupervisorProgress(progressSink, runId, 'workflow', event, data);
 }
 
 function emitExecutionEnd(progressSink, runId, finalStatus, context = {}) {
-  emitProgress(progressSink, runId, 'execution_end', {
-    finalStatus,
-    status: mapResultStatusToProgressStatus(finalStatus),
+  emitSupervisorExecutionEnd(progressSink, runId, 'workflow', finalStatus, {
+    message: context.message,
     workflowName: context.workflowName,
     stepsExecuted: context.stepsExecuted,
-    message: context.message,
   });
 }
 

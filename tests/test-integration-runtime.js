@@ -14,6 +14,13 @@ import { createManifest, saveManifest } from '../src/manifest.js';
 import { evaluateRisk } from '../src/policy-engine.js';
 import { createRecipeManifest, hashRecipe } from '../src/recipe.js';
 import { signRecipe } from '../src/recipe-channel.js';
+import {
+  computeEnvIntersection,
+  createTemplateManifest,
+  evaluateTemplateRisk,
+  hashTemplateExecution,
+  validateUserInputs,
+} from '../src/template.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -140,6 +147,31 @@ function createApprovedRecipeManifest(recipe, cwd, manifestPath, sourcePath, opt
   return manifest;
 }
 
+function createApprovedTemplateManifest(templateDef, { inputValues = {}, envAllow = [], manifestPath } = {}) {
+  const validation = validateUserInputs(templateDef.inputs, inputValues);
+  if (!validation.valid) {
+    throw new Error(`Template validation failed: ${validation.errors.join('; ')}`);
+  }
+
+  const envResult = computeEnvIntersection(templateDef.requires_env || [], envAllow);
+  const templateHash = hashTemplateExecution(templateDef, validation.values, envResult.intersection);
+  const riskAssessment = evaluateTemplateRisk(templateDef, envResult.intersection);
+
+  const manifest = createTemplateManifest(
+    templateDef,
+    templateHash,
+    riskAssessment,
+    validation.values,
+    envResult.intersection,
+  );
+
+  manifest.riskAssessment.acknowledgedBy = 'test';
+  manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+
+  saveManifest(manifest, manifestPath);
+  return manifest;
+}
+
 // ===========================================================================
 // 1. Single-command supervisor: time policy blocks execution
 // ===========================================================================
@@ -256,6 +288,47 @@ describe('Integration: Command Supervisor Runtime Policy', () => {
     assert.ok(result.drift.diffs.length > 0);
     assert.equal(typeof result.drift.diffs[0].description, 'string');
     assert.match(result.reason, /Contract drift detected/);
+  });
+
+  it('emits stable command progress events for JSON-stream', async () => {
+    const dir = tmpDir();
+    const manifestDir = join(dir, '.guardrail');
+    mkdirSync(manifestDir, { recursive: true });
+    const manifestPath = join(manifestDir, 'approved.json');
+
+    createApprovedCommandManifest('echo', ['hello'], dir, manifestPath);
+
+    const events = [];
+    const result = await runSupervisor({
+      command: 'echo',
+      args: ['stream'],
+      cwd: dir,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      progressSink: (event) => events.push(event),
+    });
+
+    assert.equal(result.status, 'success');
+    const eventNames = events.map((event) => event.event);
+
+    assert.ok(eventNames.includes('execution_start'), 'execution_start should be emitted');
+    assert.ok(eventNames.includes('step_started'), 'step_started should be emitted');
+    assert.ok(eventNames.includes('step_completed'), 'step_completed should be emitted');
+    assert.ok(eventNames.includes('execution_end'), 'execution_end should be emitted');
+
+    const executionStart = events.find((event) => event.event === 'execution_start');
+    const executionEnd = events.find((event) => event.event === 'execution_end');
+    const stepStarted = events.find((event) => event.event === 'step_started');
+
+    assert.equal(executionStart.mode, 'command');
+    assert.equal(executionStart.runId, result.runId);
+    assert.equal(stepStarted.mode, 'command');
+    assert.equal(stepStarted.stepType, 'command');
+    assert.equal(executionEnd.status, 'success');
+    assert.equal(executionEnd.mode, 'command');
+    assert.equal(executionEnd.runId, result.runId);
+    assert.equal(executionEnd.stepsExecuted, 1);
   });
 
   it('audit log entries written on execution', async () => {
@@ -444,6 +517,50 @@ describe('Integration: Template Supervisor Runtime Policy', () => {
     });
 
     assert.notEqual(result.status, 'policy_violation');
+  });
+
+  it('emits stable template progress events for JSON-stream', async () => {
+    const dir = tmpDir();
+    const tmplPath = join(dir, 'tmpl.json');
+    const manifestPath = join(dir, '.guardrail', 'templates', 'test.approved.json');
+    const templateDef = makeTemplate();
+    writeFileSync(tmplPath, JSON.stringify(templateDef));
+
+    mkdirSync(resolve(dir, '.guardrail', 'templates'), { recursive: true });
+    createApprovedTemplateManifest(templateDef, {
+      inputValues: { name: 'hello' },
+      manifestPath,
+    });
+
+    const events = [];
+    const result = await runTemplateSupervisor({
+      templatePath: tmplPath,
+      inputs: { name: 'hello' },
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      progressSink: (event) => events.push(event),
+    });
+
+    assert.equal(result.status, 'success');
+    const eventNames = events.map((event) => event.event);
+
+    assert.ok(eventNames.includes('execution_start'), 'execution_start should be emitted');
+    assert.ok(eventNames.includes('step_started'), 'step_started should be emitted');
+    assert.ok(eventNames.includes('step_completed'), 'step_completed should be emitted');
+    assert.ok(eventNames.includes('execution_end'), 'execution_end should be emitted');
+
+    const executionStart = events.find((event) => event.event === 'execution_start');
+    const executionEnd = events.find((event) => event.event === 'execution_end');
+    const stepStarted = events.find((event) => event.event === 'step_started');
+
+    assert.equal(executionStart.mode, 'template');
+    assert.equal(executionStart.runId, result.runId);
+    assert.equal(stepStarted.mode, 'template');
+    assert.equal(stepStarted.stepType, 'template_step');
+    assert.equal(executionEnd.mode, 'template');
+    assert.equal(executionEnd.runId, result.runId);
+    assert.equal(executionEnd.status, 'success');
   });
 
   it('time policy blocks template execution', async () => {
@@ -660,6 +777,50 @@ describe('Integration: Recipe Supervisor Runtime Policy', () => {
     assert.equal(result.status, 'approval_required');
     assert.equal(result.riskLevel, 'yellow');
     assert.ok(result.riskReasons.some((reason) => reason.includes('does not sandbox host execution')));
+  });
+
+  it('emits stable recipe progress events for JSON-stream', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    const recipe = makeRecipe();
+    const sourcePath = writeRecipeFile(recipesDir, recipe);
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+
+    createApprovedRecipeManifest(recipe, dir, manifestPath, sourcePath);
+
+    const events = [];
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { target: 'hello' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      progressSink: (event) => events.push(event),
+    });
+
+    assert.equal(result.status, 'success');
+    const eventNames = events.map((event) => event.event);
+
+    assert.ok(eventNames.includes('execution_start'), 'execution_start should be emitted');
+    assert.ok(eventNames.includes('step_started'), 'step_started should be emitted');
+    assert.ok(eventNames.includes('step_completed'), 'step_completed should be emitted');
+    assert.ok(eventNames.includes('execution_end'), 'execution_end should be emitted');
+
+    const executionStart = events.find((event) => event.event === 'execution_start');
+    const executionEnd = events.find((event) => event.event === 'execution_end');
+    const stepStarted = events.find((event) => event.event === 'step_started');
+
+    assert.equal(executionStart.mode, 'recipe');
+    assert.equal(executionStart.runId, result.runId);
+    assert.equal(stepStarted.mode, 'recipe');
+    assert.equal(stepStarted.stepType, 'recipe');
+    assert.equal(executionEnd.mode, 'recipe');
+    assert.equal(executionEnd.runId, result.runId);
+    assert.equal(executionEnd.status, 'success');
   });
 });
 

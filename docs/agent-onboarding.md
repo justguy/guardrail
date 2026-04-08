@@ -477,8 +477,17 @@ node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --non-interacti
 If this is workflow mode, run:
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow run --definition <WORKFLOW_DEFINITION_PATH> --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH>
 
+If this is template mode, run:
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --template <TEMPLATE_PATH> --input key=value --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH>
+
+If this is recipe mode, run:
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --recipe <RECIPE_ID[@VERSION]> --input key=value --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH>
+
 Use `--json-stream` if the caller wants machine-readable progress events:
-`node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow run --definition <WORKFLOW_DEFINITION_PATH> --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH> --json-stream`
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow run --definition <WORKFLOW_DEFINITION_PATH> --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH> --json-stream
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH> -- <command> [args...] --json-stream
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --template <TEMPLATE_PATH> --input key=value --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH> --json-stream
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --recipe <RECIPE_ID[@VERSION]> --input key=value --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH> --json-stream
 
 If one approval should cover multiple recipe executions, express that as a workflow whose steps are `recipe_ref` entries. Do not run the sub-recipes directly.
 If that workflow references recipes stored outside the workflow repo, add `--recipe-search-dir <PATH>` for each extra recipe root on both lint and run commands.

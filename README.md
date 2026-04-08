@@ -476,13 +476,27 @@ JSON output for structured logging and CI integration:
 guardrail run --json --non-interactive --approved-manifest .guardrail/approved.json -- npm test
 ```
 
-### Workflow progress stream
+### Supervisor progress stream
 
-For machine consumers, stream workflow execution progress with `--json-stream`:
+For machine consumers, stream supervisor progress with `--json-stream`:
 
 ```bash
+# Command mode
+guardrail run --json-stream --non-interactive --approved-manifest .guardrail/approved.json -- npm test
+
+# Workflow mode
 guardrail workflow run --definition workflows/server-cycle.json \
   --non-interactive --approved-manifest .guardrail/workflows/server-cycle.approved.json \
+  --json-stream
+
+# Template mode
+guardrail run --template ./templates/npm-publish.json --input package_dir=packages/my-lib \
+  --non-interactive --approved-manifest .guardrail/templates/npm-publish.approved.json \
+  --json-stream
+
+# Recipe mode
+guardrail run --recipe git-branch-cleanup --input repo_path=. \
+  --non-interactive --approved-manifest .guardrail/recipes/git-branch-cleanup.approved.json \
   --json-stream
 ```
 
@@ -497,8 +511,8 @@ guardrail workflow run --definition workflows/server-cycle.json \
 Stream events are one JSON object per line (NDJSON) and include:
 
 - `event`: one of `approval_pending`, `execution_start`, `step_started`, `step_completed`, `step_failed`, `step_blocked`, `execution_end`
-- `runId`: workflow run identifier
-- `mode`: supervisor mode (`workflow`)
+- `runId`: supervisor run identifier
+- `mode`: supervisor mode (`command`, `workflow`, `template`, `recipe`)
 - `status`: `pending`, `running`, `success`, `failed`, or `blocked`
 - `stepId` / `stepType` when a step event applies
 - `message` and optional `reason` (human-readable detail)
@@ -508,7 +522,7 @@ Guaranteed:
 
 - `execution_start` is emitted once just before runtime execution.
 - `execution_end` is emitted exactly once on every terminal path when `--json-stream` is enabled.
-- `workflow` events are emitted only for workflow mode.
+- `mode` identifies the active supervisor mode in each event.
 
 ---
 

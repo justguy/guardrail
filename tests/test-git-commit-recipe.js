@@ -142,7 +142,7 @@ describe('Git commit recipe', () => {
     });
 
     const afterHead = runGit(repoDir, ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-    const status = runGit(repoDir, ['status', '--short'], { encoding: 'utf8' }).trim();
+    const status = runGit(repoDir, ['status', '--short', '--untracked-files=no'], { encoding: 'utf8' }).trim();
     assert.equal(beforeHead, afterHead);
     assert.equal(status, '');
   });

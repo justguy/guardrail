@@ -7,6 +7,11 @@ import { evaluateRisk } from './policy-engine.js';
 import { createLogger, printBanner, printApprovalSummary, printDrift, printDenied, printResult, generateRunId, colorize } from './logger.js';
 import { launchWorker, detectInteractiveAttempt } from './worker-interface.js';
 import { validateResult, validateUpdateProposal, createConvergenceTracker, computeValidationSignature } from './validator.js';
+import {
+  emitProgress,
+  emitExecutionEnd,
+  mapResultStatusToProgressStatus,
+} from './progress-events.js';
 import { persistStateSafe, executeSubprocess } from './shared.js';
 import { checkTimePolicy, acquireLock } from './runtime-policy.js';
 import { createAuditLog } from './audit.js';
@@ -119,6 +124,30 @@ function buildResult(runId, status, opts = {}) {
   };
 }
 
+function emitCommandProgress(progressSink, runId, event, data = {}) {
+  emitProgress(progressSink, runId, 'command', event, data);
+}
+
+function emitCommandExecutionEnd(progressSink, runId, finalStatus, context = {}) {
+  emitExecutionEnd(progressSink, runId, 'command', finalStatus, context);
+}
+
+function emitCommandStepResult(progressSink, runId, finalStatus, context = {}) {
+  const progressStatus = mapResultStatusToProgressStatus(finalStatus);
+  const event = progressStatus === 'blocked'
+    ? 'step_blocked'
+    : progressStatus === 'failed'
+      ? 'step_failed'
+      : 'step_completed';
+
+  emitCommandProgress(progressSink, runId, event, {
+    stepId: 'command',
+    stepType: 'command',
+    stepResult: finalStatus,
+    ...context,
+  });
+}
+
 // writeState and persistState are now in shared.js (writeStateAtomic / persistStateSafe)
 
 /**
@@ -224,6 +253,7 @@ export async function runSupervisor(options) {
     updateSource   = null,
     projectRoot    = null,
     envPolicy      = null,
+    progressSink   = null,
   } = options;
 
   const runId    = generateRunId();
@@ -268,6 +298,15 @@ export async function runSupervisor(options) {
     resultOpts.durationMs = Date.now() - startTime;
   };
 
+  const finalizeResult = (status, context = {}) => {
+    const result = buildResult(runId, status, { ...resultOpts, ...context });
+    emitCommandExecutionEnd(progressSink, runId, status, {
+      message: result.reason || context.message || '',
+      stepsExecuted: context.stepsExecuted ?? resultOpts.attempt,
+    });
+    return result;
+  };
+
   logger.info('supervisor_start', { command, args, shell, cwd, nonInteractive, jsonOutput });
 
   let lockRelease = null;
@@ -296,7 +335,11 @@ export async function runSupervisor(options) {
       if (!safety.safe) {
         logger.error('redos_regex_rejected', { reason: safety.reason });
         finalize(`Validator regex rejected: ${safety.reason}`);
-        const result = buildResult(runId, 'policy_violation', resultOpts);
+        const result = finalizeResult('policy_violation', {
+          reason: `Validator regex rejected: ${safety.reason}`,
+          riskLevel: resultOpts.riskLevel,
+          riskReasons: resultOpts.riskReasons,
+        });
         persistState(stateDir, state, result);
         if (!jsonOutput) {
           printResult({
@@ -336,13 +379,18 @@ export async function runSupervisor(options) {
           actual: fileHashCheck.actual,
         });
         finalize(`File hash mismatch: expected ${fileHashCheck.expected}, got ${fileHashCheck.actual ?? 'unreadable'} for ${fileHashCheck.path ?? contract.command}`);
-        const result = buildResult(runId, 'policy_violation', resultOpts);
+        const reason = `File hash mismatch: expected ${fileHashCheck.expected}, got ${fileHashCheck.actual ?? 'unreadable'} for ${fileHashCheck.path ?? contract.command}`;
+        const result = finalizeResult('policy_violation', {
+          reason,
+          riskLevel: resultOpts.riskLevel,
+          riskReasons: resultOpts.riskReasons,
+        });
         persistState(stateDir, state, result);
         if (!jsonOutput) {
           printResult({
             success: false,
             exitCode: result.exitCode,
-            message: `File hash mismatch: expected ${fileHashCheck.expected}, got ${fileHashCheck.actual ?? 'unreadable'} for ${fileHashCheck.path ?? contract.command}`,
+            message: reason,
           });
         }
         return result;
@@ -420,10 +468,19 @@ export async function runSupervisor(options) {
       if (!approved.riskAssessment?.acknowledgedBy) {
         logger.error('non_interactive_unacknowledged_risk', { path: manifestPath });
         finalize('Approved manifest has no acknowledged risk assessment. Run interactively first.');
-        const result = buildResult(runId, 'approval_required', resultOpts);
+        const reason = 'Approved manifest has no acknowledged risk assessment. Run interactively first.';
+        emitCommandProgress(progressSink, runId, 'approval_pending', {
+          message: reason,
+          reason,
+        });
+        const result = finalizeResult('approval_required', {
+          reason,
+          riskLevel: resultOpts.riskLevel,
+          riskReasons: resultOpts.riskReasons,
+        });
         persistState(stateDir, state, result);
         if (!jsonOutput) {
-          printResult({ success: false, exitCode: result.exitCode, message: 'Approved manifest has no acknowledged risk assessment. Run interactively first.' });
+          printResult({ success: false, exitCode: result.exitCode, message: reason });
         }
         return result;
       }
@@ -435,10 +492,19 @@ export async function runSupervisor(options) {
         if (approved === null) {
           logger.error('non_interactive_no_manifest', { path: manifestPath });
           finalize('No approved manifest found. Run interactively to approve.');
-          const result = buildResult(runId, 'approval_required', resultOpts);
+          const reason = 'No approved manifest found. Run interactively to approve.';
+          emitCommandProgress(progressSink, runId, 'approval_pending', {
+            message: reason,
+            reason,
+          });
+          const result = finalizeResult('approval_required', {
+            reason,
+            riskLevel: resultOpts.riskLevel,
+            riskReasons: resultOpts.riskReasons,
+          });
           persistState(stateDir, state, result);
           if (!jsonOutput) {
-            printResult({ success: false, exitCode: result.exitCode, message: 'No approved manifest found. Run interactively to approve.' });
+            printResult({ success: false, exitCode: result.exitCode, message: reason });
           }
           return result;
         } else {
@@ -446,11 +512,21 @@ export async function runSupervisor(options) {
           logger.error('non_interactive_drift', { diffs: driftDiffs });
           resultOpts.driftDiffs = driftDiffs;
           finalize('Contract drift detected in non-interactive mode.');
-          const result = buildResult(runId, 'drift_detected', resultOpts);
+          const reason = 'Contract drift detected in non-interactive mode.';
+          emitCommandProgress(progressSink, runId, 'approval_pending', {
+            reason,
+            message: reason,
+          });
+          const result = finalizeResult('drift_detected', {
+            reason,
+            riskLevel: resultOpts.riskLevel,
+            riskReasons: resultOpts.riskReasons,
+            driftDiffs,
+          });
           persistState(stateDir, state, result);
           if (!jsonOutput) {
             printDrift(driftDiffs);
-            printResult({ success: false, exitCode: result.exitCode, message: 'Contract drift detected in non-interactive mode.' });
+            printResult({ success: false, exitCode: result.exitCode, message: reason });
           }
           return result;
         }
@@ -460,10 +536,19 @@ export async function runSupervisor(options) {
       if (!process.stdin.isTTY) {
         logger.error('unsupported_no_tty', { message: 'Interactive approval needed but stdin is not a TTY' });
         finalize('Interactive approval required but stdin is not a TTY. Use --non-interactive with --approved-manifest.');
-        const result = buildResult(runId, 'unsupported', resultOpts);
+        const reason = 'Interactive approval required but stdin is not a TTY. Use --non-interactive with --approved-manifest.';
+        emitCommandProgress(progressSink, runId, 'approval_pending', {
+          reason,
+          message: reason,
+        });
+        const result = finalizeResult('unsupported', {
+          reason,
+          riskLevel: resultOpts.riskLevel,
+          riskReasons: resultOpts.riskReasons,
+        });
         persistState(stateDir, state, result);
         if (!jsonOutput) {
-          printResult({ success: false, exitCode: result.exitCode, message: 'Interactive approval required but stdin is not a TTY. Use --non-interactive with --approved-manifest.' });
+          printResult({ success: false, exitCode: result.exitCode, message: reason });
         }
         return result;
       }
@@ -484,7 +569,12 @@ export async function runSupervisor(options) {
       if (!userApproved) {
         logger.info('approval_denied', { riskLevel: riskAssessment.riskLevel });
         finalize('User denied approval.');
-        const result = buildResult(runId, 'approval_denied', resultOpts);
+        const reason = 'User denied approval.';
+        const result = finalizeResult('approval_denied', {
+          reason,
+          riskLevel: riskAssessment.riskLevel,
+          riskReasons: riskAssessment.reasons,
+        });
         persistState(stateDir, state, result);
         if (!jsonOutput) {
           printDenied();
@@ -504,7 +594,11 @@ export async function runSupervisor(options) {
       } catch (err) {
         logger.error('manifest_save_error', { path: manifestPath, error: err.message });
         finalize('Failed to save approved manifest. Aborting before execution.');
-        const result = buildResult(runId, 'internal_error', resultOpts);
+        const result = finalizeResult('internal_error', {
+          reason: 'Failed to save approved manifest. Aborting before execution.',
+          riskLevel: riskAssessment.riskLevel,
+          riskReasons: riskAssessment.reasons,
+        });
         persistState(stateDir, state, result);
         if (!jsonOutput) {
           printResult({
@@ -529,11 +623,16 @@ export async function runSupervisor(options) {
         const detail = timeCheck.errors.map(e => e.detail).join('; ');
         logger.error('time_policy_violated', { errors: timeCheck.errors });
         auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: contractHash, reason: detail });
-        finalize(`Time policy violated: ${detail}`);
-        const result = buildResult(runId, 'time_policy_violated', resultOpts);
+        const reason = `Time policy violated: ${detail}`;
+        finalize(reason);
+        const result = finalizeResult('time_policy_violated', {
+          reason,
+          riskLevel: resultOpts.riskLevel,
+          riskReasons: resultOpts.riskReasons,
+        });
         persistState(stateDir, state, result);
         if (!jsonOutput) {
-          printResult({ success: false, exitCode: result.exitCode, message: `Time policy violated: ${detail}` });
+          printResult({ success: false, exitCode: result.exitCode, message: reason });
         }
         return result;
       }
@@ -544,16 +643,28 @@ export async function runSupervisor(options) {
       logger.error('concurrent_blocked', { detail: lockResult.detail });
       auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: contractHash, reason: lockResult.detail });
       finalize(`Concurrent execution blocked: ${lockResult.detail}`);
-      const result = buildResult(runId, 'concurrent_blocked', resultOpts);
+      const reason = `Concurrent execution blocked: ${lockResult.detail}`;
+      const result = finalizeResult('concurrent_blocked', {
+        reason,
+        riskLevel: resultOpts.riskLevel,
+        riskReasons: resultOpts.riskReasons,
+      });
       persistState(stateDir, state, result);
       if (!jsonOutput) {
-        printResult({ success: false, exitCode: result.exitCode, message: `Concurrent execution blocked: ${lockResult.detail}` });
+        printResult({ success: false, exitCode: result.exitCode, message: reason });
       }
       return result;
     }
     lockRelease = lockResult.release;
 
     auditLog.append({ event: 'execution_start', trace_id: runId, manifest_hash: contractHash });
+    emitCommandProgress(progressSink, runId, 'execution_start', {
+      message: 'Command execution started',
+      attempt: 0,
+      stepId: 'command',
+      stepType: 'command',
+      stepsExecuted: 0,
+    });
 
     // ------------------------------------------------------------------
     // Step 10: Create convergence tracker
@@ -576,6 +687,12 @@ export async function runSupervisor(options) {
     while (true) {
       attempt += 1;
       resultOpts.attempt = attempt;
+      emitCommandProgress(progressSink, runId, 'step_started', {
+        stepId: 'command',
+        stepType: 'command',
+        attempt,
+        message: `Attempt ${attempt}`,
+      });
 
       logger.info('worker_launch', { attempt, command, args });
 
@@ -804,8 +921,19 @@ export async function runSupervisor(options) {
       ? 'Run completed successfully.'
       : (terminalMessage ?? `Run ended with status: ${finalStatus}`);
     finalize(reasonMsg);
+    emitCommandStepResult(progressSink, runId, finalStatus, {
+      stepResult: finalStatus,
+      message: reasonMsg,
+      attempt,
+      stepId: 'command',
+      stepType: 'command',
+    });
 
-    const result = buildResult(runId, finalStatus, resultOpts);
+    const result = finalizeResult(finalStatus, {
+      reason: reasonMsg,
+      riskLevel: resultOpts.riskLevel,
+      riskReasons: resultOpts.riskReasons,
+    });
     persistState(stateDir, state, result);
 
     // ------------------------------------------------------------------
@@ -833,7 +961,11 @@ export async function runSupervisor(options) {
     try { if (lockRelease) lockRelease(); } catch { /* ignore */ }
 
     finalize(`Internal error: ${err.message}`);
-    const result = buildResult(runId, 'internal_error', resultOpts);
+    const result = finalizeResult('internal_error', {
+      reason: `Internal error: ${err.message}`,
+      riskLevel: resultOpts.riskLevel,
+      riskReasons: resultOpts.riskReasons,
+    });
     try {
       persistState(stateDir, state, result);
     } catch {

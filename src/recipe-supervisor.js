@@ -14,6 +14,11 @@ import {
   verifyRecipeInputContentHashes,
 } from './prompt-inputs.js';
 import {
+  emitProgress,
+  emitExecutionEnd,
+  mapResultStatusToProgressStatus,
+} from './progress-events.js';
+import {
   createLogger,
   printBanner,
   printDenied,
@@ -44,6 +49,30 @@ function buildResult(runId, status, opts = {}) {
     requestedVersion: opts.requestedVersion ?? null,
     exitCode: STATUS_EXIT_CODES[status] ?? STATUS_EXIT_CODES.internal_error,
   };
+}
+
+function emitRecipeProgress(progressSink, runId, event, data = {}) {
+  emitProgress(progressSink, runId, 'recipe', event, data);
+}
+
+function emitRecipeExecutionEnd(progressSink, runId, finalStatus, context = {}) {
+  emitExecutionEnd(progressSink, runId, 'recipe', finalStatus, context);
+}
+
+function emitRecipeStepResult(progressSink, runId, finalStatus, context = {}) {
+  const progressStatus = mapResultStatusToProgressStatus(finalStatus);
+  const event = progressStatus === 'blocked'
+    ? 'step_blocked'
+    : progressStatus === 'failed'
+      ? 'step_failed'
+      : 'step_completed';
+
+  emitRecipeProgress(progressSink, runId, event, {
+    stepId: context.recipeId || 'recipe',
+    stepType: 'recipe',
+    stepResult: finalStatus,
+    ...context,
+  });
 }
 
 function makeState(runId) {
@@ -189,13 +218,14 @@ export async function runRecipeSupervisor(options) {
     inputs = {},
     cwd = process.cwd(),
     manifestPath: rawManifestPath,
-    nonInteractive = false,
-    jsonOutput = false,
-    allowUnverified = false,
-    trustClass = null,
-    searchDirs,
-    runtimeLimits = null,
-  } = options;
+  nonInteractive = false,
+  jsonOutput = false,
+  allowUnverified = false,
+  trustClass = null,
+  searchDirs,
+  runtimeLimits = null,
+  progressSink = null,
+} = options;
 
   const runId = generateRunId();
   const resolvedCwd = resolve(cwd);
@@ -216,6 +246,14 @@ export async function runRecipeSupervisor(options) {
     resolutionMode: 'latest',
     requestedVersion: null,
   };
+  const emitFinalResult = (status, opts = {}) => {
+    const result = buildResult(runId, status, { ...resultOpts, ...opts });
+    emitRecipeExecutionEnd(progressSink, runId, status, {
+      message: result.reason || opts.reason || '',
+      stepsExecuted: opts.stepsExecuted ?? 0,
+    });
+    return result;
+  };
 
   let lockRelease = null;
 
@@ -231,7 +269,7 @@ export async function runRecipeSupervisor(options) {
       if (!jsonOutput) {
         printResult({ success: false, exitCode: 1, message: err.message });
       }
-      return buildResult(runId, 'internal_error', { ...resultOpts, reason: err.message });
+      return emitFinalResult('internal_error', { ...resultOpts, reason: err.message });
     }
 
     const { recipe, sourcePath, version } = resolvedRecipe;
@@ -256,7 +294,7 @@ export async function runRecipeSupervisor(options) {
       if (!jsonOutput) {
         printResult({ success: false, exitCode: 1, message: err.message });
       }
-      return buildResult(runId, 'validation_failed', { ...resultOpts, reason: err.message });
+      return emitFinalResult('validation_failed', { ...resultOpts, reason: err.message });
     }
 
     const recipeHash = hashRecipe(recipe);
@@ -316,10 +354,14 @@ export async function runRecipeSupervisor(options) {
         const reason = 'Approved recipe manifest has no acknowledged risk assessment. Run interactively first.';
         state.terminalReason = reason;
         persistStateSafe(stateDir, state);
+        emitRecipeProgress(progressSink, runId, 'approval_pending', {
+          reason,
+          message: reason,
+        });
         if (!jsonOutput) {
           printResult({ success: false, exitCode: STATUS_EXIT_CODES.approval_required, message: reason });
         }
-        return buildResult(runId, 'approval_required', { ...resultOpts, reason });
+        return emitFinalResult('approval_required', { ...resultOpts, reason });
       }
     }
 
@@ -332,6 +374,10 @@ export async function runRecipeSupervisor(options) {
             : reviewEachTimeReason;
         state.terminalReason = reason;
         persistStateSafe(stateDir, state);
+        emitRecipeProgress(progressSink, runId, 'approval_pending', {
+          reason,
+          message: reason,
+        });
         if (!jsonOutput) {
           if (driftDiffs.length > 0) printRecipeDrift(driftDiffs);
           printResult({ success: false, exitCode: STATUS_EXIT_CODES[approved === null ? 'approval_required' : 'drift_detected'], message: reason });
@@ -341,7 +387,7 @@ export async function runRecipeSupervisor(options) {
           : driftDiffs.length > 0
             ? 'drift_detected'
             : 'approval_required';
-        return buildResult(runId, status, {
+        return emitFinalResult(status, {
           ...resultOpts,
           reason,
         });
@@ -351,10 +397,14 @@ export async function runRecipeSupervisor(options) {
         const reason = 'Interactive approval needed but stdin is not a TTY.';
         state.terminalReason = reason;
         persistStateSafe(stateDir, state);
+        emitRecipeProgress(progressSink, runId, 'approval_pending', {
+          reason,
+          message: reason,
+        });
         if (!jsonOutput) {
           printResult({ success: false, exitCode: STATUS_EXIT_CODES.unsupported, message: reason });
         }
-        return buildResult(runId, 'unsupported', { ...resultOpts, reason });
+        return emitFinalResult('unsupported', { ...resultOpts, reason });
       }
 
       if (!jsonOutput) {
@@ -372,7 +422,7 @@ export async function runRecipeSupervisor(options) {
         state.terminalReason = reason;
         persistStateSafe(stateDir, state);
         if (!jsonOutput) printDenied();
-        return buildResult(runId, 'approval_denied', { ...resultOpts, reason });
+        return emitFinalResult('approval_denied', { ...resultOpts, reason });
       }
 
       candidate.riskAssessment.acknowledgedBy = 'interactive_user';
@@ -386,7 +436,7 @@ export async function runRecipeSupervisor(options) {
         if (!jsonOutput) {
           printResult({ success: false, exitCode: STATUS_EXIT_CODES.internal_error, message: 'Failed to save manifest.' });
         }
-        return buildResult(runId, 'internal_error', { ...resultOpts, reason });
+        return emitFinalResult('internal_error', { ...resultOpts, reason });
       }
     }
 
@@ -402,22 +452,29 @@ export async function runRecipeSupervisor(options) {
         if (!jsonOutput) {
           printResult({ success: false, exitCode: STATUS_EXIT_CODES.time_policy_violated, message: `Time policy violated: ${reason}` });
         }
-        return buildResult(runId, 'time_policy_violated', { ...resultOpts, reason });
+        return emitFinalResult('time_policy_violated', { ...resultOpts, reason });
       }
     }
 
     const lockResult = acquireLock(recipeHash, [], stateDir);
-    if (!lockResult.acquired) {
-      const reason = lockResult.detail;
-      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: recipeHash, reason });
-      state.terminalReason = reason;
-      persistStateSafe(stateDir, state);
-      if (!jsonOutput) {
-        printResult({ success: false, exitCode: STATUS_EXIT_CODES.concurrent_blocked, message: `Concurrent execution blocked: ${reason}` });
+      if (!lockResult.acquired) {
+        const reason = lockResult.detail;
+        auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: recipeHash, reason });
+        state.terminalReason = reason;
+        persistStateSafe(stateDir, state);
+        if (!jsonOutput) {
+          printResult({ success: false, exitCode: STATUS_EXIT_CODES.concurrent_blocked, message: `Concurrent execution blocked: ${reason}` });
+        }
+        return emitFinalResult('concurrent_blocked', { ...resultOpts, reason });
       }
-      return buildResult(runId, 'concurrent_blocked', { ...resultOpts, reason });
-    }
     lockRelease = lockResult.release;
+
+    emitRecipeProgress(progressSink, runId, 'execution_start', {
+      message: `Recipe execution started for ${recipe.id}`,
+      recipeId: recipe.id,
+      stepId: 'recipe',
+      stepType: 'recipe',
+    });
 
     const approvedForExecution = approved !== null && !needsApproval ? approved : candidate;
     const inputHashCheck = verifyRecipeInputContentHashes(approvedForExecution.inputContentHashes);
@@ -429,8 +486,15 @@ export async function runRecipeSupervisor(options) {
       if (!jsonOutput) {
         printResult({ success: false, exitCode: STATUS_EXIT_CODES.drift_detected, message: `Recipe input file drift detected: ${reason}` });
       }
-      return buildResult(runId, 'drift_detected', { ...resultOpts, reason });
+      return emitFinalResult('drift_detected', { ...resultOpts, reason });
     }
+
+    emitRecipeProgress(progressSink, runId, 'step_started', {
+      stepId: 'recipe',
+      stepType: 'recipe',
+      message: `Starting execution of recipe ${recipe.id}`,
+      attempt: 1,
+    });
 
     const execution = await executeRecipe(recipe, resolvedInputs, {
       allowUnverified,
@@ -449,7 +513,13 @@ export async function runRecipeSupervisor(options) {
       if (!jsonOutput) {
         printResult({ success: true, exitCode: 0, message: `Recipe "${recipe.id}@${recipe.version}" executed successfully.` });
       }
-      return buildResult(runId, 'success', resultOpts);
+      emitRecipeStepResult(progressSink, runId, 'success', {
+        recipeId: recipe.id,
+        message: `Recipe "${recipe.id}@${recipe.version}" executed successfully.`,
+        attempt: 1,
+        stepResult: 'success',
+      });
+      return emitFinalResult('success', resultOpts);
     }
 
     const mappedStatus = execution.status === 'blocked'
@@ -461,6 +531,12 @@ export async function runRecipeSupervisor(options) {
     const reason = execution.reason || `Recipe execution ended with status: ${execution.status}`;
     state.terminalReason = reason;
     persistStateSafe(stateDir, state);
+    emitRecipeStepResult(progressSink, runId, mappedStatus, {
+      recipeId: recipe.id,
+      message: reason,
+      attempt: 1,
+      stepResult: mappedStatus,
+    });
     if (!jsonOutput) {
       printResult({
         success: false,
@@ -468,7 +544,7 @@ export async function runRecipeSupervisor(options) {
         message: reason,
       });
     }
-    return buildResult(runId, mappedStatus, { ...resultOpts, reason });
+    return emitFinalResult(mappedStatus, { ...resultOpts, reason });
   } catch (err) {
     const reason = err?.message || String(err);
     state.terminalReason = reason;
@@ -476,7 +552,7 @@ export async function runRecipeSupervisor(options) {
     if (!jsonOutput) {
       printResult({ success: false, exitCode: STATUS_EXIT_CODES.internal_error, message: reason });
     }
-    return buildResult(runId, 'internal_error', { ...resultOpts, reason });
+    return emitFinalResult('internal_error', { ...resultOpts, reason });
   } finally {
     if (typeof lockRelease === 'function') {
       lockRelease();
