@@ -76,6 +76,52 @@ describe('README Feature: Workflow Mode', () => {
     assert.equal(r.exitCode, 0, `Lint should pass for valid workflow: ${r.stderr}`);
   });
 
+  it('workflow lint accepts recipe_ref workflows with external --recipe-search-dir', () => {
+    const dir = tmpDir();
+    const externalRecipesDir = tmpDir();
+    mkdirSync(externalRecipesDir, { recursive: true });
+
+    writeFileSync(join(externalRecipesDir, 'recipe-one.recipe.json'), JSON.stringify({
+      id: 'recipe-one',
+      name: 'Recipe One',
+      description: 'External workflow recipe',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{ id: 'main', description: 'echo one', run: { command: 'echo', args: ['one'], mode: 'structured' } }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    }, null, 2));
+
+    const def = {
+      version: 1,
+      kind: 'workflow_definition',
+      name: 'recipe-search-wf',
+      projectRoot: '.',
+      entryStep: 'step_a',
+      maxIterations: 3,
+      services: [],
+      rollback_policy: 'none',
+      rollback_none_reason: 'single bounded recipe step for lint coverage',
+      steps: [{
+        id: 'step_a',
+        type: 'recipe_ref',
+        recipe: 'recipe-one',
+        inputs: {},
+        on: { success: 'done', failure: 'abort' },
+      }],
+    };
+    writeFileSync(join(dir, 'wf.json'), JSON.stringify(def, null, 2));
+
+    const r = run(
+      `${CLI} workflow lint --definition ${join(dir, 'wf.json')} --recipe-search-dir ${externalRecipesDir}`,
+    );
+    assert.equal(r.exitCode, 0, `Lint should pass for valid external recipe_ref workflow: ${r.stderr}`);
+  });
+
   it('workflow lint rejects invalid definitions', () => {
     const dir = tmpDir();
     writeFileSync(join(dir, 'bad.json'), '{"not": "a workflow"}');
@@ -85,9 +131,10 @@ describe('README Feature: Workflow Mode', () => {
 
   it('workflow run can chain multiple recipe_ref steps under one approved workflow manifest', () => {
     const dir = tmpDir();
-    mkdirSync(join(dir, 'recipes'), { recursive: true });
+    const externalRecipesDir = tmpDir();
+    mkdirSync(externalRecipesDir, { recursive: true });
 
-    writeFileSync(join(dir, 'recipes', 'recipe-one.recipe.json'), JSON.stringify({
+    writeFileSync(join(externalRecipesDir, 'recipe-one.recipe.json'), JSON.stringify({
       id: 'recipe-one',
       name: 'Recipe One',
       description: 'First workflow recipe',
@@ -102,7 +149,7 @@ describe('README Feature: Workflow Mode', () => {
       guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
     }, null, 2));
 
-    writeFileSync(join(dir, 'recipes', 'recipe-two.recipe.json'), JSON.stringify({
+    writeFileSync(join(externalRecipesDir, 'recipe-two.recipe.json'), JSON.stringify({
       id: 'recipe-two',
       name: 'Recipe Two',
       description: 'Second workflow recipe',
@@ -125,6 +172,8 @@ describe('README Feature: Workflow Mode', () => {
       entryStep: 'step_a',
       maxIterations: 3,
       services: [],
+      rollback_policy: 'none',
+      rollback_none_reason: 'bounded recipe chain for README acceptance coverage',
       steps: [
         {
           id: 'step_a',
@@ -147,7 +196,9 @@ describe('README Feature: Workflow Mode', () => {
     mkdirSync(join(dir, '.guardrail', 'workflows'), { recursive: true });
     writeFileSync(defPath, JSON.stringify(def, null, 2));
 
-    const normalized = normalizeWorkflowDefinition(def, dir);
+    const normalized = normalizeWorkflowDefinition(def, dir, {
+      recipeSearchDirs: [externalRecipesDir],
+    });
     const workflowHash = hashWorkflow(normalized);
     const riskAssessment = evaluateWorkflowRisk(normalized, {
       trustClass: 'reviewed_internal',
@@ -161,7 +212,8 @@ describe('README Feature: Workflow Mode', () => {
     saveManifest(manifest, manifestPath);
 
     const r = run(
-      `${CLI} workflow run --definition ${defPath} --trust reviewed_internal ` +
+      `${CLI} workflow run --definition ${defPath} ` +
+      `--recipe-search-dir ${externalRecipesDir} --trust reviewed_internal ` +
       `--non-interactive --approved-manifest ${manifestPath} --json`,
       { cwd: dir },
     );

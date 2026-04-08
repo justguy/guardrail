@@ -619,7 +619,7 @@ async function executeWorkflow(workflow, { serviceRegistry, logger, jsonOutput, 
 
     if (transition.terminal) {
       finalStatus = transition.status;
-      terminalReason = transition.reason;
+      terminalReason = terminalReason || transition.reason;
       if (transition.status !== 'success') failedStep = currentStep;
       break;
     }

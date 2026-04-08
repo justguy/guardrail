@@ -21,6 +21,16 @@ If `guardrail` is not installed in `PATH`, use the local entrypoint:
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js
 ```
 
+## TTY Note For First Approval
+
+First interactive approval must have a real TTY. If you are invoking Guardrail through `tpf`, use:
+
+```bash
+TPF_LLM_TOOL=codex tpf --passthrough-tty node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js ...
+```
+
+Use `--passthrough-tty` only for approval-bearing interactive runs. After the manifest exists, go back to the normal wrapped non-interactive path.
+
 ## Command Mode
 
 Interactive approval:
@@ -56,6 +66,20 @@ Workflow note:
 - Workflow steps can be `task`, `service_start`, `service_stop`, `service_restart`, or `recipe_ref`.
 - `recipe_ref` is the native answer when you want one workflow approval to cover multiple bounded recipe executions.
 - The workflow manifest captures each referenced recipe's resolved version, recipe hash, resolved inputs, and any prompt-bearing file hashes that were part of the approved workflow.
+- If the workflow repo and the recipe repo are different, pass `--recipe-search-dir <path>` on both `workflow lint` and `workflow run`. Repeat the flag if you need more than one extra recipe root.
+
+Cross-repo workflow example:
+
+```bash
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow lint \
+  --definition /Users/adilevinshtein/Documents/dev/Project-Phalanx/workflows/review-and-commit.json \
+  --recipe-search-dir /Users/adilevinshtein/Documents/dev/Guardian/recipes
+
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow run \
+  --definition /Users/adilevinshtein/Documents/dev/Project-Phalanx/workflows/review-and-commit.json \
+  --recipe-search-dir /Users/adilevinshtein/Documents/dev/Guardian/recipes \
+  --manifest /Users/adilevinshtein/Documents/dev/Project-Phalanx/.guardrail/workflows/review-and-commit.approved.json
+```
 
 ## Recipe Mode
 
@@ -409,6 +433,7 @@ If this is workflow mode, run:
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow run --definition <WORKFLOW_DEFINITION_PATH> --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH>
 
 If one approval should cover multiple recipe executions, express that as a workflow whose steps are `recipe_ref` entries. Do not run the sub-recipes directly.
+If that workflow references recipes stored outside the workflow repo, add `--recipe-search-dir <PATH>` for each extra recipe root on both lint and run commands.
 
 If this is recipe mode, run:
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --recipe <RECIPE_ID[@VERSION]> --input key=value --non-interactive --approved-manifest <APPROVED_MANIFEST_PATH>

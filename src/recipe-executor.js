@@ -21,6 +21,9 @@ const DANGEROUS_PATTERNS = [
   { pattern: />\s*\/dev\/sda/, reason: 'Raw disk overwrite' },
 ];
 
+const FAILURE_DETAIL_MAX_CHARS = 400;
+const FAILURE_DETAIL_MAX_LINES = 3;
+
 /**
  * Check a command + args string against dangerous patterns.
  *
@@ -36,6 +39,34 @@ export function checkDangerous(command, args) {
     }
   }
   return { safe: true, reason: null };
+}
+
+function summarizeFailureText(text) {
+  if (!text || typeof text !== 'string') return '';
+
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, FAILURE_DETAIL_MAX_LINES);
+
+  if (lines.length === 0) return '';
+
+  let summary = lines.join(' | ');
+  if (summary.length > FAILURE_DETAIL_MAX_CHARS) {
+    summary = summary.slice(0, FAILURE_DETAIL_MAX_CHARS - 1).trimEnd() + '…';
+  }
+  return summary;
+}
+
+function extractFailureDetail(workerResult) {
+  const stderrSummary = summarizeFailureText(workerResult?.stderr);
+  if (stderrSummary) return stderrSummary;
+
+  const stdoutSummary = summarizeFailureText(workerResult?.stdout);
+  if (stdoutSummary) return `stdout: ${stdoutSummary}`;
+
+  return '';
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +229,27 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
       return { status: 'failed', reason: `Step "${step.id}" failed: ${err.message}`, stepsExecuted, results };
     }
 
+    const failureDetail = extractFailureDetail(workerResult);
+
+    if (workerResult.timedOut) {
+      const reason = failureDetail
+        ? `Step "${step.id}" timed out after ${step.run?.timeoutMs || 60000}ms: ${failureDetail}`
+        : `Step "${step.id}" timed out after ${step.run?.timeoutMs || 60000}ms`;
+      auditLog.append({ event: 'step_failed', ...auditContext, step_id: step.id, reason });
+      results.push({ step: step.id, success: false, error: reason });
+      return { status: 'failed', reason, stepsExecuted, results };
+    }
+
+    const interactiveCheck = detectInteractiveAttempt(workerResult);
+    if (interactiveCheck.detected) {
+      const reason = failureDetail
+        ? `Step "${step.id}" expected interactive input (${interactiveCheck.pattern}): ${failureDetail}`
+        : `Step "${step.id}" expected interactive input (${interactiveCheck.pattern})`;
+      auditLog.append({ event: 'step_failed', ...auditContext, step_id: step.id, reason });
+      results.push({ step: step.id, success: false, error: reason });
+      return { status: 'failed', reason, stepsExecuted, results };
+    }
+
     const validation = validateResult(workerResult, 'exit_code');
     stepsExecuted++;
 
@@ -205,11 +257,15 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
       step: step.id,
       success: validation.valid,
       exitCode: validation.exitCode,
+      detail: failureDetail || null,
     });
 
     if (!validation.valid) {
-      auditLog.append({ event: 'step_failed', ...auditContext, step_id: step.id, exitCode: validation.exitCode });
-      return { status: 'failed', reason: `Step "${step.id}" failed with exit code ${validation.exitCode}`, stepsExecuted, results };
+      const reason = failureDetail
+        ? `Step "${step.id}" failed with exit code ${validation.exitCode}: ${failureDetail}`
+        : `Step "${step.id}" failed with exit code ${validation.exitCode}`;
+      auditLog.append({ event: 'step_failed', ...auditContext, step_id: step.id, exitCode: validation.exitCode, reason });
+      return { status: 'failed', reason, stepsExecuted, results };
     }
 
     auditLog.append({ event: 'step_completed', ...auditContext, step_id: step.id });

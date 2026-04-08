@@ -67,6 +67,7 @@ Flags:
   --validator <mode>          Validator mode: exit_code | ndjson
   --update-source <source>    Update source: none | worker_proposal | demo
   --definition <path>         Workflow definition file path
+  --recipe-search-dir <path>  Extra recipe directory for workflow recipe_ref resolution (repeatable)
   --help                      Show this help
   --version                   Show version
 
@@ -99,6 +100,7 @@ export function parseArgs(argv) {
     validator: null,
     updateSource: null,
     definition: null,
+    recipeSearchDirs: [],
     command: null,
     args: [],
     demoTarget: null,
@@ -213,6 +215,15 @@ export function parseArgs(argv) {
           return { error: 'usage' };
         }
         result.definition = argv[i++];
+        continue;
+      }
+
+      if (arg === '--recipe-search-dir') {
+        i++;
+        if (i >= argv.length) {
+          return { error: 'usage' };
+        }
+        result.recipeSearchDirs.push(argv[i++]);
         continue;
       }
 
@@ -1449,7 +1460,9 @@ async function main() {
     let def;
     try {
       def = loadWorkflowDefinition(parsed.definition);
-      normalizeWorkflowDefinition(def, dirname(resolve(parsed.definition)));
+      normalizeWorkflowDefinition(def, dirname(resolve(parsed.definition)), {
+        recipeSearchDirs: parsed.recipeSearchDirs,
+      });
     } catch (err) {
       console.error(err.message);
       process.exit(1);
@@ -1498,6 +1511,7 @@ async function main() {
       nonInteractive: parsed.nonInteractive,
       jsonOutput: parsed.json,
       trustClass: parsed.trust,
+      recipeSearchDirs: parsed.recipeSearchDirs,
     });
 
     if (parsed.json) {

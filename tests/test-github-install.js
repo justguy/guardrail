@@ -525,6 +525,18 @@ describe('CLI bare recipe name detection', async () => {
     assert.equal(result.recipeId, 'codex-exec');
     assert.deepEqual(result.inputs.input_files, ['src/a.js', 'src/b.js']);
   });
+
+  it('collects repeated workflow --recipe-search-dir flags into arrays', () => {
+    const result = parseArgs([
+      'workflow', 'run',
+      '--definition', 'workflows/review.json',
+      '--recipe-search-dir', '/tmp/guardian-recipes',
+      '--recipe-search-dir', '/opt/shared-recipes',
+    ]);
+    assert.equal(result.subcommand, 'workflow');
+    assert.equal(result.definition, 'workflows/review.json');
+    assert.deepEqual(result.recipeSearchDirs, ['/tmp/guardian-recipes', '/opt/shared-recipes']);
+  });
 });
 
 // ---------------------------------------------------------------------------

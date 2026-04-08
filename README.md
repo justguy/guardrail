@@ -72,6 +72,8 @@ Secret detection scans both `envPolicy.inject` keys and `envPolicy.allow` lists 
 
 **Manifest reuse.** Once you approve a manifest, it's saved. The same command, workflow, template, or recipe execution runs without re-prompting until something changes. Out-of-scope update proposals are halted and require a new approval record; Guardrail does not grant one-off in-session overrides.
 
+**TTY note for first approval.** First interactive approval needs a real TTY. If you run Guardrail through `tpf`, use `tpf --passthrough-tty ...` for the approval-bearing command so Guardrail can render and read its own prompt. After the manifest exists, normal non-interactive reuse can go back to the standard wrapped path.
+
 **Approval granularity.** Template and recipe schemas can constrain inputs, but the approved manifest still binds to the exact resolved input values for that run. If `port=3001` was approved, later running `port=3002` is drift today even if the schema allows both values.
 
 **Concurrency model.** Guardrail locks execution per approved manifest hash. Different workflows or manifests can run at the same time. The same approved execution cannot run twice concurrently.
@@ -99,6 +101,18 @@ guardrail workflow lint --definition workflows/server-cycle.json
 ```
 
 Workflow steps can be regular `task` steps, service lifecycle steps, or `recipe_ref` steps. Use `recipe_ref` when you want one workflow approval to cover a bounded chain of recipe executions instead of approving each recipe separately.
+
+If a workflow lives in one repo but references recipes stored elsewhere, pass `--recipe-search-dir <path>` one or more times on both `workflow lint` and `workflow run`:
+
+```bash
+guardrail workflow lint \
+  --definition workflows/review-and-commit.json \
+  --recipe-search-dir /abs/path/to/Guardian/recipes
+
+guardrail workflow run \
+  --definition workflows/review-and-commit.json \
+  --recipe-search-dir /abs/path/to/Guardian/recipes
+```
 
 ### 3. Template Mode
 

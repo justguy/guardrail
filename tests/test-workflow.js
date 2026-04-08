@@ -1189,6 +1189,55 @@ describe('Workflow Normalization', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('normalizes recipe_ref steps from explicit workflow recipe search dirs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-recipe-search-'));
+    const workflowDir = join(dir, 'project');
+    const externalRecipesDir = join(dir, 'guardian-recipes');
+
+    try {
+      mkdirSync(workflowDir, { recursive: true });
+      mkdirSync(externalRecipesDir, { recursive: true });
+      writeRecipeFile(externalRecipesDir, {
+        id: 'external-recipe',
+        name: 'External Recipe',
+        description: 'Resolved from explicit search dir',
+        version: '1.0.0',
+        author: 'tester',
+        category: 'custom',
+        channel: 'community',
+        approval_required: true,
+        risk_level: 'low',
+        inputs: {},
+        steps: [{
+          id: 'main',
+          description: 'echo external',
+          run: { command: 'echo', args: ['external'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      });
+
+      const normalized = normalizeWorkflowDefinition(makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'external-recipe',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      }), workflowDir, {
+        recipeSearchDirs: [externalRecipesDir],
+      });
+
+      assert.equal(normalized.steps[0].recipeRef.id, 'external-recipe');
+      assert.equal(
+        normalized.steps[0].recipeRef.sourcePath,
+        join(externalRecipesDir, 'external-recipe.recipe.json'),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ===========================================================================
@@ -1325,6 +1374,68 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
 
     assert.equal(result.status, 'success');
     assert.equal(result.stepsExecuted, 2);
+  });
+
+  it('preserves recipe_ref failure detail in the final workflow result', async () => {
+    mkdirSync(join(tmpDir, 'recipes'), { recursive: true });
+    writeRecipeFile(join(tmpDir, 'recipes'), {
+      id: 'recipe-fail-detail',
+      name: 'Recipe Fail Detail',
+      description: 'fails with actionable detail',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{
+        id: 'invoke',
+        description: 'emit failure detail',
+        run: {
+          command: 'node',
+          args: ['-e', 'process.stderr.write("Not logged in\\\\nPlease run /login\\\\n"); process.exit(1)'],
+          mode: 'structured',
+          timeoutMs: 5000,
+        },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    });
+
+    const def = makeDefinition({
+      entryStep: 'step_a',
+      rollback_policy: 'none',
+      rollback_none_reason: 'single idempotent recipe step for failure detail coverage',
+      steps: [
+        {
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'recipe-fail-detail',
+          idempotent: true,
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        },
+      ],
+    });
+    const defPath = writeDefFile(tmpDir, def, 'workflow-recipe-failure-detail.json');
+    const manifest = buildManifest(def, tmpDir);
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    const manifestPath = join(tmpDir, 'approved.workflow.recipe-failure-detail.json');
+    saveManifest(manifest, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'validation_failed');
+    assert.equal(result.failedStep, 'step_a');
+    assert.match(result.terminalReason, /Not logged in/);
+    assert.match(result.terminalReason, /Please run \/login/);
   });
 });
 

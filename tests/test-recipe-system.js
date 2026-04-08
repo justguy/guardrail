@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { validateRecipe, loadRecipe, hashRecipe, VALID_CATEGORIES, VALID_CHANNELS } from '../src/recipe.js';
 import { buildIndex, filterRecipes, fuzzySearch, groupByCategory, formatRecipeList } from '../src/recipe-index.js';
 import { signRecipe, verifySignature, classifyTrust, enforceChannel, staticAnalysis } from '../src/recipe-channel.js';
-import { checkDangerous, checkScope, dryRun } from '../src/recipe-executor.js';
+import { checkDangerous, checkScope, dryRun, executeRecipe } from '../src/recipe-executor.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -268,6 +268,41 @@ describe('Recipe System: Verified Channel', () => {
     const trust = classifyTrust(r);
     assert.equal(trust.channel, 'community');
     assert.equal(trust.verified, false);
+  });
+});
+
+// ===========================================================================
+// 5. Execution Failure Detail Propagation
+// ===========================================================================
+
+describe('Recipe System: Execution Failure Detail Propagation', () => {
+  it('includes bounded stderr detail in failed recipe reasons', async () => {
+    const dir = tmpDir();
+    const recipe = makeRecipe({
+      approval_required: false,
+      channel: 'community',
+      steps: [{
+        id: 'invoke',
+        description: 'fail with detail',
+        run: {
+          command: 'node',
+          args: ['-e', 'process.stderr.write("Not logged in\\\\nPlease run /login\\\\n"); process.exit(1)'],
+          mode: 'structured',
+          timeoutMs: 5000,
+        },
+      }],
+    });
+
+    const result = await executeRecipe(recipe, { target: 'hello' }, {
+      allowUnverified: true,
+      approved: true,
+      cwd: dir,
+      stateDir: join(dir, '.guardrail'),
+    });
+
+    assert.equal(result.status, 'failed');
+    assert.match(result.reason, /Not logged in/);
+    assert.match(result.reason, /Please run \/login/);
   });
 });
 

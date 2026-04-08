@@ -20,8 +20,9 @@
 | # | Scenario | Expected | Result |
 |---|----------|----------|--------|
 | 4 | `workflow lint` on valid definition | Exit 0, no errors | PASS |
-| 5 | `workflow lint` on invalid JSON | Exit != 0 | PASS |
-| 6 | `workflow run` with chained `recipe_ref` steps under one approved workflow manifest | Exit 0, both recipe steps execute | PASS |
+| 5 | `workflow lint` with external `recipe_ref` plus `--recipe-search-dir` | Exit 0, external recipes resolve | PASS |
+| 6 | `workflow lint` on invalid JSON | Exit != 0 | PASS |
+| 7 | `workflow run` with chained `recipe_ref` steps under one approved workflow manifest | Exit 0, both recipe steps execute | PASS |
 
 ## Template Mode
 
