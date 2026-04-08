@@ -42,7 +42,7 @@ export function parseWrapperArgs(argv) {
 
 function normalizeOptions(rawOptions) {
   const repoPath = rawOptions.repoPath ? resolve(process.cwd(), rawOptions.repoPath) : process.cwd();
-  const paths = splitCsv(rawOptions.paths);
+  const paths = Array.from(new Set(splitCsv(rawOptions.paths)));
   const messageFile = rawOptions.messageFile
     ? resolve(repoPath, rawOptions.messageFile)
     : '';
@@ -57,19 +57,54 @@ function normalizeOptions(rawOptions) {
   return { repoPath, paths, messageFile };
 }
 
+export function buildGitDiffCachedArgs(options = {}) {
+  return ['-C', options.repoPath, 'diff', '--cached', '--name-only', '-z', '--diff-filter=ACMRD', '--'];
+}
+
+export function buildGitDiffCachedForPathsArgs(options = {}) {
+  return ['-C', options.repoPath, 'diff', '--cached', '--name-only', '-z', '--diff-filter=ACMRD', '--', ...(options.paths || [])];
+}
+
 export function buildGitAddArgs(options = {}) {
   return ['-C', options.repoPath, 'add', '--', ...(options.paths || [])];
 }
 
 export function buildGitCommitArgs(options = {}) {
-  return ['-C', options.repoPath, 'commit', '-F', options.messageFile];
+  return ['-C', options.repoPath, 'commit', '--only', '-F', options.messageFile, '--', ...(options.paths || [])];
 }
 
-function runGit(args) {
+function parseNameOnlyOutput(output = '') {
+  return output
+    .split('\0')
+    .map((line) => line.trimEnd())
+    .filter(Boolean);
+}
+
+function isPathCoveredByApproval(approvedSet, entry) {
+  for (const path of approvedSet) {
+    if (entry === path || entry.startsWith(`${path}/`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function runGit(args, captureOutput = false) {
   return new Promise((resolvePromise, rejectPromise) => {
+    let stdout = '';
+    let stderr = '';
     const child = spawn('git', args, {
-      stdio: ['ignore', 'inherit', 'inherit'],
+      stdio: ['ignore', captureOutput ? 'pipe' : 'inherit', captureOutput ? 'pipe' : 'inherit'],
     });
+
+    if (captureOutput) {
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+    }
 
     child.on('error', (err) => {
       rejectPromise(err);
@@ -83,14 +118,33 @@ function runGit(args) {
         rejectPromise(new Error(`git ${args[2]} failed with exit code ${code}`));
         return;
       }
-      resolvePromise();
+      resolvePromise(captureOutput ? { stdout, stderr } : {});
     });
   });
 }
 
 export async function runGitCommit(rawOptions) {
   const options = normalizeOptions(rawOptions);
+  const approvedSet = new Set(options.paths);
+  const stagedOutput = await runGit(buildGitDiffCachedArgs(options), true);
+  const alreadyStaged = parseNameOnlyOutput(stagedOutput.stdout);
+  const unrelatedStaged = alreadyStaged.filter((entry) => !isPathCoveredByApproval(approvedSet, entry));
+
+  if (unrelatedStaged.length > 0) {
+    throw new Error(
+      `Blocked: unrelated staged changes already present outside approved paths: ${unrelatedStaged.join(', ')}`,
+    );
+  }
+
   await runGit(buildGitAddArgs(options));
+
+  const stagedForApprovedOutput = await runGit(buildGitDiffCachedForPathsArgs(options), true);
+  const stagedForApproved = parseNameOnlyOutput(stagedForApprovedOutput.stdout);
+
+  if (stagedForApproved.length === 0) {
+    return;
+  }
+
   await runGit(buildGitCommitArgs(options));
 }
 

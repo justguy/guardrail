@@ -1,7 +1,7 @@
 {
   "id": "git-commit",
   "name": "Git Commit",
-  "description": "Stage an exact approved path list and create a git commit from a content-hash-bound message file.",
+  "description": "Stage approved paths only, fail closed on unrelated staged changes, and commit a no-op if no approved-path changes are staged.",
   "version": "1.0.0",
   "author": {
     "name": "Guardrail Team",
@@ -61,7 +61,7 @@
   "steps": [
     {
       "id": "run-git-commit",
-      "description": "Stage approved paths, then create a commit from the approved message file",
+      "description": "Stage approved paths, fail closed if unrelated files are already staged, commit only approved paths, and return success when there is no-op staged content.",
       "run": {
         "command": "node",
         "args": [
@@ -80,12 +80,15 @@
       "Only the explicitly approved repo_path, staged paths, and commit message file may influence the commit",
       "Commit message file is content-hash bound at approval time and rechecked before execution",
       "No shell mode, no push, and no additional git flags are allowed through this recipe",
-      "The wrapper stages only the approved path list before running git commit"
+      "The wrapper fails if already-staged changes exist outside approved paths",
+      "The wrapper commits only the approved path list"
     ],
     "invariants": [
       "mode: structured",
       "At least one staged path must be present",
       "Commit message comes from the approved message_file path",
+      "Unrelated pre-staged changes block execution",
+      "No-op success is returned when approved paths produce no staged changes",
       "This recipe never performs git push"
     ]
   },

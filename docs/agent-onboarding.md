@@ -175,8 +175,8 @@ Bounded operational recipe naming convention:
 Bundled git commit recipe:
 
 - `recipes/git-commit.recipe.json` wraps git staging plus `git commit` through `src/git-commit-wrapper.js`
-- it stages only the approved `paths` list and reads the commit text from `message_file`
-- `message_file` is content-hash bound at approval time and rechecked before execution
+- it stages only the approved `paths` list, fails closed if unrelated staged changes already exist, and returns a clean no-op when approved paths have no staged diff
+- it reads the commit text from `message_file`, which is content-hash bound at approval time and rechecked before execution
 - this recipe does not push; use a separate approval unit if push behavior is needed later
 
 Example interactive run:

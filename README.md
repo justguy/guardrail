@@ -240,6 +240,14 @@ guardrail run --recipe git-commit \
   --input paths=README.md \
   --input message_file=.guardrail/commit-message.txt
 
+```
+
+Notes:
+- This recipe fails closed if unrelated files are already staged outside the approved `paths`.
+- If the approved paths produce no staged diff, it succeeds as a clean no-op and does not create a commit.
+- The commit step only commits the approved `paths`, never unrelated staged content.
+
+```bash
 # Run Codex with an inline prompt plus reusable file-backed prompt context
 guardrail run --recipe codex-exec \
   --input working_dir=. \
