@@ -72,7 +72,7 @@ Secret detection scans both `envPolicy.inject` keys and `envPolicy.allow` lists 
 
 **Manifest reuse.** Once you approve a manifest, it's saved. The same command, workflow, template, or recipe execution runs without re-prompting until something changes. Out-of-scope update proposals are halted and require a new approval record; Guardrail does not grant one-off in-session overrides.
 
-**TTY note for first approval.** First interactive approval needs a real TTY. If you run Guardrail through `tpf`, use `tpf --passthrough-tty ...` for the approval-bearing command so Guardrail can render and read its own prompt. After the manifest exists, normal non-interactive reuse can go back to the standard wrapped path.
+**TTY note for first approval.** First interactive approval needs a real TTY. If you run Guardrail through `tpf`, use `tpf --passthrough-tty ...` for the approval-bearing command so Guardrail can render and read its own prompt. The interactive prompt expects the literal approval token `APPROVE`, not `y` or `yes`. After the manifest exists, normal non-interactive reuse can go back to the standard wrapped path.
 
 **Approval granularity.** Template and recipe schemas can constrain inputs, but the approved manifest still binds to the exact resolved input values for that run. If `port=3001` was approved, later running `port=3002` is drift today even if the schema allows both values.
 

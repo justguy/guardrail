@@ -29,7 +29,7 @@ First interactive approval must have a real TTY. If you are invoking Guardrail t
 TPF_LLM_TOOL=codex tpf --passthrough-tty node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js ...
 ```
 
-Use `--passthrough-tty` only for approval-bearing interactive runs. After the manifest exists, go back to the normal wrapped non-interactive path.
+Use `--passthrough-tty` only for approval-bearing interactive runs. The approval prompt expects the literal string `APPROVE`, not `y` or `yes`. After the manifest exists, go back to the normal wrapped non-interactive path.
 
 ## Command Mode
 
@@ -261,6 +261,8 @@ Minimal valid task-only workflow:
   "projectRoot": ".",
   "entryStep": "step_a",
   "maxIterations": 5,
+  "rollback_policy": "none",
+  "rollback_none_reason": "No rollback needed for this read-only example.",
   "services": [],
   "steps": [
     {
@@ -294,6 +296,8 @@ Minimal valid service-lifecycle workflow:
   "projectRoot": ".",
   "entryStep": "start_svc",
   "maxIterations": 10,
+  "rollback_policy": "none",
+  "rollback_none_reason": "Example workflow shape only; add an explicit rollback policy for real service mutations.",
   "services": [
     {
       "id": "api",
@@ -369,6 +373,8 @@ Minimal valid workflow with chained recipe executions under one approval:
   "projectRoot": ".",
   "entryStep": "review",
   "maxIterations": 3,
+  "rollback_policy": "none",
+  "rollback_none_reason": "Example approval shape only; real recipe chains should declare rollback intentionally.",
   "services": [],
   "steps": [
     {
