@@ -184,10 +184,10 @@ export function promptApproval(riskLevel, options = {}) {
       resolvePromise(value);
     };
 
-    const rl = createInterfaceImpl({
-      input,
-      output,
-    });
+  const rl = createInterfaceImpl({
+    input,
+    output,
+  });
 
     // Ensure Ctrl-C (close without answer) counts as denial
     rl.on('close', () => {
@@ -195,26 +195,15 @@ export function promptApproval(riskLevel, options = {}) {
       settle(false);
     });
 
-    if (riskLevel === 'red') {
-      rl.question(
-        colorize('  Type APPROVE to continue, or press Ctrl-C to deny: ', 'red'),
-        (answer) => {
-          answered = true;
-          settle(answer.trim() === 'APPROVE');
-          rl.close();
-        },
-      );
-    } else {
-      rl.question(
-        colorize('  [Enter] Approve  |  n + Enter to deny: ', 'yellow'),
-        (answer) => {
-          answered = true;
-          const trimmed = answer.trim().toLowerCase();
-          settle(trimmed !== 'n' && trimmed !== 'no');
-          rl.close();
-        },
-      );
-    }
+  const promptColor = riskLevel === 'red' ? 'red' : 'yellow';
+  rl.question(
+    colorize('  Type APPROVE to continue, or press Ctrl-C to deny: ', promptColor),
+    (answer) => {
+      answered = true;
+      settle(answer.trim() === 'APPROVE');
+      rl.close();
+    },
+  );
   });
 }
 
@@ -564,6 +553,10 @@ export async function runSupervisor(options) {
         printApprovalSummary(contract, riskAssessment);
       }
 
+      emitCommandProgress(progressSink, runId, 'approval_pending', {
+        reason: 'Command approval required.',
+        message: 'Command approval required.',
+      });
       const userApproved = await promptApproval(riskAssessment.riskLevel);
 
       if (!userApproved) {

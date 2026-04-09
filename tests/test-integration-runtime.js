@@ -331,6 +331,30 @@ describe('Integration: Command Supervisor Runtime Policy', () => {
     assert.equal(executionEnd.stepsExecuted, 1);
   });
 
+  it('emits approval_pending for non-interactive command approval-required path', async () => {
+    const dir = tmpDir();
+    mkdirSync(resolve(dir, '.guardrail'), { recursive: true });
+    const manifestPath = join(dir, '.guardrail', 'missing-command.approved.json');
+
+    const events = [];
+    const result = await runSupervisor({
+      command: 'echo',
+      args: ['hello'],
+      cwd: dir,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      progressSink: (event) => events.push(event),
+    });
+
+    assert.equal(result.status, 'approval_required');
+    const eventNames = events.map((event) => event.event);
+    assert.equal(eventNames.includes('approval_pending'), true, 'approval_pending should be emitted');
+    assert.equal(eventNames.includes('execution_end'), true, 'execution_end should still be emitted');
+    assert.equal(eventNames[0], 'approval_pending');
+    assert.equal(eventNames[eventNames.length - 1], 'execution_end');
+  });
+
   it('audit log entries written on execution', async () => {
     const dir = tmpDir();
     const manifestDir = join(dir, '.guardrail');
@@ -561,6 +585,32 @@ describe('Integration: Template Supervisor Runtime Policy', () => {
     assert.equal(executionEnd.mode, 'template');
     assert.equal(executionEnd.runId, result.runId);
     assert.equal(executionEnd.status, 'success');
+  });
+
+  it('emits approval_pending for non-interactive template approval-required path', async () => {
+    const dir = tmpDir();
+    const tmplPath = join(dir, 'tmpl.json');
+    mkdirSync(resolve(dir, '.guardrail', 'templates'), { recursive: true });
+    const manifestPath = join(dir, '.guardrail', 'templates', 'test-required.approved.json');
+    const templateDef = makeTemplate();
+    writeFileSync(tmplPath, JSON.stringify(templateDef));
+
+    const events = [];
+    const result = await runTemplateSupervisor({
+      templatePath: tmplPath,
+      inputs: { name: 'hello' },
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      progressSink: (event) => events.push(event),
+    });
+
+    assert.equal(result.status, 'approval_required');
+    const eventNames = events.map((event) => event.event);
+    assert.equal(eventNames.includes('approval_pending'), true, 'approval_pending should be emitted');
+    assert.equal(eventNames.includes('execution_end'), true, 'execution_end should still be emitted');
+    assert.equal(eventNames[0], 'approval_pending');
+    assert.equal(eventNames[eventNames.length - 1], 'execution_end');
   });
 
   it('time policy blocks template execution', async () => {
@@ -821,6 +871,35 @@ describe('Integration: Recipe Supervisor Runtime Policy', () => {
     assert.equal(executionEnd.mode, 'recipe');
     assert.equal(executionEnd.runId, result.runId);
     assert.equal(executionEnd.status, 'success');
+  });
+
+  it('emits approval_pending for non-interactive recipe approval-required path', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    const recipe = makeRecipe();
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(resolve(dir, '.guardrail', 'recipes'), { recursive: true });
+    writeRecipeFile(recipesDir, recipe);
+
+    const events = [];
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { target: 'hello' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      progressSink: (event) => events.push(event),
+    });
+
+    assert.equal(result.status, 'approval_required');
+    const eventNames = events.map((event) => event.event);
+    assert.equal(eventNames.includes('approval_pending'), true, 'approval_pending should be emitted');
+    assert.equal(eventNames.includes('execution_end'), true, 'execution_end should still be emitted');
+    assert.equal(eventNames[0], 'approval_pending');
+    assert.equal(eventNames[eventNames.length - 1], 'execution_end');
   });
 });
 

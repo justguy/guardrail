@@ -457,6 +457,54 @@ describe('Approval Behavior', () => {
 
     assert.equal(approved, true);
   });
+
+  it('yellow approval requires literal APPROVE token', async () => {
+    let closeHandler = null;
+
+    const approved = await promptApproval('yellow', {
+      createInterfaceImpl: () => ({
+        on(event, handler) {
+          if (event === 'close') closeHandler = handler;
+        },
+        question(_prompt, callback) {
+          callback('APPROVE');
+        },
+        close() {
+          if (closeHandler) {
+            closeHandler();
+          }
+        },
+      }),
+      input: {},
+      output: {},
+    });
+
+    assert.equal(approved, true);
+  });
+
+  it('yellow approval rejects non-APPROVE answers', async () => {
+    let closeHandler = null;
+
+    const approved = await promptApproval('yellow', {
+      createInterfaceImpl: () => ({
+        on(event, handler) {
+          if (event === 'close') closeHandler = handler;
+        },
+        question(_prompt, callback) {
+          callback('yes');
+        },
+        close() {
+          if (closeHandler) {
+            closeHandler();
+          }
+        },
+      }),
+      input: {},
+      output: {},
+    });
+
+    assert.equal(approved, false);
+  });
 });
 
 // =========================================================================

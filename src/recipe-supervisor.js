@@ -416,6 +416,10 @@ export async function runRecipeSupervisor(options) {
         }
       }
 
+      emitRecipeProgress(progressSink, runId, 'approval_pending', {
+        reason: 'Recipe approval required.',
+        message: 'Recipe approval required.',
+      });
       const userApproved = await promptApproval(riskAssessment.riskLevel);
       if (!userApproved) {
         const reason = 'Recipe approval denied by user.';

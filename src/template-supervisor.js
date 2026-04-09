@@ -503,6 +503,10 @@ export async function runTemplateSupervisor(options) {
         printTemplateSummary(def, riskAssessment, envResult);
       }
 
+      emitTemplateProgress(progressSink, runId, 'approval_pending', {
+        reason: 'Template approval required.',
+        message: 'Template approval required.',
+      });
       const userApproved = await promptApproval(riskAssessment.riskLevel);
 
       if (!userApproved) {
