@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { resolve, extname } from 'node:path';
 import { serializeStable } from './contract.js';
 import { deepEqual, pretty } from './shared.js';
+import { validateInputValue } from './input-validator.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -16,6 +17,7 @@ export const VALID_CATEGORIES = new Set(['git', 'github', 'infra', 'packages', '
 export const VALID_CHANNELS = new Set(['verified', 'community']);
 const RECIPE_SCHEMA_VERSION = 1;
 const RECIPE_MANIFEST_VERSION = 1;
+const HIGH_RISK_ENV_PATTERNS = /secret|token|password|api[_-]?key|credential|auth|private[_-]?key/i;
 
 // ---------------------------------------------------------------------------
 // Validation error
@@ -84,6 +86,17 @@ function validateAuthor(author) {
   if (typeof author === 'string') return author.trim() !== '';
   if (author && typeof author === 'object' && typeof author.name === 'string') return author.name.trim() !== '';
   return false;
+}
+
+function validateRequiresEnv(recipe) {
+  if (recipe.requires_env === undefined) return [];
+  if (!Array.isArray(recipe.requires_env)) return ['requires_env must be an array'];
+  for (const value of recipe.requires_env) {
+    if (typeof value !== 'string' || value.trim() === '') {
+      return ['requires_env entries must be non-empty strings'];
+    }
+  }
+  return [];
 }
 
 function validateInputs(inputs) {
@@ -160,6 +173,22 @@ function validateSteps(steps) {
         errors.push(`${p} "${step.id}": run.mode must be "structured" (shell forbidden in recipes)`);
       }
     }
+
+    if (step.composed_recipe !== undefined) {
+      if (!step.composed_recipe || typeof step.composed_recipe !== 'object' || Array.isArray(step.composed_recipe)) {
+        errors.push(`${p} "${step.id}": composed_recipe must be an object when present`);
+      } else {
+        if (typeof step.composed_recipe.recipe !== 'string' || step.composed_recipe.recipe.trim() === '') {
+          errors.push(`${p} "${step.id}": composed_recipe.recipe must be a non-empty recipe specifier`);
+        }
+        if (
+          step.composed_recipe.inputs !== undefined
+          && (!step.composed_recipe.inputs || typeof step.composed_recipe.inputs !== 'object' || Array.isArray(step.composed_recipe.inputs))
+        ) {
+          errors.push(`${p} "${step.id}": composed_recipe.inputs must be an object when present`);
+        }
+      }
+    }
   }
   return errors;
 }
@@ -207,6 +236,16 @@ function makeInputApprovalEnvelope(schema) {
     : null;
   if (explicitMode === 'review_each_time' || explicitMode === 'exact') return null;
   if (schema.content_hash === true) return null;
+
+  if (explicitMode === 'list') {
+    if (!Number.isInteger(schema.max_items) || schema.max_items < 1) return null;
+    if (!schema.item_validator || typeof schema.item_validator !== 'object' || Array.isArray(schema.item_validator)) return null;
+    return {
+      type: 'list',
+      maxItems: schema.max_items,
+      itemValidator: schema.item_validator,
+    };
+  }
 
   if (schema.type === 'string') {
     if (explicitMode && explicitMode !== 'enum') return null;
@@ -257,6 +296,19 @@ function isWithinInputApprovalEnvelope(value, envelope) {
     return value >= envelope.min && value <= envelope.max;
   }
 
+  if (envelope.type === 'list') {
+    if (!Array.isArray(value) || !Number.isInteger(envelope.maxItems) || value.length > envelope.maxItems) {
+      return false;
+    }
+    if (!envelope.itemValidator || typeof envelope.itemValidator !== 'object') {
+      return false;
+    }
+    return value.every((entry) => {
+      const result = validateInputValue(entry, envelope.itemValidator);
+      return result.valid && !result.never_reuse && (result.risk_traits || []).length === 0;
+    });
+  }
+
   return false;
 }
 
@@ -267,6 +319,9 @@ function describeInputApprovalEnvelope(envelope) {
   }
   if (envelope.type === 'integer_range') {
     return `integer_range(${envelope.min}..${envelope.max})`;
+  }
+  if (envelope.type === 'list') {
+    return `list(max_items=${envelope.maxItems})`;
   }
   return '';
 }
@@ -283,6 +338,7 @@ function describeInputApprovalEnvelope(envelope) {
 export function validateRecipe(recipe) {
   const errors = [
     ...validateTopLevel(recipe),
+    ...validateRequiresEnv(recipe),
     ...validateInputs(recipe.inputs),
     ...validateSteps(recipe.steps),
     ...validateGuardrails(recipe.guardrails),
@@ -432,6 +488,9 @@ export function hashRecipe(recipe) {
     approval_required: recipe.approval_required,
     risk_level:        recipe.risk_level,
   };
+  if (recipe.requires_env !== undefined) {
+    hashable.requires_env = recipe.requires_env;
+  }
   return createHash('sha256').update(serializeStable(hashable)).digest('hex');
 }
 
@@ -531,8 +590,10 @@ export function createRecipeManifest(recipe, recipeHash, riskAssessment, resolve
       allowUnverified: options.allowUnverified ?? false,
     },
     resolvedInputs,
+    envIntersection: options.envIntersection ?? [],
     inputApprovalEnvelopes,
     inputContentHashes: options.inputContentHashes ?? {},
+    composedRecipes: options.composedRecipes ?? [],
     riskAssessment: {
       trustClass:                 riskAssessment.trustClass   ?? 'unknown',
       riskLevel:                  riskAssessment.riskLevel    ?? 'red',
@@ -564,6 +625,15 @@ export function diffRecipeManifests(candidate, approved) {
     if (!deepEqual(cRecipe[field], aRecipe[field])) {
       diffs.push(`~ recipe.${field}: ${pretty(aRecipe[field])} -> ${pretty(cRecipe[field])}`);
     }
+  }
+
+  const candidateEnvIntersection = candidate.envIntersection ?? [];
+  const approvedEnvIntersection = approved.envIntersection ?? [];
+  if (
+    (candidateEnvIntersection.length > 0 || approvedEnvIntersection.length > 0)
+    && !deepEqual(candidateEnvIntersection, approvedEnvIntersection)
+  ) {
+    diffs.push(`~ envIntersection: ${pretty(approvedEnvIntersection)} -> ${pretty(candidateEnvIntersection)}`);
   }
 
   const allInputs = new Set([
@@ -620,10 +690,41 @@ export function diffRecipeManifests(candidate, approved) {
     diffs.push(`~ recipeHash: ${pretty(approved.recipeHash)} -> ${pretty(candidate.recipeHash)}`);
   }
 
+  const candidateComposedRecipes = candidate.composedRecipes ?? [];
+  const approvedComposedRecipes = approved.composedRecipes ?? [];
+  if (!deepEqual(candidateComposedRecipes, approvedComposedRecipes)) {
+    diffs.push(`~ composedRecipes: ${pretty(approvedComposedRecipes)} -> ${pretty(candidateComposedRecipes)}`);
+  }
+
   return diffs;
 }
 
 export function compareRecipeManifests(candidate, approved) {
   const diffs = diffRecipeManifests(candidate, approved);
   return { matches: diffs.length === 0, diffs };
+}
+
+export function computeRecipeEnvIntersection(requiresEnv, callerAllow) {
+  const required = new Set(requiresEnv || []);
+  const allowed = new Set(callerAllow || []);
+  const intersection = [];
+  const denied = [];
+  const warnings = [];
+
+  for (const key of required) {
+    if (allowed.has(key)) {
+      intersection.push(key);
+      if (HIGH_RISK_ENV_PATTERNS.test(key)) {
+        warnings.push(`secret_in_env_handshake: "${key}" matches secret pattern`);
+      }
+    } else {
+      denied.push(key);
+    }
+  }
+
+  return {
+    intersection: intersection.sort(),
+    denied,
+    warnings,
+  };
 }

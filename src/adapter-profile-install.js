@@ -1,9 +1,23 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { resolve, join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
-import { validateProfile, hashProfile, loadProfile } from './adapter-profile.js';
+import { validateProfile, hashProfile } from './adapter-profile.js';
 import { loadRawJson } from './recipe.js';
 import { parseGitHubUrl, checkTrustedSource, loadConfig } from './recipe-install.js';
+
+// ---------------------------------------------------------------------------
+// Shared validation helper — produces a stable error prefix that downstream
+// automation can match on.
+// ---------------------------------------------------------------------------
+
+function assertValidProfile(raw) {
+  const validation = validateProfile(raw);
+  if (!validation.valid) {
+    throw new Error(
+      `Adapter profile validation failed: ${validation.errors.join('; ')}`
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Registry directory management
@@ -54,9 +68,19 @@ function installProfileToStore(profile, hash, opts = {}) {
 // ---------------------------------------------------------------------------
 
 export function installFromPath(filePath, opts = {}) {
-  const profile = loadProfile(resolve(filePath));
-  const hash = hashProfile(profile);
-  return installProfileToStore(profile, hash, opts);
+  const abs = resolve(filePath);
+  if (!existsSync(abs)) {
+    throw new Error(`Profile not found: ${abs}`);
+  }
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(abs, 'utf8'));
+  } catch (err) {
+    throw new Error(`Profile is not valid JSON: ${err.message}`);
+  }
+  assertValidProfile(raw);
+  const hash = hashProfile(raw);
+  return installProfileToStore(raw, hash, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -78,11 +102,9 @@ export async function installFromUrl(url, opts = {}) {
     );
   }
 
-  const raw = await loadRawJson(url);
-  const validation = validateProfile(raw);
-  if (!validation.valid) {
-    throw new Error(`Profile validation failed:\n  - ${validation.errors.join('\n  - ')}`);
-  }
+  const fetchJson = opts.fetchJson || loadRawJson;
+  const raw = await fetchJson(url);
+  assertValidProfile(raw);
   const hash = hashProfile(raw);
   return installProfileToStore(raw, hash, opts);
 }
@@ -118,11 +140,9 @@ export async function installFromGitHub(source, opts = {}) {
     );
   }
 
-  const raw = await loadRawJson(parsed.rawUrl);
-  const validation = validateProfile(raw);
-  if (!validation.valid) {
-    throw new Error(`Profile validation failed:\n  - ${validation.errors.join('\n  - ')}`);
-  }
+  const fetchJson = opts.fetchJson || loadRawJson;
+  const raw = await fetchJson(parsed.rawUrl);
+  assertValidProfile(raw);
 
   const hash = hashProfile(raw);
   const result = installProfileToStore(raw, hash, opts);

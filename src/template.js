@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { serializeStable, checkRegexSafety } from './contract.js';
+import { validateInputValue, inferApprovalMode } from './input-validator.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -66,6 +67,7 @@ function validateTopLevel(def) {
 
 function validateInputSchema(def) {
   const errors = [];
+  const MODES_WITHOUT_PATTERN = new Set(['exact', 'path_policy', 'list', 'review_each_time', 'template_slots']);
   if (!def.inputs || typeof def.inputs !== 'object' || Array.isArray(def.inputs)) {
     errors.push('inputs must be an object');
     return errors;
@@ -85,7 +87,7 @@ function validateInputSchema(def) {
       continue;
     }
     if (schema.type === 'string') {
-      if (!schema.pattern && !schema.enum) {
+      if (!schema.pattern && !schema.enum && !MODES_WITHOUT_PATTERN.has(schema.approval_mode)) {
         errors.push(`${p}: string inputs must have either "pattern" or "enum" constraint`);
       }
       if (schema.pattern) {
@@ -95,6 +97,14 @@ function validateInputSchema(def) {
       }
       if (schema.enum && (!Array.isArray(schema.enum) || schema.enum.length === 0)) {
         errors.push(`${p}: enum must be a non-empty array`);
+      }
+    }
+    if (schema.approval_mode === 'list') {
+      if (schema.max_items !== undefined && (!Number.isInteger(schema.max_items) || schema.max_items < 1)) {
+        errors.push(`${p}: max_items must be a positive integer when present`);
+      }
+      if (!schema.item_validator || typeof schema.item_validator !== 'object' || Array.isArray(schema.item_validator)) {
+        errors.push(`${p}: list inputs must declare an object item_validator`);
       }
     }
     if (schema.type === 'integer') {
@@ -346,7 +356,12 @@ function lintSecretPatterns(def) {
 function lintBareStrings(def) {
   const warnings = [];
   for (const [key, schema] of Object.entries(def.inputs || {})) {
-    if (schema.type === 'string' && !schema.pattern && !schema.enum) {
+    if (
+      schema.type === 'string'
+      && !schema.pattern
+      && !schema.enum
+      && !new Set(['exact', 'path_policy', 'list', 'review_each_time', 'template_slots']).has(schema.approval_mode)
+    ) {
       warnings.push(`input "${key}": bare string without pattern or enum is rejected`);
     }
   }
@@ -441,6 +456,16 @@ export function validateUserInputs(inputSchema, userInputs) {
       continue;
     }
 
+    if (inferApprovalMode(schema) === 'list') {
+      const result = validateInputValue(value, schema);
+      if (!result.valid) {
+        errors.push(`input "${key}": ${result.reasons.join(', ')}`);
+        continue;
+      }
+      values[key] = result.normalized ?? value;
+      continue;
+    }
+
     // Stage 1: Type check
     if (schema.type === 'string') {
       if (typeof value !== 'string') {
@@ -515,14 +540,25 @@ function interpolateString(template, values) {
   });
 }
 
+function expandInterpolatedArg(template, values) {
+  const exact = /^\{\{inputs\.([a-zA-Z_][a-zA-Z0-9_]*)\}\}$/.exec(template);
+  if (exact) {
+    const value = values[exact[1]];
+    if (Array.isArray(value)) {
+      return value.map(entry => String(entry));
+    }
+  }
+  return [interpolateString(template, values)];
+}
+
 /**
  * Interpolate an entire args array, producing a resolved args array.
- * Each element is interpolated independently — an interpolation never
- * splits into multiple arguments.
+ * Exact `{{inputs.x}}` placeholders may expand list inputs into multiple
+ * structured args. Mixed literal/template strings remain a single arg.
  */
 export function interpolateArgs(argsTemplate, values) {
   if (!Array.isArray(argsTemplate)) return [];
-  return argsTemplate.map(arg => interpolateString(arg, values));
+  return argsTemplate.flatMap(arg => expandInterpolatedArg(arg, values));
 }
 
 /**
@@ -663,6 +699,20 @@ function buildInputApprovalEnvelope(schema) {
     return null;
   }
 
+  if (explicitMode === 'list') {
+    if (!Number.isInteger(schema.max_items) || schema.max_items < 1) {
+      return null;
+    }
+    if (!schema.item_validator || typeof schema.item_validator !== 'object' || Array.isArray(schema.item_validator)) {
+      return null;
+    }
+    return {
+      type: 'list',
+      maxItems: schema.max_items,
+      itemValidator: schema.item_validator,
+    };
+  }
+
   if (schema.type === 'string' && Array.isArray(schema.enum) && schema.enum.length > 0) {
     if (explicitMode && explicitMode !== 'enum') {
       return null;
@@ -717,6 +767,19 @@ function isBoundedInputEnvelopeMatch(value, envelope) {
     return Number.isInteger(value) && value >= envelope.min && value <= envelope.max;
   }
 
+  if (envelope.type === 'list') {
+    if (!Array.isArray(value) || !Number.isInteger(envelope.maxItems) || value.length > envelope.maxItems) {
+      return false;
+    }
+    if (!envelope.itemValidator || typeof envelope.itemValidator !== 'object') {
+      return false;
+    }
+    return value.every((entry) => {
+      const result = validateInputValue(entry, envelope.itemValidator);
+      return result.valid && !result.never_reuse && (result.risk_traits || []).length === 0;
+    });
+  }
+
   return false;
 }
 
@@ -729,6 +792,9 @@ function stringifyEnvelope(envelope) {
   }
   if (envelope.type === 'integer_range') {
     return `integer_range[min=${envelope.min}, max=${envelope.max}]`;
+  }
+  if (envelope.type === 'list') {
+    return `list[max_items=${envelope.maxItems}]`;
   }
   return envelope.type;
 }

@@ -416,6 +416,14 @@ describe('Interpolation', () => {
     );
     assert.deepEqual(result, ['prefix-foo-suffix']);
   });
+
+  it('expands exact list placeholders into multiple args', () => {
+    const result = interpolateArgs(
+      ['--runTestsByPath', '{{inputs.test_files}}'],
+      { test_files: ['tests/a.test.js', 'tests/b.test.js'] },
+    );
+    assert.deepEqual(result, ['--runTestsByPath', 'tests/a.test.js', 'tests/b.test.js']);
+  });
 });
 
 // =========================================================================
@@ -656,6 +664,77 @@ describe('Template Manifest', () => {
     const result = compareTemplateManifests(candidate, base);
     assert.ok(result.matches);
     assert.equal(result.diffs.length, 0);
+  });
+
+  it('allows list input drift within approved approval envelope', () => {
+    const def = makeIndividualTemplate({
+      name: 'bounded-test-runner',
+      description: 'Run bounded test files',
+      inputs: {
+        test_files: {
+          type: 'string',
+          approval_mode: 'list',
+          max_items: 4,
+          item_validator: {
+            type: 'string',
+            approval_mode: 'path_policy',
+            rules: {
+              must_be_relative: true,
+              allowed_roots: ['tests/'],
+              deny_segments: ['..'],
+              allowed_extensions: ['.js'],
+              max_depth: 4,
+            },
+          },
+          description: 'Relative test files',
+        },
+      },
+      run: { command: 'node', args: ['--test', '{{inputs.test_files}}'], mode: 'structured', env: {} },
+    });
+
+    const risk = { trustClass: 'reviewed_internal', riskLevel: 'green', reasons: [] };
+    const base = createTemplateManifest(def, 'h-base', risk, { test_files: ['tests/a.test.js'] }, []);
+    const candidate = createTemplateManifest(def, 'h-candidate', risk, { test_files: ['tests/b.test.js', 'tests/c.test.js'] }, []);
+
+    const result = compareTemplateManifests(candidate, base);
+    assert.ok(result.matches);
+    assert.equal(result.diffs.length, 0);
+  });
+
+  it('fails when list input leaves approved approval envelope', () => {
+    const def = makeIndividualTemplate({
+      name: 'bounded-test-runner',
+      description: 'Run bounded test files',
+      inputs: {
+        test_files: {
+          type: 'string',
+          approval_mode: 'list',
+          max_items: 2,
+          item_validator: {
+            type: 'string',
+            approval_mode: 'path_policy',
+            rules: {
+              must_be_relative: true,
+              allowed_roots: ['tests/'],
+              deny_segments: ['..'],
+              allowed_extensions: ['.js'],
+              max_depth: 4,
+            },
+          },
+          description: 'Relative test files',
+        },
+      },
+      run: { command: 'node', args: ['--test', '{{inputs.test_files}}'], mode: 'structured', env: {} },
+    });
+
+    const risk = { trustClass: 'reviewed_internal', riskLevel: 'green', reasons: [] };
+    const approved = createTemplateManifest(def, 'h-base', risk, { test_files: ['tests/a.test.js'] }, []);
+    const candidate = createTemplateManifest(def, 'h-candidate', risk, { test_files: ['src/not-allowed.js'] }, []);
+
+    const result = compareTemplateManifests(candidate, approved);
+    assert.ok(!result.matches);
+    assert.ok(result.diffs.some(d => /outside approved envelope/.test(d)));
+    assert.ok(result.diffs.some(d => /test_files/.test(d)));
   });
 
   it('fails when integer input drifts outside approved approval envelope', () => {

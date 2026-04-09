@@ -11,6 +11,7 @@ import {
   hashRecipe,
   createRecipeManifest,
   compareRecipeManifests,
+  computeRecipeEnvIntersection,
   packRecipe,
   writePackedRecipe,
   loadPackedRecipe,
@@ -117,6 +118,14 @@ describe('Recipe: Schema Validation', () => {
     assert.throws(
       () => validateRecipe(makeRecipe({ approval_required: 'yes' })),
       (err) => err.errors.some(e => e.includes('approval_required')),
+    );
+  });
+
+  it('validates requires_env as a string array', () => {
+    assert.doesNotThrow(() => validateRecipe(makeRecipe({ requires_env: ['HOME', 'TMPDIR'] })));
+    assert.throws(
+      () => validateRecipe(makeRecipe({ requires_env: ['HOME', 42] })),
+      (err) => err.errors.some(e => e.includes('requires_env')),
     );
   });
 
@@ -467,6 +476,58 @@ describe('Recipe: Manifest Semantics', () => {
     assert.ok(comparison.diffs.some(d => d.includes('input "target"')));
   });
 
+  it('stores env intersection in the approval manifest', () => {
+    const recipe = makeRecipe({ requires_env: ['HOME', 'TMPDIR'] });
+    const envResult = computeRecipeEnvIntersection(recipe.requires_env, ['TMPDIR', 'HOME']);
+    const manifest = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello' },
+      {
+        cwd: '/repo',
+        projectRoot: '/repo',
+        sourcePath: '/repo/recipes/test.recipe.json',
+        envIntersection: envResult.intersection,
+      },
+    );
+
+    assert.deepEqual(manifest.envIntersection, ['HOME', 'TMPDIR']);
+  });
+
+  it('treats env intersection changes as drift', () => {
+    const recipe = makeRecipe({ requires_env: ['HOME', 'TMPDIR'] });
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello' },
+      {
+        cwd: '/repo',
+        projectRoot: '/repo',
+        sourcePath: '/repo/recipes/test.recipe.json',
+        envIntersection: ['HOME'],
+      },
+    );
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello' },
+      {
+        cwd: '/repo',
+        projectRoot: '/repo',
+        sourcePath: '/repo/recipes/test.recipe.json',
+        envIntersection: ['HOME', 'TMPDIR'],
+      },
+    );
+
+    const comparison = compareRecipeManifests(changed, base);
+    assert.equal(comparison.matches, false);
+    assert.ok(comparison.diffs.some((diff) => diff.includes('envIntersection')));
+  });
+
   it('allows bounded enum input reuse within approved envelope', () => {
     const recipe = makeRecipe({
       inputs: {
@@ -597,6 +658,101 @@ describe('Recipe: Manifest Semantics', () => {
     const comparison = compareRecipeManifests(changed, base);
     assert.equal(comparison.matches, false);
     assert.ok(comparison.diffs.some(d => d.includes('outside approved envelope')));
+  });
+
+  it('allows bounded list input reuse within approved envelope', () => {
+    const recipe = makeRecipe({
+      inputs: {
+        test_files: {
+          type: 'string',
+          approval_mode: 'list',
+          max_items: 4,
+          item_validator: {
+            type: 'string',
+            approval_mode: 'path_policy',
+            rules: {
+              must_be_relative: true,
+              allowed_roots: ['tests/'],
+              deny_segments: ['..'],
+              allowed_extensions: ['.js'],
+              max_depth: 4,
+            },
+          },
+          description: 'Relative test files',
+        },
+      },
+      steps: [
+        { id: 'step-1', description: 'Run tests', run: { command: 'node', args: ['--test', '{{inputs.test_files}}'], mode: 'structured' } },
+      ],
+    });
+
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { test_files: ['tests/a.test.js'] },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { test_files: ['tests/b.test.js', 'tests/c.test.js'] },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const comparison = compareRecipeManifests(changed, base);
+    assert.equal(comparison.matches, true);
+    assert.equal(comparison.diffs.length, 0);
+  });
+
+  it('rejects bounded list input reuse outside approved envelope with explicit diff', () => {
+    const recipe = makeRecipe({
+      inputs: {
+        test_files: {
+          type: 'string',
+          approval_mode: 'list',
+          max_items: 2,
+          item_validator: {
+            type: 'string',
+            approval_mode: 'path_policy',
+            rules: {
+              must_be_relative: true,
+              allowed_roots: ['tests/'],
+              deny_segments: ['..'],
+              allowed_extensions: ['.js'],
+              max_depth: 4,
+            },
+          },
+          description: 'Relative test files',
+        },
+      },
+      steps: [
+        { id: 'step-1', description: 'Run tests', run: { command: 'node', args: ['--test', '{{inputs.test_files}}'], mode: 'structured' } },
+      ],
+    });
+
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { test_files: ['tests/a.test.js'] },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { test_files: ['src/not-allowed.js'] },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const comparison = compareRecipeManifests(changed, base);
+    assert.equal(comparison.matches, false);
+    assert.ok(comparison.diffs.some(d => d.includes('outside approved envelope')));
+    assert.ok(comparison.diffs.some(d => d.includes('test_files')));
   });
 
   it('keeps old manifests without envelope metadata at exact-input semantics', () => {

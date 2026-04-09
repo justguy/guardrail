@@ -12,7 +12,7 @@ import { verifyAuditChain, queryAuditLog } from '../src/audit.js';
 import { createContract, hashContract } from '../src/contract.js';
 import { createManifest, saveManifest } from '../src/manifest.js';
 import { evaluateRisk, evaluateWorkflowRisk } from '../src/policy-engine.js';
-import { createRecipeManifest, hashRecipe } from '../src/recipe.js';
+import { createRecipeManifest, hashRecipe, computeRecipeEnvIntersection } from '../src/recipe.js';
 import { signRecipe } from '../src/recipe-channel.js';
 import { normalizeWorkflowDefinition, hashWorkflow, createWorkflowManifest } from '../src/workflow.js';
 import {
@@ -22,6 +22,17 @@ import {
   hashTemplateExecution,
   validateUserInputs,
 } from '../src/template.js';
+import {
+  normalizeToAdapterResult,
+  validateAdapterResult,
+} from '../src/adapter-engine.js';
+import { ADAPTER_REASON_CODES } from '../src/adapter-result.js';
+import {
+  buildSessionContract,
+  saveSessionContract,
+  loadSessionContract,
+  defaultSessionContractPath,
+} from '../src/agent-session.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -136,6 +147,7 @@ function writeRecipeFile(dir, recipe, filename = `${recipe.id}.recipe.json`) {
 }
 
 function createApprovedRecipeManifest(recipe, cwd, manifestPath, sourcePath, options = {}) {
+  const envResult = computeRecipeEnvIntersection(recipe.requires_env || [], options.envAllow || []);
   const manifest = createRecipeManifest(
     recipe,
     hashRecipe(recipe),
@@ -152,6 +164,7 @@ function createApprovedRecipeManifest(recipe, cwd, manifestPath, sourcePath, opt
       sourcePath,
       requestedVersion: options.requestedVersion ?? null,
       allowUnverified: options.allowUnverified ?? false,
+      envIntersection: envResult.intersection,
     },
   );
 
@@ -808,6 +821,62 @@ describe('Integration: Template Supervisor Runtime Policy', () => {
     assert.equal(result.status, 'success');
   });
 
+  it('reuses approved template non-interactively when list input changes within bounded envelope', async () => {
+    const dir = tmpDir();
+    const templatePath = join(dir, 'run-tests.template.json');
+    const templateDef = {
+      version: 1,
+      kind: 'template',
+      name: 'run-tests',
+      description: 'Run bounded test files',
+      trust_class: 'reviewed_internal',
+      risk: 'green',
+      inputs: {
+        test_files: {
+          type: 'string',
+          approval_mode: 'list',
+          max_items: 4,
+          item_validator: {
+            type: 'string',
+            approval_mode: 'path_policy',
+            rules: {
+              must_be_relative: true,
+              allowed_roots: ['tests/'],
+              deny_segments: ['..'],
+              allowed_extensions: ['.js'],
+              max_depth: 4,
+            },
+          },
+        },
+      },
+      run: {
+        command: 'echo',
+        args: ['{{inputs.test_files}}'],
+        mode: 'structured',
+        env: {},
+      },
+      idempotent: true,
+    };
+    writeFileSync(templatePath, JSON.stringify(templateDef, null, 2));
+    const manifestPath = join(dir, '.guardrail', 'templates', 'run-tests.approved.json');
+    mkdirSync(join(dir, '.guardrail', 'templates'), { recursive: true });
+
+    createApprovedTemplateManifest(templateDef, {
+      manifestPath,
+      inputValues: { test_files: ['tests/a.test.js'] },
+    });
+
+    const result = await runTemplateSupervisor({
+      templatePath,
+      inputs: { test_files: ['tests/b.test.js', 'tests/c.test.js'] },
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'success');
+  });
+
   it('detects template drift when candidate input leaves approved bounded envelope', async () => {
     const dir = tmpDir();
     const tmplPath = join(dir, 'tmpl.json');
@@ -1068,6 +1137,58 @@ describe('Integration: Recipe Supervisor Runtime Policy', () => {
     assert.equal(result.status, 'success');
   });
 
+  it('reuses approved recipe non-interactively when list input changes within bounded envelope', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    const recipe = makeRecipe({
+      inputs: {
+        test_files: {
+          type: 'string',
+          approval_mode: 'list',
+          max_items: 4,
+          item_validator: {
+            type: 'string',
+            approval_mode: 'path_policy',
+            rules: {
+              must_be_relative: true,
+              allowed_roots: ['tests/'],
+              deny_segments: ['..'],
+              allowed_extensions: ['.js'],
+              max_depth: 4,
+            },
+          },
+        },
+      },
+      steps: [
+        {
+          id: 'step-1',
+          description: 'echo tests',
+          run: { command: 'echo', args: ['{{inputs.test_files}}'], mode: 'structured', timeoutMs: 5000 },
+        },
+      ],
+    });
+    const sourcePath = writeRecipeFile(recipesDir, recipe);
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+
+    createApprovedRecipeManifest(recipe, dir, manifestPath, sourcePath, {
+      resolvedInputs: { test_files: ['tests/a.test.js'] },
+    });
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { test_files: ['tests/b.test.js', 'tests/c.test.js'] },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'success');
+  });
+
   it('detects recipe drift when candidate input leaves approved bounded envelope', async () => {
     const dir = tmpDir();
     const recipesDir = join(dir, 'recipes');
@@ -1239,6 +1360,7 @@ describe('Integration: Recipe Supervisor Runtime Policy', () => {
       },
       cwd: dir,
       searchDirs: [join(process.cwd(), 'recipes')],
+      envAllow: ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'TERM_PROGRAM', 'LANG', 'TMPDIR', 'PWD', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR'],
       nonInteractive: true,
       jsonOutput: true,
       trustClass: 'reviewed_internal',
@@ -1247,6 +1369,88 @@ describe('Integration: Recipe Supervisor Runtime Policy', () => {
     assert.equal(result.status, 'approval_required');
     assert.equal(result.riskLevel, 'yellow');
     assert.ok(result.riskReasons.some((reason) => reason.includes('does not sandbox host execution')));
+  });
+
+  it('requires explicit env allow-list when a recipe declares requires_env', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+
+    const recipe = makeRecipe({
+      requires_env: ['BOUND_TOKEN'],
+      steps: [
+        {
+          id: 'step-1',
+          description: 'echo target',
+          run: { command: 'echo', args: ['{{inputs.target}}'], mode: 'structured', timeoutMs: 5000 },
+        },
+      ],
+    });
+    writeRecipeFile(recipesDir, recipe);
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { target: 'hello' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'policy_violation');
+    assert.match(result.reason || '', /explicit --env-allow/);
+    assert.match(result.reason || '', /BOUND_TOKEN/);
+  });
+
+  it('passes explicitly allowed env vars through recipe execution', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+
+    const original = process.env.GUARDRAIL_RECIPE_ENV_TEST;
+    process.env.GUARDRAIL_RECIPE_ENV_TEST = 'present';
+
+    try {
+      const recipe = makeRecipe({
+        requires_env: ['GUARDRAIL_RECIPE_ENV_TEST'],
+        steps: [
+          {
+            id: 'step-1',
+            description: 'verify env passthrough',
+            run: {
+              command: 'node',
+              args: ['-e', 'process.exit(process.env.GUARDRAIL_RECIPE_ENV_TEST === "present" ? 0 : 7)'],
+              mode: 'structured',
+              timeoutMs: 5000,
+            },
+          },
+        ],
+      });
+
+      const sourcePath = writeRecipeFile(recipesDir, recipe);
+      const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+      mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+      createApprovedRecipeManifest(recipe, dir, manifestPath, sourcePath, {
+        resolvedInputs: { target: 'hello' },
+        envAllow: ['GUARDRAIL_RECIPE_ENV_TEST'],
+      });
+
+      const result = await runRecipeSupervisor({
+        specifier: recipe.id,
+        inputs: { target: 'hello' },
+        cwd: dir,
+        searchDirs: [recipesDir],
+        manifestPath,
+        envAllow: ['GUARDRAIL_RECIPE_ENV_TEST'],
+        nonInteractive: true,
+        jsonOutput: true,
+      });
+
+      assert.equal(result.status, 'success');
+    } finally {
+      if (original === undefined) delete process.env.GUARDRAIL_RECIPE_ENV_TEST;
+      else process.env.GUARDRAIL_RECIPE_ENV_TEST = original;
+    }
   });
 
   it('emits stable recipe progress events for JSON-stream', async () => {
@@ -1373,5 +1577,275 @@ describe('Integration: Runtime Policy Exit Codes', () => {
 
   it('audit_chain_broken exit code is 22', () => {
     assert.equal(STATUS_EXIT_CODES.audit_chain_broken, 22);
+  });
+});
+
+// ===========================================================================
+// Cross-track integration: A0 adapter-result + A0g session contracts
+// ===========================================================================
+
+describe('Integration: Adapter normalization parity with command supervisor', () => {
+  it('normalizes a real successful command supervisor result into a valid adapter-result/v1', async () => {
+    const dir = tmpDir();
+    const manifestDir = join(dir, '.guardrail');
+    mkdirSync(manifestDir, { recursive: true });
+    const manifestPath = join(manifestDir, 'approved.json');
+
+    createApprovedCommandManifest('echo', ['hello'], dir, manifestPath);
+
+    const supervisorResult = await runSupervisor({
+      command: 'echo',
+      args: ['hello'],
+      cwd: dir,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(supervisorResult.status, 'success');
+
+    const adapterResult = normalizeToAdapterResult(supervisorResult);
+    const shape = validateAdapterResult(adapterResult);
+    assert.equal(shape.valid, true, shape.errors?.join('; '));
+    assert.equal(adapterResult.schemaVersion, 'adapter-result/v1');
+    assert.equal(adapterResult.guardrail.category, 'success');
+    assert.equal(adapterResult.guardrail.code, ADAPTER_REASON_CODES.OK);
+    assert.equal(adapterResult.guardrail.driftDetected, false);
+  });
+
+  it('normalizes a drift-detected supervisor result into a DRIFT_DETECTED adapter-result', async () => {
+    const dir = tmpDir();
+    const manifestDir = join(dir, '.guardrail');
+    mkdirSync(manifestDir, { recursive: true });
+    const manifestPath = join(manifestDir, 'approved.json');
+
+    // Approve 'echo hello', then run 'echo goodbye' in non-interactive mode to force drift.
+    createApprovedCommandManifest('echo', ['hello'], dir, manifestPath);
+
+    const supervisorResult = await runSupervisor({
+      command: 'echo',
+      args: ['goodbye'],
+      cwd: dir,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(supervisorResult.status, 'drift_detected');
+
+    const adapterResult = normalizeToAdapterResult(supervisorResult);
+    const shape = validateAdapterResult(adapterResult);
+    assert.equal(shape.valid, true, shape.errors?.join('; '));
+    assert.equal(adapterResult.guardrail.category, 'blocked');
+    assert.equal(adapterResult.guardrail.code, ADAPTER_REASON_CODES.DRIFT_DETECTED);
+    assert.equal(adapterResult.guardrail.driftDetected, true);
+  });
+});
+
+describe('Integration: Recipe supervisor enforces session contracts alongside runtime policy', () => {
+  // Mirrors recipe-supervisor.HOST_BOUNDARY_WARNING verbatim. When the
+  // supervisor's warning text changes, both this literal and the supervisor
+  // must move together in the same commit.
+  const SESSION_HOST_BOUNDARY_WARNING =
+    'Guardrail does not sandbox host execution; this wrapper relies on the tool/runtime permission model';
+
+  function makeClaudeExecStubRecipe() {
+    const recipe = {
+      id: 'claude-exec',
+      name: 'Claude Exec Integration Stub',
+      description: 'integration stub matching the claude-exec recipe id to exercise session enforcement',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'verified',
+      inputs: {
+        working_dir: {
+          type: 'string',
+          approval_mode: 'path_policy',
+          rules: { must_be_relative: true, deny_segments: ['..'], max_depth: 12 },
+        },
+        lifecycle: { type: 'string', enum: ['start', 'continue', 'attach'], default: 'start' },
+      },
+      steps: [
+        {
+          id: 'stub',
+          description: 'stub step — never executed in this test',
+          run: { command: 'echo', args: ['stub'], mode: 'structured', timeoutMs: 5000 },
+        },
+      ],
+      guardrails: { constraints: ['structured'], invariants: ['no shell'] },
+      approval_required: false,
+      risk_level: 'low',
+    };
+    recipe.signature = signRecipe(recipe);
+    return recipe;
+  }
+
+  function seedClaudeExecApprovedManifest(recipe, dir, manifestPath, sourcePath, resolvedInputs) {
+    const manifest = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      {
+        trustClass: 'pinned_external',
+        riskLevel: 'yellow',
+        reasons: ['recipe declares low risk', SESSION_HOST_BOUNDARY_WARNING],
+        requiresStrongConfirmation: false,
+      },
+      resolvedInputs,
+      {
+        cwd: resolve(dir),
+        projectRoot: resolve(dir),
+        sourcePath,
+      },
+    );
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    saveManifest(manifest, manifestPath);
+    return manifest;
+  }
+
+  it('fails closed on lifecycle=continue when no session contract exists, without invoking the executor', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+
+    const recipe = makeClaudeExecStubRecipe();
+    writeRecipeFile(recipesDir, recipe);
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+    seedClaudeExecApprovedManifest(
+      recipe,
+      dir,
+      manifestPath,
+      join(recipesDir, `${recipe.id}.recipe.json`),
+      { working_dir: '.', lifecycle: 'continue' },
+    );
+
+    let executorCallCount = 0;
+    const stubExecutor = async () => {
+      executorCallCount += 1;
+      return { status: 'success', stepsExecuted: 1 };
+    };
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { working_dir: '.', lifecycle: 'continue' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      executorFn: stubExecutor,
+    });
+
+    assert.equal(executorCallCount, 0, 'executor must not run when session contract is missing');
+    assert.equal(result.status, 'policy_violation');
+    assert.match(result.reason || '', /session_missing/);
+  });
+
+  it('persists a session contract on successful lifecycle=start and enforces drift on later mismatched continue', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+
+    const recipe = makeClaudeExecStubRecipe();
+    const sourcePath = writeRecipeFile(recipesDir, recipe);
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+
+    // First run: lifecycle=start must succeed and persist a session contract.
+    seedClaudeExecApprovedManifest(
+      recipe,
+      dir,
+      manifestPath,
+      sourcePath,
+      { working_dir: '.', lifecycle: 'start' },
+    );
+
+    let startExecCount = 0;
+    const startResult = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { working_dir: '.', lifecycle: 'start' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      executorFn: async () => {
+        startExecCount += 1;
+        return { status: 'success', stepsExecuted: 1 };
+      },
+    });
+
+    assert.equal(startResult.status, 'success', `expected success, got: ${startResult.status} reason=${startResult.reason}`);
+    assert.equal(startExecCount, 1);
+
+    const stateDir = join(dir, '.guardrail');
+    const contractPath = defaultSessionContractPath(stateDir, recipe.id, null);
+    const persisted = loadSessionContract(contractPath);
+    assert.ok(persisted !== null, 'session contract file must be persisted after successful start');
+    assert.equal(persisted.recipeId, 'claude-exec');
+    assert.equal(persisted.lifecycle, 'start');
+
+    // Second run: lifecycle=continue with a different working dir must fail closed via session_drift.
+    const driftDir = join(dir, 'other');
+    mkdirSync(driftDir, { recursive: true });
+    seedClaudeExecApprovedManifest(
+      recipe,
+      dir,
+      manifestPath,
+      sourcePath,
+      { working_dir: 'other', lifecycle: 'continue' },
+    );
+
+    let driftExecCount = 0;
+    const driftResult = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { working_dir: 'other', lifecycle: 'continue' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      executorFn: async () => {
+        driftExecCount += 1;
+        return { status: 'success', stepsExecuted: 1 };
+      },
+    });
+
+    assert.equal(driftExecCount, 0, 'executor must not run when session contract drifts');
+    assert.equal(driftResult.status, 'policy_violation');
+    assert.match(driftResult.reason || '', /session_drift/);
+  });
+
+  it('session contract helper round-trips canonically through atomic save and load', () => {
+    const dir = tmpDir();
+    const stateDir = join(dir, '.guardrail');
+    mkdirSync(stateDir, { recursive: true });
+
+    const contract = buildSessionContract({
+      tool: 'claude',
+      recipeId: 'claude-exec',
+      recipeVersion: '1.0.0',
+      workingDir: resolve(dir),
+      addDirs: [resolve(dir, 'docs'), resolve(dir, 'src')],
+      sessionName: 'roundtrip-session',
+      sessionId: null,
+      lifecycle: 'start',
+    });
+
+    const path = defaultSessionContractPath(stateDir, 'claude-exec', 'roundtrip-session');
+    saveSessionContract(contract, path);
+
+    const loaded = loadSessionContract(path);
+    assert.ok(loaded !== null);
+    assert.equal(loaded.contractHash, contract.contractHash);
+    assert.equal(loaded.sessionName, 'roundtrip-session');
+    assert.deepEqual(
+      loaded.scope.addDirs,
+      [resolve(dir, 'docs'), resolve(dir, 'src')].sort(),
+    );
   });
 });

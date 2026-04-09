@@ -144,6 +144,75 @@ export function dryRun(recipe, resolvedInputs, opts = {}) {
   };
 }
 
+function buildRecipeEnvPolicy(recipe, envAllow = []) {
+  const requiredEnv = recipe.requires_env || [];
+  if (requiredEnv.length === 0 && (!Array.isArray(envAllow) || envAllow.length === 0)) {
+    return undefined;
+  }
+
+  const allow = [...new Set(['PATH', ...(envAllow || [])])];
+  return {
+    inherit: false,
+    allow,
+    inject: {},
+  };
+}
+
+function buildStructuredRecipeStepContract(recipe, step, resolvedInputs, cwd, envAllow = []) {
+  const args = interpolateRecipeArgs(step.run?.args || [], resolvedInputs);
+  const command = step.run?.command || '';
+
+  return createContract({
+    command,
+    args,
+    cwd,
+    mode: 'structured',
+    envPolicy: buildRecipeEnvPolicy(recipe, envAllow),
+  });
+}
+
+function buildComposedTransportContract(parentRecipe, step, resolvedInputs, preparedComposition, cwd) {
+  const transportArgs = interpolateRecipeArgs(step.run?.args || [], resolvedInputs);
+  const childStep = preparedComposition.recipe.steps?.[0];
+
+  if (!childStep?.run || preparedComposition.recipe.steps.length !== 1) {
+    throw new Error(
+      `Composed exec recipe "${preparedComposition.recipe.id}" must have exactly one structured run step.`,
+    );
+  }
+
+  const childContract = buildStructuredRecipeStepContract(
+    preparedComposition.recipe,
+    childStep,
+    preparedComposition.resolvedInputs,
+    cwd,
+    preparedComposition.envIntersection,
+  );
+
+  const encodedChildContract = Buffer.from(JSON.stringify({
+    recipeId: preparedComposition.recipe.id,
+    recipeVersion: preparedComposition.version,
+    stepId: childStep.id,
+    command: childContract.command,
+    args: childContract.args,
+    cwd: childContract.cwd,
+    envPolicy: childContract.envPolicy,
+  }), 'utf8').toString('base64');
+
+  const transportContract = createContract({
+    command: step.run?.command || '',
+    args: [...transportArgs, '--exec-contract-b64', encodedChildContract],
+    cwd,
+    mode: 'structured',
+    envPolicy: buildRecipeEnvPolicy(parentRecipe, []),
+  });
+
+  return {
+    childContract,
+    transportContract,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Execute recipe
 // ---------------------------------------------------------------------------
@@ -190,8 +259,14 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
   let stepsExecuted = 0;
 
   for (const step of (recipe.steps || [])) {
-    const args = interpolateRecipeArgs(step.run?.args || [], resolvedInputs);
-    const command = step.run?.command || '';
+    const preparedComposition = opts.composedSteps?.[step.id] ?? null;
+    const composedContracts = preparedComposition
+      ? buildComposedTransportContract(recipe, step, resolvedInputs, preparedComposition, cwd)
+      : null;
+    const contract = composedContracts?.transportContract
+      ?? buildStructuredRecipeStepContract(recipe, step, resolvedInputs, cwd, opts.envAllow);
+    const command = contract.command;
+    const args = contract.args || [];
 
     // Runtime guardrail: dangerous command check
     const dangerCheck = checkDangerous(command, args);
@@ -217,9 +292,44 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
       };
     }
 
-    // Execute step
-    const contract = createContract({ command, args, cwd, mode: 'structured' });
+    if (composedContracts?.childContract) {
+      const childDangerCheck = checkDangerous(
+        composedContracts.childContract.command,
+        composedContracts.childContract.args || [],
+      );
+      if (!childDangerCheck.safe) {
+        auditLog.append({
+          event: 'step_blocked',
+          ...auditContext,
+          step_id: step.id,
+          reason: `composed exec blocked: ${childDangerCheck.reason}`,
+        });
+        return {
+          status: 'blocked',
+          reason: `Step "${step.id}" blocked: composed exec ${childDangerCheck.reason}`,
+          stepsExecuted,
+          results,
+        };
+      }
 
+      const childScopeCheck = checkScope(composedContracts.childContract.args || [], opts.allowedPaths);
+      if (!childScopeCheck.inScope) {
+        auditLog.append({
+          event: 'step_blocked',
+          ...auditContext,
+          step_id: step.id,
+          reason: childScopeCheck.violations.join('; '),
+        });
+        return {
+          status: 'blocked',
+          reason: `Step "${step.id}" blocked: composed exec ${childScopeCheck.violations.join('; ')}`,
+          stepsExecuted,
+          results,
+        };
+      }
+    }
+
+    // Execute step
     let workerResult;
     try {
       workerResult = await launchWorker(contract, { timeoutMs: step.run?.timeoutMs || 60000, validatorMode: 'exit_code' });
@@ -281,10 +391,19 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
 
 function interpolateRecipeArgs(argsTemplate, values) {
   if (!Array.isArray(argsTemplate)) return [];
-  return argsTemplate.map(arg =>
-    arg.replace(/\{\{inputs\.([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g, (_, key) => {
-      const v = values[key];
-      return v !== undefined ? String(v) : '';
-    }),
-  );
+  return argsTemplate.flatMap((arg) => {
+    const exact = /^\{\{inputs\.([a-zA-Z_][a-zA-Z0-9_]*)\}\}$/.exec(arg);
+    if (exact) {
+      const value = values[exact[1]];
+      if (Array.isArray(value)) {
+        return value.map((entry) => String(entry));
+      }
+    }
+    return [
+      arg.replace(/\{\{inputs\.([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g, (_, key) => {
+        const v = values[key];
+        return v !== undefined ? String(v) : '';
+      }),
+    ];
+  });
 }

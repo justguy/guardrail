@@ -342,6 +342,14 @@ The bundled `codex-exec` and `claude-exec` recipes are Guardrail-managed wrapper
 - `input_files` arrays for prompt-bearing file content
 - working-directory control plus additional tool-access directories
 - model/provider/profile/effort/tool/budget flags supported by the underlying CLI
+- bounded agent session contracts via `lifecycle` (`start` / `continue` / `attach`), `session_name`, and `session_id`
+
+Agent session contracts:
+
+- Pass `--input lifecycle=start` for a fresh named session, `continue` to reuse an existing bounded session, or `attach` to explicitly join a previously named session.
+- Guardrail persists each session contract at `<projectRoot>/.guardrail/agent-sessions/<recipeId>/<slot>.json` and binds it to tool, working directory, scope, wrapper version, and session name/id. Any identity change fails closed with a machine-readable reason (`session_missing`, `session_drift`, `session_attach_mismatch`, `session_already_exists`).
+- Session contracts do NOT weaken prompt reapproval. Inline `prompt` and `system_prompt` keep their `review_each_time` semantics even when a matching session contract exists.
+- Guardrail never reads `~/.claude/*` or `~/.codex/*`. Session IDs, if any, come from the caller via `--input session_id=...`, not from scraping the external CLI.
 
 Important prompt-handling rules:
 

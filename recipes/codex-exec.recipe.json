@@ -165,6 +165,25 @@
       "description": "Use Codex full-auto mode. Leave sandbox empty when enabled.",
       "default": false,
       "required": false
+    },
+    "lifecycle": {
+      "type": "string",
+      "description": "Session lifecycle intent: start a fresh named session, continue an existing one, or attach to a previously named session. Defaults to 'start'.",
+      "enum": ["start", "continue", "attach"],
+      "default": "start",
+      "required": false
+    },
+    "session_name": {
+      "type": "string",
+      "description": "Display name and session slot identifier for the Guardrail session contract bound to this run.",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+      "required": false
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Machine-readable session identifier. Optional for 'start'; required for 'continue' and 'attach' when the approved session contract already has one.",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "required": false
     }
   },
   "steps": [
@@ -191,7 +210,10 @@
           "--local-provider", "{{inputs.local_provider}}",
           "--skip-git-repo-check", "{{inputs.skip_git_repo_check}}",
           "--ephemeral", "{{inputs.ephemeral}}",
-          "--full-auto", "{{inputs.full_auto}}"
+          "--full-auto", "{{inputs.full_auto}}",
+          "--lifecycle", "{{inputs.lifecycle}}",
+          "--session-name", "{{inputs.session_name}}",
+          "--session-id", "{{inputs.session_id}}"
         ],
         "mode": "structured"
       },

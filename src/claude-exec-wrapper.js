@@ -55,6 +55,8 @@ export function parseWrapperArgs(argv) {
     addDirs: '',
     sessionName: '',
     noSessionPersistence: '',
+    lifecycle: '',
+    sessionId: '',
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -113,6 +115,14 @@ export function parseWrapperArgs(argv) {
         options.noSessionPersistence = value;
         i += 1;
         break;
+      case '--lifecycle':
+        options.lifecycle = value;
+        i += 1;
+        break;
+      case '--session-id':
+        options.sessionId = value;
+        i += 1;
+        break;
       default:
         break;
     }
@@ -168,7 +178,26 @@ function normalizeOptions(rawOptions) {
     addDirs: splitCsv(rawOptions.addDirs).map((dir) => resolveFrom(baseDir, dir)),
     sessionName: rawOptions.sessionName || '',
     noSessionPersistence: truthy(rawOptions.noSessionPersistence),
+    lifecycle: rawOptions.lifecycle || '',
+    sessionId: rawOptions.sessionId || '',
     baseDir,
+  };
+}
+
+/**
+ * Build a structured session metadata record for audit/test consumption.
+ *
+ * This is Guardrail-side metadata and is NEVER passed to the Claude CLI.
+ * `lifecycle` and `sessionId` originate from the recipe inputs and are
+ * consumed by the recipe-supervisor's agent-session enforcement path.
+ */
+export function emitSessionMetadata({ lifecycle, sessionName, sessionId, workingDir }) {
+  return {
+    tool: 'claude',
+    lifecycle: lifecycle || null,
+    sessionName: sessionName || null,
+    sessionId: sessionId || null,
+    workingDir: workingDir || null,
   };
 }
 
@@ -183,6 +212,17 @@ export async function runClaudeExec(rawOptions) {
     ...options,
     promptPayload,
   });
+
+  // Emit structured session metadata to stderr so tests and audit logs can
+  // observe it without corrupting the Claude child's stdout passthrough.
+  // Guardrail-only fields (lifecycle, sessionId) live here, not in argv.
+  const sessionMeta = emitSessionMetadata({
+    lifecycle: options.lifecycle,
+    sessionName: options.sessionName,
+    sessionId: options.sessionId,
+    workingDir: options.workingDir || process.cwd(),
+  });
+  process.stderr.write(`[guardrail-session] ${JSON.stringify(sessionMeta)}\n`);
 
   await new Promise((resolvePromise, rejectPromise) => {
     const child = spawn('claude', args, {

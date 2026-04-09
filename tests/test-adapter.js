@@ -752,3 +752,297 @@ describe('adapter-stdin entrypoint', () => {
     assert.ok(!result.stdout.includes('intercept.command did not resolve'));
   });
 });
+
+// ---------------------------------------------------------------------------
+// adapter-result/v1 — reason-code surface + paranoia validator
+// ---------------------------------------------------------------------------
+
+describe('adapter-result/v1 reason codes', async () => {
+  const { ADAPTER_REASON_CODES, validateAdapterResult } = await import('../src/adapter-engine.js');
+
+  it('exports every code required by the track-4 surface', () => {
+    const required = [
+      'OK',
+      'APPROVAL_REQUIRED', 'APPROVAL_DENIED', 'DRIFT_DETECTED',
+      'POLICY_VIOLATION', 'TIME_POLICY_VIOLATED', 'CONCURRENT_BLOCKED',
+      'UNSUPPORTED', 'UPDATE_DENIED', 'MCP_BLOCKED',
+      'MISSING_AUTH_MAPPING', 'MISSING_AUTH_PREREQUISITE',
+      'VALIDATION_FAILED', 'TIMEOUT', 'PROTOCOL_ERROR', 'INTERNAL_ERROR',
+      'PROFILE_INVALID', 'PROFILE_NOT_FOUND', 'COMMAND_UNRESOLVED',
+      'INTERCEPT_INVALID', 'SUPERVISOR_THREW',
+    ];
+    for (const key of required) {
+      assert.equal(ADAPTER_REASON_CODES[key], key, `missing code ${key}`);
+    }
+  });
+
+  it('validateAdapterResult rejects missing code field', () => {
+    const bad = {
+      schemaVersion: 'adapter-result/v1',
+      guardrail: {
+        nativeStatus: 'success', category: 'success', reason: 'ok', exitCode: 0,
+        driftDetected: false, driftSummary: [], riskReasons: [],
+      },
+      process: { launched: true, stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false },
+      telemetry: { runId: 'x', durationMs: 0 },
+    };
+    const r = validateAdapterResult(bad);
+    assert.equal(r.valid, false);
+    assert.ok(r.errors.some((e) => e.includes('guardrail.code')));
+  });
+
+  it('validateAdapterResult rejects unknown code value', () => {
+    const bad = {
+      schemaVersion: 'adapter-result/v1',
+      guardrail: {
+        nativeStatus: 'success', category: 'success', reason: 'ok', code: 'BOGUS_CODE', exitCode: 0,
+        driftDetected: false, driftSummary: [], riskReasons: [],
+      },
+      process: { launched: true, stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false },
+      telemetry: { runId: 'x', durationMs: 0 },
+    };
+    const r = validateAdapterResult(bad);
+    assert.equal(r.valid, false);
+    assert.ok(r.errors.some((e) => e.includes('code')));
+  });
+
+  it('validateAdapterResult accepts a well-formed success result', () => {
+    const good = normalizeToAdapterResult({
+      runId: 'gr-ok',
+      status: 'success',
+      reason: 'ok',
+      exitCode: 0,
+      worker: { launched: true, stdout: 'hi', stderr: '', exitCode: 0, stdoutTruncated: false, stderrTruncated: false },
+      telemetry: { durationMs: 5 },
+    });
+    const r = validateAdapterResult(good);
+    assert.equal(r.valid, true);
+    assert.equal(good.guardrail.code, 'OK');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Supervisor→adapter parity: every terminal status collapses to the right code
+// ---------------------------------------------------------------------------
+
+describe('adapter-result parity with supervisor statuses', async () => {
+  const { ADAPTER_REASON_CODES, validateAdapterResult } = await import('../src/adapter-engine.js');
+
+  function makeSupervisorResult(overrides = {}) {
+    return {
+      runId: 'gr-parity',
+      status: 'success',
+      reason: '',
+      exitCode: 0,
+      contractHash: 'sha256-parity',
+      manifestPath: '/tmp/m.json',
+      riskLevel: 'green',
+      riskReasons: [],
+      drift: { detected: false, diffs: [] },
+      worker: {
+        launched: true, exitCode: 0, timedOut: false,
+        interactivePromptDetected: false,
+        stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false,
+      },
+      telemetry: { durationMs: 1 },
+      ...overrides,
+    };
+  }
+
+  const cases = [
+    { status: 'success', category: 'success', code: 'OK' },
+    { status: 'approval_required', category: 'blocked', code: 'APPROVAL_REQUIRED' },
+    { status: 'approval_denied', category: 'blocked', code: 'APPROVAL_DENIED' },
+    { status: 'policy_violation', category: 'blocked', code: 'POLICY_VIOLATION' },
+    { status: 'time_policy_violated', category: 'blocked', code: 'TIME_POLICY_VIOLATED' },
+    { status: 'concurrent_blocked', category: 'blocked', code: 'CONCURRENT_BLOCKED' },
+    { status: 'unsupported', category: 'blocked', code: 'UNSUPPORTED' },
+    { status: 'update_denied', category: 'blocked', code: 'UPDATE_DENIED' },
+    { status: 'validation_failed', category: 'failed', code: 'VALIDATION_FAILED' },
+    { status: 'timeout', category: 'failed', code: 'TIMEOUT' },
+    { status: 'protocol_error', category: 'failed', code: 'PROTOCOL_ERROR' },
+    { status: 'internal_error', category: 'failed', code: 'INTERNAL_ERROR' },
+  ];
+
+  for (const c of cases) {
+    it(`${c.status} -> category=${c.category}, code=${c.code}`, () => {
+      const sr = makeSupervisorResult({ status: c.status, reason: `${c.status} happened` });
+      const out = normalizeToAdapterResult(sr);
+      assert.equal(out.guardrail.category, c.category);
+      assert.equal(out.guardrail.code, ADAPTER_REASON_CODES[c.code]);
+      assert.ok(out.guardrail.reason.length > 0);
+      assert.equal(out.guardrail.driftDetected, false);
+      assert.deepEqual(out.guardrail.driftSummary, []);
+      const v = validateAdapterResult(out);
+      assert.equal(v.valid, true, v.errors.join('; '));
+    });
+  }
+
+  it('drift_detected -> code=DRIFT_DETECTED and driftSummary mirrors diffs', () => {
+    const sr = makeSupervisorResult({
+      status: 'drift_detected',
+      reason: 'contract drift detected in non-interactive mode',
+      drift: {
+        detected: true,
+        diffs: [
+          { description: '~ args[0]: "foo" -> "bar"' },
+          { description: '+ env.BAZ' },
+        ],
+      },
+    });
+    const out = normalizeToAdapterResult(sr);
+    assert.equal(out.guardrail.category, 'blocked');
+    assert.equal(out.guardrail.code, ADAPTER_REASON_CODES.DRIFT_DETECTED);
+    assert.equal(out.guardrail.driftDetected, true);
+    assert.deepEqual(out.guardrail.driftSummary, [
+      '~ args[0]: "foo" -> "bar"',
+      '+ env.BAZ',
+    ]);
+    const v = validateAdapterResult(out);
+    assert.equal(v.valid, true, v.errors.join('; '));
+  });
+
+  it('applies 64 KiB safety-net clip on adapter boundary when worker leaks oversized output', () => {
+    const big = 'A'.repeat(128 * 1024);
+    const sr = makeSupervisorResult({
+      status: 'success',
+      reason: 'ok',
+      worker: {
+        launched: true, exitCode: 0, timedOut: false,
+        interactivePromptDetected: false,
+        stdout: big, stderr: '', stdoutTruncated: false, stderrTruncated: false,
+      },
+    });
+    const out = normalizeToAdapterResult(sr);
+    assert.ok(Buffer.byteLength(out.process.stdout, 'utf8') <= 64 * 1024);
+    assert.equal(out.process.stdoutTruncated, true);
+  });
+
+  it('preserves upstream truncation flag when worker already clipped', () => {
+    const sr = makeSupervisorResult({
+      status: 'success',
+      worker: {
+        launched: true, exitCode: 0, timedOut: false,
+        interactivePromptDetected: false,
+        stdout: 'already clipped', stderr: '', stdoutTruncated: true, stderrTruncated: false,
+      },
+    });
+    const out = normalizeToAdapterResult(sr);
+    assert.equal(out.process.stdout, 'already clipped');
+    assert.equal(out.process.stdoutTruncated, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MCP gate parity: structured block, not an exit-1
+// ---------------------------------------------------------------------------
+
+describe('MCP gate parity between runAdapter and CLI', async () => {
+  const { ADAPTER_REASON_CODES } = await import('../src/adapter-engine.js');
+
+  it('runAdapter returns a structured MCP_BLOCKED result for mcp profiles', async () => {
+    const dir = makeTempDir();
+    const profilePath = writeProfile(dir, makeJsonProfile({
+      tool: 'mcp-blocked',
+      protocol: 'mcp',
+      response: {
+        format: 'json',
+        success: { status: 'success' },
+        blocked: { status: 'blocked', reason: '$.guardrail.reason' },
+        failed: { status: 'failed' },
+      },
+    }));
+
+    let supervisorCalled = false;
+    const result = await runAdapter({
+      profilePath,
+      rawInput: { command: 'echo', args: ['hello'] },
+      supervisorFn: async () => {
+        supervisorCalled = true;
+        return {};
+      },
+    });
+
+    assert.equal(supervisorCalled, false);
+    assert.equal(result.adapterResult.guardrail.category, 'blocked');
+    assert.equal(result.adapterResult.guardrail.code, ADAPTER_REASON_CODES.MCP_BLOCKED);
+    assert.match(result.adapterResult.guardrail.reason, /MCP/);
+    assert.match(result.adapterResult.guardrail.reason, /mcp-roadmap/);
+    // Profile exit_codes.blocked = 12 in makeJsonProfile defaults.
+    assert.equal(result.exitCode, 12);
+  });
+
+  it('CLI still prints the user-facing MCP error and exits 1', () => {
+    const result = runNode([
+      resolve('src/cli.js'),
+      'adapter', 'run',
+      '--profile', resolve('src/adapter-profiles/cline.json'),
+      '--', 'echo', 'hello',
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /MCP protocol is not yet supported/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hardened profile validation: intercept path refs, MCP sanity, human tpls
+// ---------------------------------------------------------------------------
+
+describe('hardened profile validation', async () => {
+  const { validateProfile } = await import('../src/adapter-profile.js');
+
+  it('rejects intercept.args that is a literal string (not a $. path)', () => {
+    const profile = makeJsonProfile({
+      intercept: { command: '$.command', args: 'literal-not-a-path', cwd: '$.cwd' },
+    });
+    const r = validateProfile(profile);
+    assert.equal(r.valid, false);
+    assert.ok(r.errors.some((e) => e.includes('intercept.args')));
+  });
+
+  it('rejects intercept.cwd that is a literal string (not a $. path)', () => {
+    const profile = makeJsonProfile({
+      intercept: { command: '$.command', args: '$.args', cwd: '/tmp/literal-dir' },
+    });
+    const r = validateProfile(profile);
+    assert.equal(r.valid, false);
+    assert.ok(r.errors.some((e) => e.includes('intercept.cwd')));
+  });
+
+  it('rejects mcp protocol with defaults.non_interactive: false', () => {
+    const profile = makeJsonProfile({
+      protocol: 'mcp',
+      defaults: { non_interactive: false, json_output: true },
+    });
+    const r = validateProfile(profile);
+    assert.equal(r.valid, false);
+    assert.ok(r.errors.some((e) => e.includes('mcp') && e.includes('non_interactive')));
+  });
+
+  it('rejects human-format response templates that are objects', () => {
+    const profile = makeJsonProfile({
+      response: {
+        format: 'human',
+        success: 'ok',
+        blocked: { status: 'blocked', reason: '$.guardrail.reason' },
+        failed: 'bad',
+      },
+    });
+    const r = validateProfile(profile);
+    assert.equal(r.valid, false);
+    assert.ok(r.errors.some((e) => e.includes('human') && e.includes('string')));
+  });
+
+  it('accepts human-format response templates that are strings', () => {
+    const profile = makeJsonProfile({
+      response: {
+        format: 'human',
+        success: '{{process.stdout}}',
+        blocked: 'BLOCKED: {{guardrail.reason}}',
+        failed: 'FAILED: {{guardrail.exitCode}}',
+      },
+    });
+    const r = validateProfile(profile);
+    assert.equal(r.valid, true, r.errors.join('; '));
+  });
+});

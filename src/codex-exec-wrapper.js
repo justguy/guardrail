@@ -38,6 +38,9 @@ export function parseWrapperArgs(argv) {
     skipGitRepoCheck: '',
     ephemeral: '',
     fullAuto: '',
+    lifecycle: '',
+    sessionName: '',
+    sessionId: '',
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -110,6 +113,18 @@ export function parseWrapperArgs(argv) {
         break;
       case '--full-auto':
         options.fullAuto = value;
+        i += 1;
+        break;
+      case '--lifecycle':
+        options.lifecycle = value;
+        i += 1;
+        break;
+      case '--session-name':
+        options.sessionName = value;
+        i += 1;
+        break;
+      case '--session-id':
+        options.sessionId = value;
         i += 1;
         break;
       default:
@@ -192,12 +207,33 @@ function normalizeOptions(rawOptions) {
     skipGitRepoCheck: truthy(rawOptions.skipGitRepoCheck),
     ephemeral: truthy(rawOptions.ephemeral),
     fullAuto,
+    lifecycle: rawOptions.lifecycle || '',
+    sessionName: rawOptions.sessionName || '',
+    sessionId: rawOptions.sessionId || '',
     baseDir,
   };
 }
 
+/**
+ * Emit a structured Guardrail session metadata record. Pure: builds a plain
+ * object describing the session-lifecycle intent that the recipe-supervisor
+ * enforcement layer already consumed. This is a trace/audit aid for
+ * wrapper-level observability; it never reaches the underlying codex binary.
+ */
+export function emitSessionMetadata({ lifecycle, sessionName, sessionId, workingDir }) {
+  return { tool: 'codex', lifecycle, sessionName, sessionId, workingDir };
+}
+
 export async function runCodexExec(rawOptions) {
   const options = normalizeOptions(rawOptions);
+  const meta = emitSessionMetadata({
+    lifecycle: options.lifecycle,
+    sessionName: options.sessionName,
+    sessionId: options.sessionId,
+    workingDir: options.workingDir || process.cwd(),
+  });
+  process.stderr.write(`[guardrail-session] ${JSON.stringify(meta)}\n`);
+
   const promptPayload = buildPromptPayload({
     prompt: options.prompt,
     inputFiles: options.inputFiles,

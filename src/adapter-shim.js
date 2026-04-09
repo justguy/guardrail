@@ -5,6 +5,23 @@ import { randomBytes } from 'node:crypto';
 
 const SHIM_DIR = join(homedir(), '.guardrail', 'shims');
 
+// Shim command/tool names are interpolated into the generated bash file and
+// into a filesystem path. Restrict them to a safe character set so that
+// arguments cannot inject shell metacharacters, path separators, or newlines.
+const SAFE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+function ensureSafeName(label, value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`createShim: ${label} is required`);
+  }
+  if (!SAFE_NAME_RE.test(value)) {
+    throw new Error(
+      `createShim: ${label} "${value}" must match ${SAFE_NAME_RE} ` +
+      `(no shell metacharacters or path separators)`,
+    );
+  }
+}
+
 function resolveGuardrailExe() {
   const script = resolve(process.argv[1]);
   if (process.argv[0] === process.execPath) {
@@ -33,12 +50,8 @@ function tempPath(dir) {
  * @returns {{ created: boolean, path: string }}
  */
 function createShim(commandName, toolName, opts = {}) {
-  if (!commandName || typeof commandName !== 'string') {
-    throw new Error('createShim: commandName is required');
-  }
-  if (!toolName || typeof toolName !== 'string') {
-    throw new Error('createShim: toolName is required');
-  }
+  ensureSafeName('commandName', commandName);
+  ensureSafeName('toolName', toolName);
 
   const dir = opts.shimDir || SHIM_DIR;
   ensureDir(dir);

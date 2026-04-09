@@ -63,7 +63,7 @@ Flags:
   --shell <text>              Shell mode with script text
   --template <path>           Template file path
   --input <key=value>         Template input (repeatable)
-  --env-allow <var>           Env var to allow for template (repeatable)
+  --env-allow <var>           Env var to allow for recipe/template runtime handshakes (repeatable)
   --manifest <path>           Custom manifest path
   --approved-manifest <path>  Approved manifest path (CI)
   --non-interactive           Never prompt, fail on missing approval
@@ -1610,6 +1610,7 @@ async function main() {
         inputs: parsed.inputs,
         allowUnverified: parsed.allowUnverified || false,
         cwd: process.cwd(),
+        envAllow: parsed.envAllow,
         manifestPath: parsed.manifest || null,
         nonInteractive: parsed.nonInteractive,
         jsonOutput: parsed.json || parsed.jsonStream,

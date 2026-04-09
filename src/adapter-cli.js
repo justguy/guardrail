@@ -142,29 +142,7 @@ export async function runAdapterCli(adapterArgv) {
       return;
     }
 
-    // MCP protocol gate — check before runtime
-    if (parsed.tool || parsed.profilePath) {
-      const { resolveProfile, loadProfile } = await import('./adapter-profile.js');
-      try {
-        const profile = parsed.profilePath
-          ? loadProfile(parsed.profilePath)
-          : resolveProfile(parsed.tool);
-        if (profile.protocol === 'mcp') {
-          console.error('Error: MCP protocol is not yet supported in v0.2.');
-          console.error('');
-          console.error('For Cline integration now, use the env-shim path or install a shim-oriented profile.');
-          console.error('See: docs/adapter-implementation-plan.md#mcp-roadmap');
-          process.exit(1);
-          return;
-        }
-      } catch (err) {
-        console.error(err.message);
-        process.exit(1);
-        return;
-      }
-    }
-
-    const { runAdapter } = await import('./adapter-engine.js');
+    const { runAdapter, ADAPTER_REASON_CODES } = await import('./adapter-engine.js');
     try {
       const result = await runAdapter({
         tool: parsed.tool,
@@ -173,6 +151,30 @@ export async function runAdapterCli(adapterArgv) {
         args: parsed.args,
         envAllow: parsed.envAllow || [],
       });
+
+      // MCP gate: adapter-result carries the structured block; the CLI keeps
+      // the user-facing error message shape and the historical exit-1 for
+      // shell scripts that pipe `guardrail adapter run --tool cline ...`.
+      const code = result?.adapterResult?.guardrail?.code;
+      if (code === ADAPTER_REASON_CODES.MCP_BLOCKED) {
+        console.error('Error: MCP protocol is not yet supported in v0.2.');
+        console.error('');
+        console.error('For Cline integration now, use the env-shim path or install a shim-oriented profile.');
+        console.error('See: docs/adapter-implementation-plan.md#mcp-roadmap');
+        process.exit(1);
+        return;
+      }
+      // PROFILE_NOT_FOUND / PROFILE_INVALID: keep the legacy behaviour of
+      // printing the reason to stderr and exiting with 1 rather than the
+      // adapter-result exit code, so existing shell scripts don't break.
+      if (
+        code === ADAPTER_REASON_CODES.PROFILE_NOT_FOUND
+        || code === ADAPTER_REASON_CODES.PROFILE_INVALID
+      ) {
+        console.error(result.adapterResult.guardrail.reason);
+        process.exit(1);
+        return;
+      }
 
       const output = typeof result.renderedResponse === 'string'
         ? result.renderedResponse

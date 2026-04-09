@@ -10,11 +10,22 @@
  */
 
 import { extractValue, resolveTemplate } from './adapter-extract.js';
-import { validateProfile, loadProfile, loadBundledProfile, resolveProfile } from './adapter-profile.js';
+import { validateProfile, loadProfile, resolveProfile } from './adapter-profile.js';
 import { runSupervisor } from './supervisor.js';
 import { checkEnvMappings, checkAuthPrerequisites } from './adapter-auth.js';
+import {
+  ADAPTER_REASON_CODES,
+  STATUS_TO_CODE,
+  DEFAULT_REASONS,
+  buildBlockedResult,
+  buildFailedResult,
+  validateAdapterResult,
+  extractFromIntercept,
+} from './adapter-result.js';
 
-// --- Category mapping -------------------------------------------------------
+export { ADAPTER_REASON_CODES, validateAdapterResult };
+
+// --- Category + code mapping ------------------------------------------------
 
 const BLOCKED_STATUSES = new Set([
   'approval_required', 'approval_denied', 'drift_detected',
@@ -34,41 +45,52 @@ export function deriveCategory(nativeStatus) {
   return 'failed'; // unknown -> fail closed
 }
 
-// --- Default reason map -----------------------------------------------------
+function deriveCode(nativeStatus) {
+  return STATUS_TO_CODE[nativeStatus] ?? ADAPTER_REASON_CODES.INTERNAL_ERROR;
+}
 
-const DEFAULT_REASONS = {
-  success: 'Command executed successfully.',
-  approval_required: 'Approval required in non-interactive mode.',
-  approval_denied: 'Approval was denied.',
-  drift_detected: 'Contract drift detected in non-interactive mode.',
-  validation_failed: 'Result validation failed.',
-  timeout: 'Execution timed out.',
-  policy_violation: 'Policy violation detected.',
-  unsupported: 'Unsupported operation.',
-  update_denied: 'Update proposal was denied.',
-  protocol_error: 'Protocol error occurred.',
-  internal_error: 'Internal error occurred.',
-  time_policy_violated: 'Time-based policy constraint violated.',
-  concurrent_blocked: 'Blocked by concurrency lock.',
-};
+// --- Bounded output safety net ---------------------------------------------
+// Primary clipping happens upstream in supervisor.js (1 MB). This 64 KiB cap
+// is a secondary guardrail so a non-supervisor caller cannot leak larger
+// strings by constructing a result directly. Never remove the upstream clip.
+
+const ADAPTER_OUTPUT_CAP_BYTES = 64 * 1024;
+
+function capOutputField(value, wasTruncated) {
+  if (typeof value !== 'string') return { text: '', truncated: !!wasTruncated };
+  if (Buffer.byteLength(value, 'utf8') <= ADAPTER_OUTPUT_CAP_BYTES) {
+    return { text: value, truncated: !!wasTruncated };
+  }
+  const buf = Buffer.from(value, 'utf8');
+  return {
+    text: buf.subarray(0, ADAPTER_OUTPUT_CAP_BYTES).toString('utf8'),
+    truncated: true,
+  };
+}
 
 // --- Normalize to adapter-result/v1 ----------------------------------------
 
 /** Convert a runSupervisor() result to adapter-result/v1. Pure, no mutation. */
 export function normalizeToAdapterResult(supervisorResult) {
   if (supervisorResult == null || typeof supervisorResult !== 'object') {
-    return buildFailedResult('Supervisor returned null or non-object result.');
+    return buildFailedResult(
+      ADAPTER_REASON_CODES.SUPERVISOR_THREW,
+      'Supervisor returned null or non-object result.',
+    );
   }
   const sr = supervisorResult;
   const nativeStatus = sr.status || 'internal_error';
   const worker = sr.worker || {};
   const driftDetected = sr.drift?.detected ?? false;
+  const stdoutCap = capOutputField(worker.stdout ?? '', worker.stdoutTruncated);
+  const stderrCap = capOutputField(worker.stderr ?? '', worker.stderrTruncated);
 
   return {
     schemaVersion: 'adapter-result/v1',
     guardrail: {
       nativeStatus,
       category: deriveCategory(nativeStatus),
+      code: driftDetected ? ADAPTER_REASON_CODES.DRIFT_DETECTED : deriveCode(nativeStatus),
       reason: sr.reason || DEFAULT_REASONS[nativeStatus] || `Status: ${nativeStatus}`,
       exitCode: sr.exitCode ?? 19,
       contractHash: sr.contractHash || '',
@@ -83,10 +105,10 @@ export function normalizeToAdapterResult(supervisorResult) {
       exitCode: worker.exitCode ?? null,
       timedOut: worker.timedOut ?? false,
       interactivePromptDetected: worker.interactivePromptDetected ?? false,
-      stdout: worker.stdout ?? '',
-      stderr: worker.stderr ?? '',
-      stdoutTruncated: worker.stdoutTruncated ?? false,
-      stderrTruncated: worker.stderrTruncated ?? false,
+      stdout: stdoutCap.text,
+      stderr: stderrCap.text,
+      stdoutTruncated: stdoutCap.truncated,
+      stderrTruncated: stderrCap.truncated,
     },
     telemetry: {
       runId: sr.runId || '',
@@ -97,11 +119,7 @@ export function normalizeToAdapterResult(supervisorResult) {
 
 // --- Response rendering -----------------------------------------------------
 
-/**
- * Render the profile's response template for the result's category.
- * JSON format: walk template, "$." leaf strings extracted from result.
- * Human format: resolveTemplate() from adapter-extract.js.
- */
+/** Render the profile's response template for the result's category. */
 export function renderResponse(profile, adapterResult) {
   if (!profile?.response) return null;
   const category = adapterResult?.guardrail?.category;
@@ -115,7 +133,6 @@ export function renderResponse(profile, adapterResult) {
   return resolveJsonTemplate(template, adapterResult);
 }
 
-/** Recursively resolve "$." paths in a JSON response template. */
 function resolveJsonTemplate(node, source) {
   if (node == null) return node;
   if (typeof node === 'string') return node.startsWith('$.') ? extractValue(source, node) : node;
@@ -125,15 +142,15 @@ function resolveJsonTemplate(node, source) {
     for (const key of Object.keys(node)) out[key] = resolveJsonTemplate(node[key], source);
     return out;
   }
-  return node; // primitives pass through
+  return node;
 }
 
 // --- Full adapter orchestration ---------------------------------------------
 
 /**
- * Run the full adapter pipeline: load profile, resolve command, execute
- * supervisor, normalize result, render response.
- * Accepts optional supervisorFn in opts for testing (defaults to runSupervisor).
+ * Run the full adapter pipeline. Returns { adapterResult, renderedResponse,
+ * exitCode } on every terminal path — never throws, never process.exits.
+ * Accepts optional supervisorFn/authCheckFn in opts for testing.
  */
 export async function runAdapter(opts = {}) {
   const {
@@ -142,19 +159,42 @@ export async function runAdapter(opts = {}) {
     rawInput, supervisorFn = runSupervisor, envAllow = [], authCheckFn,
   } = opts;
 
-  // 1-2. Load and validate profile (fail closed)
-  const profile = loadAdapterProfile(tool, profilePath);
+  // 1. Load and validate profile (fail closed)
+  let profile;
+  try {
+    profile = loadAdapterProfile(tool, profilePath);
+  } catch (err) {
+    return wrapFailed(ADAPTER_REASON_CODES.PROFILE_NOT_FOUND, err?.message || 'Failed to load adapter profile.');
+  }
   const validation = validateProfile(profile);
   if (!validation.valid) {
-    return wrapFailed(`Adapter profile validation failed: ${validation.errors.join('; ')}`);
+    return wrapFailed(
+      ADAPTER_REASON_CODES.PROFILE_INVALID,
+      `Adapter profile validation failed: ${validation.errors.join('; ')}`,
+    );
   }
 
+  // 2. MCP gate: structured block that uses the profile's blocked exit_codes
+  // mapping. See docs/adapter-implementation-plan.md#mcp-roadmap.
+  if (profile.protocol === 'mcp') {
+    const reason = 'MCP protocol is not yet supported in v0.2. '
+      + 'For Cline integration now, use the env-shim path or install a shim-oriented profile. '
+      + 'See docs/adapter-implementation-plan.md#mcp-roadmap';
+    return wrapBlocked(ADAPTER_REASON_CODES.MCP_BLOCKED, reason, profile);
+  }
+
+  // 3. Auth/env preflight. Preflight blocks keep the synthetic adapter exit
+  // code (16) rather than mapping through profile.exit_codes so scripted
+  // auth-failure callers get a stable preflight signal across profiles.
   const envCheck = checkEnvMappings(profile.requires_env || [], envAllow, {
     authRequirements: profile.requires_auth || [],
     currentEnv: process.env,
   });
   if (!envCheck.ok) {
-    return wrapBlocked(`${envCheck.code}: ${envCheck.message}`);
+    return wrapBlocked(
+      ADAPTER_REASON_CODES.MISSING_AUTH_MAPPING,
+      `${envCheck.code}: ${envCheck.message}`,
+    );
   }
 
   const authCheck = await checkAuthPrerequisites(profile.requires_auth || [], {
@@ -163,10 +203,13 @@ export async function runAdapter(opts = {}) {
   });
   if (!authCheck.ok) {
     const detail = authCheck.detail ? ` Detail: ${authCheck.detail}` : '';
-    return wrapBlocked(`${authCheck.code}: ${authCheck.message}${detail}`);
+    return wrapBlocked(
+      ADAPTER_REASON_CODES.MISSING_AUTH_PREREQUISITE,
+      `${authCheck.code}: ${authCheck.message}${detail}`,
+    );
   }
 
-  // 3. Resolve command/args/cwd: direct CLI wins, then rawInput via intercept
+  // 4. Resolve command/args/cwd: direct CLI wins, then rawInput via intercept
   let command = directCommand || null;
   let args = Array.isArray(directArgs) ? directArgs : [];
   let cwd = directCwd || null;
@@ -174,38 +217,47 @@ export async function runAdapter(opts = {}) {
   if (!command && rawInput && profile.intercept) {
     const extracted = extractFromIntercept(rawInput, profile.intercept);
     if (extracted.error) {
-      return wrapFailed(extracted.error);
+      return wrapFailed(ADAPTER_REASON_CODES.INTERCEPT_INVALID, extracted.error);
     }
     command = extracted.command;
     args = extracted.args;
     cwd = extracted.cwd || cwd;
   }
   if (!command) {
-    return wrapFailed('No command resolved from direct input or profile intercept.');
+    return wrapFailed(
+      ADAPTER_REASON_CODES.COMMAND_UNRESOLVED,
+      'No command resolved from direct input or profile intercept.',
+    );
   }
 
-  // 4. Build supervisor options
+  // 5. Build supervisor options
   const supervisorOptions = {
     command, args, nonInteractive: true, jsonOutput: true,
     ...(profile.defaults || {}),
-    envPolicy: {
-      inherit: false,
-      allow: ['PATH', ...envAllow],
-      inject: {},
-    },
+    envPolicy: { inherit: false, allow: ['PATH', ...envAllow], inject: {} },
   };
   if (cwd) supervisorOptions.cwd = cwd;
 
-  // 5. Execute supervisor
+  // 6. Execute supervisor
   let supervisorResult;
   try {
     supervisorResult = await supervisorFn(supervisorOptions);
   } catch (err) {
-    return wrapFailed(`Supervisor execution error: ${err?.message || 'unknown'}`);
+    return wrapFailed(
+      ADAPTER_REASON_CODES.SUPERVISOR_THREW,
+      `Supervisor execution error: ${err?.message || 'unknown'}`,
+    );
   }
 
-  // 6-8. Normalize, render, return
+  // 7. Normalize, paranoia-gate, render, return
   const adapterResult = normalizeToAdapterResult(supervisorResult);
+  const check = validateAdapterResult(adapterResult);
+  if (!check.valid) {
+    return wrapFailed(
+      ADAPTER_REASON_CODES.INTERNAL_ERROR,
+      `adapter-result/v1 shape invariant broken: ${check.errors.join('; ')}`,
+    );
+  }
   const category = adapterResult.guardrail.category;
   return {
     adapterResult,
@@ -222,50 +274,6 @@ function loadAdapterProfile(tool, profilePath) {
   return {}; // empty -> validation catches it
 }
 
-function extractFromIntercept(rawInput, intercept) {
-  if (rawInput == null || typeof rawInput !== 'object' || Array.isArray(rawInput)) {
-    return { command: null, args: [], cwd: null, error: 'stdin-json intercept requires a JSON object input.' };
-  }
-  if (!intercept || typeof intercept !== 'object') {
-    return { command: null, args: [], cwd: null, error: 'Adapter profile intercept must be an object.' };
-  }
-
-  const commandValue = extractValue(rawInput, intercept.command);
-  if (typeof commandValue !== 'string' || commandValue.trim() === '') {
-    return { command: null, args: [], cwd: null, error: 'Adapter intercept.command did not resolve to a non-empty string.' };
-  }
-
-  let args = [];
-  if (typeof intercept.args === 'string') {
-    const argsValue = extractValue(rawInput, intercept.args);
-    if (argsValue == null) {
-      args = [];
-    } else if (Array.isArray(argsValue)) {
-      if (!argsValue.every((entry) => typeof entry === 'string')) {
-        return { command: null, args: [], cwd: null, error: 'Adapter intercept.args must resolve to an array of strings.' };
-      }
-      args = argsValue;
-    } else if (typeof argsValue === 'string') {
-      args = [argsValue];
-    } else {
-      return { command: null, args: [], cwd: null, error: 'Adapter intercept.args must resolve to a string or array of strings.' };
-    }
-  }
-
-  let cwd = null;
-  if (typeof intercept.cwd === 'string') {
-    const cwdValue = extractValue(rawInput, intercept.cwd);
-    if (cwdValue != null) {
-      if (typeof cwdValue !== 'string' || cwdValue.trim() === '') {
-        return { command: null, args: [], cwd: null, error: 'Adapter intercept.cwd must resolve to a non-empty string when present.' };
-      }
-      cwd = cwdValue;
-    }
-  }
-
-  return { command: commandValue, args, cwd, error: null };
-}
-
 function buildDriftSummary(drift) {
   if (!drift?.detected || !Array.isArray(drift.diffs)) return [];
   return drift.diffs.map(d => {
@@ -280,47 +288,13 @@ function resolveProfileExitCode(profile, category, fallbackExitCode) {
   return Number.isInteger(mapped) ? mapped : fallbackExitCode;
 }
 
-/** Wrap a reason into a failed adapter pipeline return value. */
-function wrapFailed(reason) {
-  const failResult = buildFailedResult(reason);
-  return { adapterResult: failResult, renderedResponse: null, exitCode: failResult.guardrail.exitCode };
+function wrapFailed(code, reason) {
+  const r = buildFailedResult(code, reason);
+  return { adapterResult: r, renderedResponse: null, exitCode: r.guardrail.exitCode };
 }
 
-function wrapBlocked(reason) {
-  const blockedResult = buildBlockedResult(reason);
-  return { adapterResult: blockedResult, renderedResponse: null, exitCode: blockedResult.guardrail.exitCode };
-}
-
-function buildFailedResult(reason) {
-  return {
-    schemaVersion: 'adapter-result/v1',
-    guardrail: {
-      nativeStatus: 'internal_error', category: 'failed', reason, exitCode: 19,
-      contractHash: '', manifestPath: '', riskLevel: '', riskReasons: [],
-      driftDetected: false, driftSummary: [],
-    },
-    process: {
-      launched: false, exitCode: null, timedOut: false,
-      interactivePromptDetected: false,
-      stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false,
-    },
-    telemetry: { runId: '', durationMs: 0 },
-  };
-}
-
-function buildBlockedResult(reason) {
-  return {
-    schemaVersion: 'adapter-result/v1',
-    guardrail: {
-      nativeStatus: 'policy_violation', category: 'blocked', reason, exitCode: 16,
-      contractHash: '', manifestPath: '', riskLevel: '', riskReasons: [],
-      driftDetected: false, driftSummary: [],
-    },
-    process: {
-      launched: false, exitCode: null, timedOut: false,
-      interactivePromptDetected: false,
-      stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false,
-    },
-    telemetry: { runId: '', durationMs: 0 },
-  };
+function wrapBlocked(code, reason, profile = null) {
+  const r = buildBlockedResult(code, reason);
+  const exitCode = resolveProfileExitCode(profile, 'blocked', r.guardrail.exitCode);
+  return { adapterResult: r, renderedResponse: null, exitCode };
 }

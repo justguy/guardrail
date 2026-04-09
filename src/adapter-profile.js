@@ -109,16 +109,43 @@ export function validateProfile(profile) {
     errors.push(`protocol must be one of: ${[...VALID_PROTOCOLS].join(', ')}`);
   }
 
-  // intercept.command
+  // intercept.command (+ args + cwd): every reference MUST be a $. path so
+  // profiles cannot smuggle literal strings into the resolved command line.
   if (profile.intercept == null || typeof profile.intercept !== 'object') {
     errors.push('intercept must be an object');
   } else {
     if (typeof profile.intercept.command !== 'string') {
       errors.push('intercept.command is required and must be a string');
+    } else if (!profile.intercept.command.startsWith('$.')) {
+      errors.push('intercept.command must be a $. path reference, not a literal');
     } else {
       const pathResult = validatePath(profile.intercept.command);
       if (!pathResult.valid) {
         errors.push(`intercept.command: ${pathResult.error}`);
+      }
+    }
+    if (profile.intercept.args !== undefined) {
+      if (typeof profile.intercept.args !== 'string') {
+        errors.push('intercept.args must be a string $. path reference when present');
+      } else if (!profile.intercept.args.startsWith('$.')) {
+        errors.push('intercept.args must be a $. path reference, not a literal');
+      } else {
+        const pathResult = validatePath(profile.intercept.args);
+        if (!pathResult.valid) {
+          errors.push(`intercept.args: ${pathResult.error}`);
+        }
+      }
+    }
+    if (profile.intercept.cwd !== undefined) {
+      if (typeof profile.intercept.cwd !== 'string') {
+        errors.push('intercept.cwd must be a string $. path reference when present');
+      } else if (!profile.intercept.cwd.startsWith('$.')) {
+        errors.push('intercept.cwd must be a $. path reference, not a literal');
+      } else {
+        const pathResult = validatePath(profile.intercept.cwd);
+        if (!pathResult.valid) {
+          errors.push(`intercept.cwd: ${pathResult.error}`);
+        }
       }
     }
   }
@@ -128,6 +155,17 @@ export function validateProfile(profile) {
     if (profile.response.format !== undefined) {
       if (profile.response.format !== 'json' && profile.response.format !== 'human') {
         errors.push('response.format must be "json" or "human"');
+      }
+    }
+
+    // Human-format templates MUST be strings — array/object templates only
+    // make sense when the profile is rendering a structured JSON payload.
+    if (profile.response.format === 'human') {
+      for (const key of ['success', 'blocked', 'failed']) {
+        const tpl = profile.response[key];
+        if (tpl !== undefined && typeof tpl !== 'string') {
+          errors.push(`response.${key}: human format requires a string template`);
+        }
       }
     }
 
@@ -145,6 +183,18 @@ export function validateProfile(profile) {
         errors.push(`${key}: ${pathResult.error}`);
       }
     }
+  }
+
+  // MCP protocol sanity: MCP profiles are long-lived; silently running them
+  // in interactive mode would completely sidestep the non-interactive
+  // guardrail posture. Reject the configuration at validation time.
+  if (
+    profile.protocol === 'mcp'
+    && profile.defaults != null
+    && typeof profile.defaults === 'object'
+    && profile.defaults.non_interactive === false
+  ) {
+    errors.push('protocol "mcp" cannot declare defaults.non_interactive: false');
   }
 
   if (profile.requires_env !== undefined) {

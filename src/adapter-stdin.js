@@ -39,8 +39,20 @@ export async function parseStdinInput(argv, opts) {
   let raw;
 
   if (argv && argv[2]) {
-    // Read from file path supplied as argv[2]
-    raw = readFileSync(argv[2], 'utf8');
+    // Read from file path supplied as argv[2] — fail closed with a structured
+    // error rather than a raw ENOENT stack if the path is missing or
+    // unreadable (e.g. a tool name was passed where a file was expected).
+    try {
+      raw = readFileSync(argv[2], 'utf8');
+    } catch (err) {
+      throw Object.assign(
+        new Error(
+          `Unable to read JSON input from argv[2] "${argv[2]}": ` +
+          `${err?.message || 'unknown error'}`,
+        ),
+        { code: 'INPUT_READ_FAILED' },
+      );
+    }
   } else {
     // Read from stdin
     raw = await (opts?.stdinFn ?? readStdin)();
