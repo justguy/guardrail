@@ -111,6 +111,14 @@ function buildManifest(def, basePath) {
   return createWorkflowManifest(normalized, hash, risk, normalized.projectRoot);
 }
 
+function createAckedManifest(def, basePath, manifestPath) {
+  const manifest = buildManifest(def, basePath);
+  manifest.riskAssessment.acknowledgedBy = 'test';
+  manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+  saveManifest(manifest, manifestPath);
+  return manifest;
+}
+
 // ===========================================================================
 // 1. Workflow Definition Parsing
 // ===========================================================================
@@ -384,6 +392,198 @@ describe('Transition Validation', () => {
     });
     const filePath = writeDefFile(tmpDir, def, 'bad-trans-type.json');
     assert.throws(() => loadWorkflowDefinition(filePath), /must be a string/);
+  });
+});
+
+// ===========================================================================
+// 4. Workflow Outputs and State References
+// ===========================================================================
+
+describe('Workflow Outputs and State References', () => {
+  let tmpDir;
+
+  before(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'wf-outputs-'));
+  });
+
+  after(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('accepts valid output declarations on task and recipe_ref steps', () => {
+    const def = makeDefinition({
+      entryStep: 'producer',
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'echo', args: ['hello'], cwd: '.', mode: 'structured', timeoutMs: 5000 },
+          outputs: {
+            statusValue: { type: 'string', from: 'protocolMessages.0.status' },
+          },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'recipe_ref',
+          recipe: 'demo-recipe',
+          outputs: {
+            resultValue: { type: 'json', from: 'status' },
+          },
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        },
+      ],
+    });
+    const filePath = writeDefFile(tmpDir, def, 'outputs-valid.json');
+    const loaded = loadWorkflowDefinition(filePath);
+    assert.equal(loaded.steps.length, 2);
+  });
+
+  it('rejects outputs on service steps', () => {
+    const def = makeDefinitionWithServices({
+      steps: [
+        {
+          id: 'start_svc',
+          type: 'service_start',
+          serviceId: 'api',
+          outputs: {
+            bad: { type: 'string', from: 'protocolMessages' },
+          },
+          on: { success: 'run_task', failure: 'abort' },
+        },
+      ],
+    });
+    const filePath = writeDefFile(tmpDir, def, 'outputs-service.json');
+    assert.throws(() => loadWorkflowDefinition(filePath), /outputs are not supported for service steps/);
+  });
+
+  it('rejects invalid output type and forbidden from roots', () => {
+    const badType = makeDefinition({
+      steps: [{
+        id: 'step_a',
+        type: 'task',
+        run: { command: 'echo', args: ['bad'], cwd: '.', mode: 'structured', timeoutMs: 5000 },
+        outputs: {
+          one: { type: 'invalid', from: 'protocolMessages' },
+        },
+        on: { success: 'done', validation_failed: 'abort' },
+      }],
+    });
+    const badTypePath = writeDefFile(tmpDir, badType, 'outputs-bad-type.json');
+    assert.throws(() => loadWorkflowDefinition(badTypePath), /must be one of/);
+
+    const badRoot = makeDefinition({
+      steps: [{
+        id: 'step_a',
+        type: 'task',
+        run: { command: 'echo', args: ['bad'], cwd: '.', mode: 'structured', timeoutMs: 5000 },
+        outputs: {
+          one: { type: 'string', from: 'stdout.body' },
+        },
+        on: { success: 'done', validation_failed: 'abort' },
+      }],
+    });
+    const badRootPath = writeDefFile(tmpDir, badRoot, 'outputs-bad-root.json');
+    assert.throws(() => loadWorkflowDefinition(badRootPath), /disallowed root/);
+  });
+
+  it('accepts valid task run arg and recipe_ref input state references', () => {
+    const def = makeDefinition({
+      entryStep: 'producer',
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'echo', args: ['ready'], cwd: '.', mode: 'structured', timeoutMs: 5000 },
+          outputs: {
+            exitValue: { type: 'number', from: 'exitCode' },
+          },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'recipe_ref',
+          recipe: 'demo-recipe',
+          inputs: {
+            from_task: '{{state.producer.exitValue}}',
+          },
+          on: { success: 'done', failure: 'abort' },
+        },
+      ],
+    });
+    const filePath = writeDefFile(tmpDir, def, 'state-ref-valid.json');
+    const loaded = loadWorkflowDefinition(filePath);
+    assert.equal(loaded.steps[1].inputs.from_task, '{{state.producer.exitValue}}');
+  });
+
+  it('rejects malformed, missing producer, and missing output state references', () => {
+    const malformed = makeDefinition({
+      steps: [{
+        id: 'step_a',
+        type: 'task',
+        run: { command: 'echo', args: ['a', '{{state.onlytwo}'] , cwd: '.', mode: 'structured', timeoutMs: 5000 },
+        on: { success: 'done', validation_failed: 'abort' },
+      }],
+    });
+    const malformedPath = writeDefFile(tmpDir, malformed, 'state-ref-malformed.json');
+    assert.throws(() => loadWorkflowDefinition(malformedPath), /malformed state reference/);
+
+    const missingProducer = makeDefinition({
+      steps: [{
+        id: 'step_a',
+        type: 'task',
+        run: { command: 'echo', args: ['x', '{{state.nope.exitValue}}'], cwd: '.', mode: 'structured', timeoutMs: 5000 },
+        on: { success: 'done', validation_failed: 'abort' },
+      }],
+    });
+    const missingProducerPath = writeDefFile(tmpDir, missingProducer, 'state-ref-missing-producer.json');
+    assert.throws(() => loadWorkflowDefinition(missingProducerPath), /does not reference a declared step/);
+
+    const withProducer = makeDefinition({
+      entryStep: 'producer',
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'echo', args: ['ok'], cwd: '.', mode: 'structured', timeoutMs: 5000 },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'task',
+          run: { command: 'echo', args: ['{{state.producer.missing}}'], cwd: '.', mode: 'structured', timeoutMs: 5000 },
+          on: { success: 'done', validation_failed: 'abort' },
+        },
+      ],
+    });
+    const missingOutputPath = writeDefFile(tmpDir, withProducer, 'state-ref-missing-output.json');
+    assert.throws(() => loadWorkflowDefinition(missingOutputPath), /does not match declared outputs/);
+  });
+
+  it('detects cycles in state reference graph', () => {
+    const def = makeDefinition({
+      entryStep: 'step_a',
+      steps: [
+        {
+          id: 'step_a',
+          type: 'task',
+          run: { command: 'echo', args: ['{{state.step_b.dep}}'], cwd: '.', mode: 'structured', timeoutMs: 5000 },
+          outputs: { valueA: { type: 'string', from: 'exitCode' } },
+          on: { success: 'step_b', validation_failed: 'abort' },
+        },
+        {
+          id: 'step_b',
+          type: 'recipe_ref',
+          recipe: 'cycle-recipe',
+          outputs: { dep: { type: 'string', from: 'status' } },
+          inputs: { p: '{{state.step_a.valueA}}' },
+          on: { success: 'done', validation_failed: 'abort' },
+        },
+      ],
+    });
+    const cyclePath = writeDefFile(tmpDir, def, 'state-ref-cycle.json');
+    assert.throws(() => loadWorkflowDefinition(cyclePath), /state reference cycle detected/);
   });
 });
 
@@ -1353,6 +1553,84 @@ describe('Workflow Normalization', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('persists output declarations and state-reference metadata in normalized workflow + hash', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-state-ref-normalize-'));
+    try {
+      mkdirSync(join(dir, 'recipes'), { recursive: true });
+      writeRecipeFile(join(dir, 'recipes'), {
+        id: 'state-source',
+        name: 'State Source',
+        description: 'Recipe that accepts task state',
+        version: '1.0.0',
+        author: 'tester',
+        category: 'custom',
+        channel: 'verified',
+        approval_required: true,
+        risk_level: 'low',
+        inputs: {
+          from_task: {
+            type: 'string',
+            pattern: '.*',
+            required: false,
+          },
+        },
+        steps: [{
+          id: 'main',
+          description: 'echo task state',
+          run: { command: 'echo', args: ['{{inputs.from_task}}'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      });
+      const def = makeDefinition({
+        entryStep: 'producer',
+        steps: [
+          {
+            id: 'producer',
+            type: 'task',
+            run: { command: 'echo', args: ['ready'], cwd: '.', mode: 'structured', timeoutMs: 5000 },
+            outputs: {
+              exitValue: { type: 'number', from: 'exitCode' },
+            },
+            on: { success: 'consumer', validation_failed: 'abort' },
+          },
+          {
+            id: 'consumer',
+            type: 'recipe_ref',
+            recipe: 'state-source',
+            outputs: {
+              statusValue: { type: 'string', from: 'status' },
+            },
+            inputs: { from_task: '{{state.producer.exitValue}}' },
+            on: { success: 'done', failure: 'abort' },
+          },
+        ],
+      });
+
+      const normalized = normalizeWorkflowDefinition(def, dir);
+      const normalizedById = new Map(normalized.steps.map((step) => [step.id, step]));
+      assert.deepEqual(normalizedById.get('producer')?.outputs, {
+        exitValue: { type: 'number', from: 'exitCode' },
+      });
+      assert.deepEqual(normalizedById.get('consumer')?.recipeRef.templateInputs, { from_task: '{{state.producer.exitValue}}' });
+
+      const baseHash = hashWorkflow(normalized);
+
+      const modified = JSON.parse(JSON.stringify(def));
+      modified.steps[1].inputs.from_task = 'static-value';
+      const modifiedNorm = normalizeWorkflowDefinition(modified, dir);
+      const changedHash = hashWorkflow(modifiedNorm);
+      const baseManifest = buildManifest(def, dir);
+      const changedManifest = buildManifest(modified, dir);
+      const drift = compareWorkflowManifests(changedManifest, baseManifest);
+
+      assert.notEqual(baseHash, changedHash);
+      assert.equal(drift.matches, false);
+      assert.ok(drift.diffs.some((diff) => diff.includes('templateInputs') || diff.includes('recipeRef:')));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ===========================================================================
@@ -1813,6 +2091,331 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
     assert.equal(executionEnd.status, 'success');
     assert.equal(executionEnd.runId, result.runId);
     assert.equal(executionEnd.stepsExecuted, 1);
+  });
+});
+
+// ===========================================================================
+// 14. Workflow Runtime Shared State
+// ===========================================================================
+
+describe('Workflow Runtime Shared State', () => {
+  let tmpDir;
+
+  before(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'wf-shared-state-'));
+  });
+
+  after(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('shares typed task output into recipe_ref input', async () => {
+    mkdirSync(join(tmpDir, 'recipes'), { recursive: true });
+    const recipe = {
+      id: 'shared-state-recipe',
+      name: 'Shared State Recipe',
+      description: 'Reads typed output from workflow state',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'verified',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {
+        exit_code: { type: 'integer', min: 0, max: 10 },
+      },
+      steps: [{
+        id: 'main',
+        description: 'echo resolved exit code',
+        run: {
+          command: 'echo',
+          args: ['{{inputs.exit_code}}'],
+          mode: 'structured',
+          timeoutMs: 5000,
+        },
+      }],
+      guardrails: { constraints: ['structured'], invariants: ['mode: structured'] },
+    };
+    recipe.signature = signRecipe(recipe);
+    writeRecipeFile(join(tmpDir, 'recipes'), recipe);
+
+    const def = makeDefinition({
+      projectRoot: tmpDir,
+      entryStep: 'producer',
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'node', args: ['-e', 'process.exit(0)'], cwd: tmpDir, mode: 'structured', timeoutMs: 5000 },
+          outputs: { exitCodeValue: { type: 'number', from: 'exitCode' } },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'recipe_ref',
+          recipe: 'shared-state-recipe',
+          inputs: { exit_code: '{{state.producer.exitCodeValue}}' },
+          on: { success: 'done', validation_failed: 'abort' },
+        },
+      ],
+    });
+
+    const defPath = writeDefFile(tmpDir, def, 'workflow-shared-success.json');
+    const manifestPath = join(tmpDir, '.guardrail', 'workflows', 'shared-success.approved.json');
+    mkdirSync(join(tmpDir, '.guardrail', 'workflows'), { recursive: true });
+    createAckedManifest(def, tmpDir, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'success');
+    assert.equal(result.stepsExecuted, 2);
+    assert.equal(result.failedStep, null);
+  });
+
+  it('preserves resolved shared-state args across update-request retries', async () => {
+    const markerPath = join(tmpDir, 'shared-state-update-marker.txt');
+    const scriptPath = join(tmpDir, 'shared-state-update-check.mjs');
+    writeFileSync(scriptPath, `
+import { existsSync, writeFileSync } from 'node:fs';
+
+const [, scriptPathArg, value, markerPathArg] = process.argv;
+
+if (!existsSync(markerPathArg)) {
+  writeFileSync(markerPathArg, 'ready', 'utf8');
+  console.log(JSON.stringify({
+    type: 'VALIDATION_FAILED_REQUIRE_UPDATE',
+    payload: {
+      reason: 'rerun after update',
+      proposedUpdate: {
+        action: 'run_script',
+        command: 'node',
+        args: [scriptPathArg, value, markerPathArg],
+        cwd: process.cwd(),
+      },
+    },
+  }));
+  process.exit(0);
+}
+
+if (value === '0') {
+  console.log(JSON.stringify({ type: 'SUCCESS', payload: { value } }));
+  process.exit(0);
+}
+
+console.log(JSON.stringify({
+  type: 'VALIDATION_FAILED_REQUIRE_UPDATE',
+  payload: {
+    reason: 'state value was not preserved on retry',
+    proposedUpdate: {
+      action: 'run_script',
+      command: 'node',
+      args: [scriptPathArg, value, markerPathArg],
+      cwd: process.cwd(),
+    },
+  },
+}));
+process.exit(0);
+`, 'utf8');
+
+    const def = makeDefinition({
+      projectRoot: tmpDir,
+      entryStep: 'producer',
+      maxIterations: 4,
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'node', args: ['-e', 'process.exit(0)'], cwd: tmpDir, mode: 'structured', timeoutMs: 5000 },
+          outputs: { exitCodeValue: { type: 'number', from: 'exitCode' } },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'task',
+          run: {
+            command: 'node',
+            args: [scriptPath, '{{state.producer.exitCodeValue}}', markerPath],
+            cwd: tmpDir,
+            mode: 'structured',
+            timeoutMs: 5000,
+          },
+          validator: 'ndjson',
+          updateSource: 'none',
+          on: { success: 'done', validation_failed: 'abort', failure: 'abort' },
+        },
+      ],
+    });
+
+    const defPath = writeDefFile(tmpDir, def, 'workflow-shared-update-retry.json');
+    const manifestPath = join(tmpDir, '.guardrail', 'workflows', 'shared-update-retry.approved.json');
+    mkdirSync(join(tmpDir, '.guardrail', 'workflows'), { recursive: true });
+    createAckedManifest(def, tmpDir, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'success');
+    assert.equal(result.stepsExecuted, 2);
+    assert.equal(result.failedStep, null);
+  });
+
+  it('fails when a declared output resolves to an undefined runtime value', async () => {
+    const def = makeDefinition({
+      projectRoot: tmpDir,
+      entryStep: 'producer',
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'node', args: ['-e', 'process.exit(0)'], cwd: tmpDir, mode: 'structured', timeoutMs: 5000 },
+          outputs: { missingStatus: { type: 'string', from: 'protocolMessages.0.status' } },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'task',
+          run: { command: 'echo', args: ['{{state.producer.missingStatus}}'], cwd: tmpDir, mode: 'structured', timeoutMs: 5000 },
+          on: { success: 'done', validation_failed: 'abort', failure: 'abort' },
+        },
+      ],
+    });
+
+    const defPath = writeDefFile(tmpDir, def, 'workflow-shared-missing.json');
+    const manifestPath = join(tmpDir, '.guardrail', 'workflows', 'shared-missing.approved.json');
+    mkdirSync(join(tmpDir, '.guardrail', 'workflows'), { recursive: true });
+    createAckedManifest(def, tmpDir, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'validation_failed');
+    assert.equal(result.failedStep, 'producer');
+    assert.equal(result.stepsExecuted, 1);
+    assert.match(result.terminalReason, /missing value/);
+  });
+
+  it('fails when output does not match declared runtime type', async () => {
+    const def = makeDefinition({
+      projectRoot: tmpDir,
+      entryStep: 'producer',
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'node', args: ['-e', 'process.exit(0)'], cwd: tmpDir, mode: 'structured', timeoutMs: 5000 },
+          outputs: { exitValue: { type: 'string', from: 'exitCode' } },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'task',
+          run: { command: 'echo', args: ['ok'], cwd: tmpDir, mode: 'structured', timeoutMs: 5000 },
+          on: { success: 'done', validation_failed: 'abort', failure: 'abort' },
+        },
+      ],
+    });
+
+    const defPath = writeDefFile(tmpDir, def, 'workflow-shared-type-mismatch.json');
+    const manifestPath = join(tmpDir, '.guardrail', 'workflows', 'shared-type-mismatch.approved.json');
+    mkdirSync(join(tmpDir, '.guardrail', 'workflows'), { recursive: true });
+    createAckedManifest(def, tmpDir, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'validation_failed');
+    assert.equal(result.failedStep, 'producer');
+    assert.match(result.terminalReason, /type mismatch/);
+  });
+
+  it('fails when resolved recipe_ref input violates recipe schema bounds', async () => {
+    mkdirSync(join(tmpDir, 'recipes'), { recursive: true });
+    const recipe = {
+      id: 'schema-mismatch-recipe',
+      name: 'Schema Mismatch Recipe',
+      description: 'Consumes workflow output in typed recipe input',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'verified',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {
+        exit_code: { type: 'integer', min: 1, max: 10 },
+      },
+      steps: [{
+        id: 'main',
+        description: 'echo numeric input',
+        run: {
+          command: 'echo',
+          args: ['{{inputs.exit_code}}'],
+          mode: 'structured',
+          timeoutMs: 5000,
+        },
+      }],
+      guardrails: { constraints: ['structured'], invariants: ['mode: structured'] },
+    };
+    recipe.signature = signRecipe(recipe);
+    writeRecipeFile(join(tmpDir, 'recipes'), recipe);
+
+    const def = makeDefinition({
+      projectRoot: tmpDir,
+      entryStep: 'producer',
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'node', args: ['-e', 'process.exit(0)'], cwd: tmpDir, mode: 'structured', timeoutMs: 5000 },
+          outputs: { exitStatus: { type: 'string', from: 'validationStatus' } },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'recipe_ref',
+          recipe: 'schema-mismatch-recipe',
+          inputs: { exit_code: '{{state.producer.exitStatus}}' },
+          on: { success: 'done', validation_failed: 'abort' },
+        },
+      ],
+    });
+
+    const defPath = writeDefFile(tmpDir, def, 'workflow-shared-recipe-validation.json');
+    const manifestPath = join(tmpDir, '.guardrail', 'workflows', 'shared-recipe-validation.approved.json');
+    mkdirSync(join(tmpDir, '.guardrail', 'workflows'), { recursive: true });
+    createAckedManifest(def, tmpDir, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'validation_failed');
+    assert.equal(result.failedStep, 'consumer');
+    assert.match(result.terminalReason, /Recipe input validation failed/);
   });
 });
 

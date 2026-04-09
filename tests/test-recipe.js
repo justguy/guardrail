@@ -467,6 +467,163 @@ describe('Recipe: Manifest Semantics', () => {
     assert.ok(comparison.diffs.some(d => d.includes('input "target"')));
   });
 
+  it('allows bounded enum input reuse within approved envelope', () => {
+    const recipe = makeRecipe({
+      inputs: {
+        color: { type: 'string', enum: ['red', 'green', 'blue'], description: 'Color choice' },
+        target: { type: 'string', pattern: '^[a-z]+$' },
+      },
+      steps: [
+        { id: 'step-1', description: 'Run the command', run: { command: 'echo', args: ['{{inputs.target}}', '{{inputs.color}}'], mode: 'structured' } },
+      ],
+    });
+
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello', color: 'red' },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello', color: 'blue' },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const comparison = compareRecipeManifests(changed, base);
+    assert.equal(comparison.matches, true);
+    assert.equal(comparison.diffs.length, 0);
+  });
+
+  it('does not widen explicit exact approval mode even when enum is present', () => {
+    const recipe = makeRecipe({
+      inputs: {
+        target: { type: 'string', pattern: '^[a-z]+$' },
+        color: {
+          type: 'string',
+          enum: ['red', 'blue'],
+          approval_mode: 'exact',
+        },
+      },
+      steps: [
+        { id: 'step-1', description: 'Run the command', run: { command: 'echo', args: ['{{inputs.target}}', '{{inputs.color}}'], mode: 'structured' } },
+      ],
+    });
+
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello', color: 'red' },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello', color: 'blue' },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const comparison = compareRecipeManifests(changed, base);
+    assert.equal(comparison.matches, false);
+    assert.ok(comparison.diffs.some(d => d.includes('input "color"')));
+  });
+
+  it('allows bounded integer range input reuse within approved envelope', () => {
+    const recipe = makeRecipe({
+      inputs: {
+        count: { type: 'integer', min: 1, max: 10, description: 'Count' },
+        target: { type: 'string', pattern: '^[a-z]+$' },
+      },
+      steps: [
+        { id: 'step-1', description: 'Run the command', run: { command: 'echo', args: ['{{inputs.target}}'], mode: 'structured' } },
+      ],
+    });
+
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello', count: 3 },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello', count: 8 },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const comparison = compareRecipeManifests(changed, base);
+    assert.equal(comparison.matches, true);
+    assert.equal(comparison.diffs.length, 0);
+  });
+
+  it('rejects bounded input reuse outside approved envelope with explicit diff', () => {
+    const recipe = makeRecipe({
+      inputs: {
+        count: { type: 'integer', min: 1, max: 3, description: 'Count' },
+        target: { type: 'string', pattern: '^[a-z]+$' },
+      },
+      steps: [
+        { id: 'step-1', description: 'Run the command', run: { command: 'echo', args: ['{{inputs.target}}'], mode: 'structured' } },
+      ],
+    });
+
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello', count: 1 },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello', count: 4 },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const comparison = compareRecipeManifests(changed, base);
+    assert.equal(comparison.matches, false);
+    assert.ok(comparison.diffs.some(d => d.includes('outside approved envelope')));
+  });
+
+  it('keeps old manifests without envelope metadata at exact-input semantics', () => {
+    const recipe = makeRecipe();
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello' },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+    const legacyManifest = JSON.parse(JSON.stringify(base));
+    delete legacyManifest.inputApprovalEnvelopes;
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'world' },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const comparison = compareRecipeManifests(changed, legacyManifest);
+    assert.equal(comparison.matches, false);
+    assert.ok(comparison.diffs.some(d => d.includes('input "target"') && !d.includes('outside approved envelope')));
+  });
+
   it('treats pinned-vs-latest resolution mode as drift even for same resolved version', () => {
     const recipe = makeRecipe({ version: '1.0.0' });
     const latestManifest = createRecipeManifest(

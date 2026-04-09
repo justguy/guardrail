@@ -560,25 +560,29 @@ describe('Template Manifest', () => {
     assert.equal(manifest.template, 'standard-npm-publish');
     assert.equal(manifest.templateKind, 'workflow_template');
     assert.equal(manifest.templateHash, 'abc123');
+    assert.equal(typeof manifest.templateDefHash, 'string');
+    assert.deepEqual(manifest.inputApprovalEnvelopes, {
+      tag: { type: 'enum', values: ['latest', 'beta', 'next'] },
+    });
     assert.deepEqual(manifest.resolvedInputs, inputs);
     assert.deepEqual(manifest.envIntersection, env);
     assert.equal(manifest.riskAssessment.riskLevel, 'yellow');
   });
 
-  it('diff detects hash change', () => {
+  it('diff detects template definition change', () => {
     const base = createTemplateManifest(
       makeWorkflowTemplate(), 'hash1',
       { trustClass: 'reviewed_internal', riskLevel: 'yellow', reasons: [] },
       { package_dir: 'packages/a' }, ['NPM_TOKEN'],
     );
     const changed = createTemplateManifest(
-      makeWorkflowTemplate(), 'hash2',
+      makeWorkflowTemplate({ description: 'Updated workflow template description' }), 'hash1',
       { trustClass: 'reviewed_internal', riskLevel: 'yellow', reasons: [] },
       { package_dir: 'packages/a' }, ['NPM_TOKEN'],
     );
 
     const diffs = diffTemplateManifests(changed, base);
-    assert.ok(diffs.some(d => /templateHash/.test(d)));
+    assert.ok(diffs.some(d => /templateDefHash/.test(d)));
   });
 
   it('diff detects input change', () => {
@@ -596,6 +600,105 @@ describe('Template Manifest', () => {
     const result = compareTemplateManifests(m, m);
     assert.ok(result.matches);
     assert.equal(result.diffs.length, 0);
+  });
+
+  it('allows enum input drift within approved approval envelope', () => {
+    const risk = { trustClass: 'reviewed_internal', riskLevel: 'yellow', reasons: [] };
+    const base = createTemplateManifest(
+      makeWorkflowTemplate(),
+      'h-base',
+      risk,
+      { package_dir: 'packages/a', tag: 'latest' },
+      ['NPM_TOKEN'],
+    );
+    const candidate = createTemplateManifest(
+      makeWorkflowTemplate(),
+      'h-candidate',
+      risk,
+      { package_dir: 'packages/a', tag: 'beta' },
+      ['NPM_TOKEN'],
+    );
+
+    const result = compareTemplateManifests(candidate, base);
+    assert.ok(result.matches);
+    assert.equal(result.diffs.length, 0);
+  });
+
+  it('does not widen explicit exact approval mode even when enum is present', () => {
+    const def = makeWorkflowTemplate({
+      inputs: {
+        package_dir: { type: 'string', pattern: '^packages/[a-z0-9-]+$' },
+        tag: { type: 'string', enum: ['latest', 'beta'], approval_mode: 'exact' },
+      },
+    });
+
+    const risk = { trustClass: 'reviewed_internal', riskLevel: 'yellow', reasons: [] };
+    const base = createTemplateManifest(def, 'h-base', risk, { package_dir: 'packages/a', tag: 'latest' }, []);
+    const candidate = createTemplateManifest(def, 'h-candidate', risk, { package_dir: 'packages/a', tag: 'beta' }, []);
+
+    const result = compareTemplateManifests(candidate, base);
+    assert.ok(!result.matches);
+    assert.ok(result.diffs.some(d => /input "tag"/.test(d)));
+  });
+
+  it('allows integer range input drift within approved approval envelope', () => {
+    const def = makeIndividualTemplate({
+      name: 'bounded-retries',
+      description: 'Bounded integer retry demo',
+      inputs: { retries: { type: 'integer', min: 1, max: 5, description: 'retry count' } },
+      run: { command: 'sleep', args: ['{{inputs.retries}}'], mode: 'structured', env: {} },
+    });
+
+    const risk = { trustClass: 'reviewed_internal', riskLevel: 'green', reasons: [] };
+    const base = createTemplateManifest(def, 'h-base', risk, { retries: 2 }, []);
+    const candidate = createTemplateManifest(def, 'h-candidate', risk, { retries: 4 }, []);
+
+    const result = compareTemplateManifests(candidate, base);
+    assert.ok(result.matches);
+    assert.equal(result.diffs.length, 0);
+  });
+
+  it('fails when integer input drifts outside approved approval envelope', () => {
+    const def = makeIndividualTemplate({
+      name: 'bounded-retries',
+      description: 'Bounded integer retry demo',
+      inputs: { retries: { type: 'integer', min: 1, max: 5, description: 'retry count' } },
+      run: { command: 'sleep', args: ['{{inputs.retries}}'], mode: 'structured', env: {} },
+    });
+
+    const risk = { trustClass: 'reviewed_internal', riskLevel: 'green', reasons: [] };
+    const approved = createTemplateManifest(def, 'h-base', risk, { retries: 2 }, []);
+    const candidate = createTemplateManifest(def, 'h-candidate', risk, { retries: 11 }, []);
+
+    const result = compareTemplateManifests(candidate, approved);
+    assert.ok(!result.matches);
+    assert.ok(result.diffs.some(d => /outside approved envelope/.test(d)));
+    assert.ok(result.diffs.some(d => /retries/.test(d)));
+  });
+
+  it('falls back to exact matching when approval envelope metadata is missing', () => {
+    const risk = { trustClass: 'reviewed_internal', riskLevel: 'yellow', reasons: [] };
+    const oldApproved = createTemplateManifest(
+      makeWorkflowTemplate(),
+      'h-base',
+      risk,
+      { package_dir: 'packages/a', tag: 'latest' },
+      ['NPM_TOKEN'],
+    );
+    delete oldApproved.inputApprovalEnvelopes;
+    delete oldApproved.templateDefHash;
+
+    const candidate = createTemplateManifest(
+      makeWorkflowTemplate(),
+      'h-candidate',
+      risk,
+      { package_dir: 'packages/b', tag: 'beta' },
+      ['NPM_TOKEN'],
+    );
+
+    const result = diffTemplateManifests(candidate, oldApproved);
+    assert.ok(result.some(d => /package_dir/.test(d)));
+    assert.ok(result.some(d => /templateHash/.test(d)));
   });
 });
 

@@ -11,9 +11,10 @@ import { runRecipeSupervisor } from '../src/recipe-supervisor.js';
 import { verifyAuditChain, queryAuditLog } from '../src/audit.js';
 import { createContract, hashContract } from '../src/contract.js';
 import { createManifest, saveManifest } from '../src/manifest.js';
-import { evaluateRisk } from '../src/policy-engine.js';
+import { evaluateRisk, evaluateWorkflowRisk } from '../src/policy-engine.js';
 import { createRecipeManifest, hashRecipe } from '../src/recipe.js';
 import { signRecipe } from '../src/recipe-channel.js';
+import { normalizeWorkflowDefinition, hashWorkflow, createWorkflowManifest } from '../src/workflow.js';
 import {
   computeEnvIntersection,
   createTemplateManifest,
@@ -36,7 +37,22 @@ function writeDefFile(dir, def, filename = 'workflow.json') {
   return filePath;
 }
 
-function makeWorkflowDef() {
+function buildWorkflowManifest(def, basePath) {
+  const normalized = normalizeWorkflowDefinition(def, basePath);
+  const hash = hashWorkflow(normalized);
+  const risk = evaluateWorkflowRisk(normalized, { trustClass: 'reviewed_internal', projectRoot: basePath });
+  return createWorkflowManifest(normalized, hash, risk, normalized.projectRoot);
+}
+
+function createAckedWorkflowManifest(def, basePath, manifestPath) {
+  const manifest = buildWorkflowManifest(def, basePath);
+  manifest.riskAssessment.acknowledgedBy = 'test';
+  manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+  saveManifest(manifest, manifestPath);
+  return manifest;
+}
+
+function makeWorkflowDef(overrides = {}) {
   return {
     version: 1,
     kind: 'workflow_definition',
@@ -53,6 +69,7 @@ function makeWorkflowDef() {
     }],
     rollback_policy: 'none',
     rollback_none_reason: 'all steps idempotent',
+    ...overrides,
   };
 }
 
@@ -481,10 +498,344 @@ describe('Integration: Workflow Supervisor Runtime Policy', () => {
 });
 
 // ===========================================================================
+// 2a. Workflow supervisor: shared state execution
+// ===========================================================================
+
+describe('Integration: Workflow Supervisor Shared State', () => {
+  it('shares task output into recipe_ref input and runs successfully', async () => {
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'recipes'), { recursive: true });
+
+    const recipe = {
+      id: 'integration-shared-recipe',
+      name: 'Integration Shared Recipe',
+      description: 'A recipe that consumes workflow state output',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'verified',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {
+        exit_code: { type: 'integer', min: 0, max: 10 },
+      },
+      steps: [{
+        id: 'main',
+        description: 'echo resolved exit code',
+        run: { command: 'echo', args: ['{{inputs.exit_code}}'], mode: 'structured', timeoutMs: 5000 },
+      }],
+      guardrails: { constraints: ['structured'], invariants: ['mode: structured'] },
+    };
+    recipe.signature = signRecipe(recipe);
+    writeRecipeFile(join(dir, 'recipes'), recipe);
+
+    const def = makeWorkflowDef({
+      projectRoot: dir,
+      entryStep: 'producer',
+      services: [],
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'node', args: ['-e', 'process.exit(0)'], cwd: dir, mode: 'structured', timeoutMs: 5000 },
+          validator: 'exit_code',
+          updateSource: 'none',
+          outputs: { exitCodeValue: { type: 'number', from: 'exitCode' } },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'recipe_ref',
+          recipe: 'integration-shared-recipe',
+          inputs: {
+            exit_code: '{{state.producer.exitCodeValue}}',
+          },
+          on: { success: 'done', validation_failed: 'abort' },
+        },
+      ],
+    });
+    const defPath = writeDefFile(dir, def, 'shared-success.json');
+    const manifestPath = join(dir, '.guardrail', 'workflows', 'shared-success.approved.json');
+
+    createAckedWorkflowManifest(def, dir, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'success');
+    assert.equal(result.stepsExecuted, 2);
+  });
+
+  it('fails when a shared output resolves to an undefined value', async () => {
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'recipes'), { recursive: true });
+
+    const recipe = {
+      id: 'integration-missing-recipe',
+      name: 'Integration Missing Recipe',
+      description: 'A recipe that is not used because output missing in producer step',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'verified',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {
+        exit_code: { type: 'integer', min: 0, max: 10 },
+      },
+      steps: [{
+        id: 'main',
+        description: 'echo fallback',
+        run: { command: 'echo', args: ['{{inputs.exit_code}}'], mode: 'structured', timeoutMs: 5000 },
+      }],
+      guardrails: { constraints: ['structured'], invariants: ['mode: structured'] },
+    };
+    recipe.signature = signRecipe(recipe);
+    writeRecipeFile(join(dir, 'recipes'), recipe);
+
+    const def = makeWorkflowDef({
+      projectRoot: dir,
+      entryStep: 'producer',
+      services: [],
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'node', args: ['-e', 'process.exit(0)'], cwd: dir, mode: 'structured', timeoutMs: 5000 },
+          validator: 'exit_code',
+          updateSource: 'none',
+          outputs: { missingStatus: { type: 'string', from: 'protocolMessages.0.status' } },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'task',
+          run: { command: 'echo', args: ['{{state.producer.missingStatus}}'], cwd: dir, mode: 'structured', timeoutMs: 5000 },
+          validator: 'exit_code',
+          updateSource: 'none',
+          on: { success: 'done', validation_failed: 'abort', failure: 'abort' },
+        },
+      ],
+    });
+    const defPath = writeDefFile(dir, def, 'shared-missing.json');
+    const manifestPath = join(dir, '.guardrail', 'workflows', 'shared-missing.approved.json');
+    createAckedWorkflowManifest(def, dir, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'validation_failed');
+    assert.equal(result.failedStep, 'producer');
+    assert.match(result.terminalReason, /missing value/);
+  });
+
+  it('fails when an output type does not match declaration', async () => {
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'recipes'), { recursive: true });
+
+    const recipe = {
+      id: 'integration-mismatch-recipe',
+      name: 'Integration Mismatch Recipe',
+      description: 'A recipe that is not run due to task output mismatch',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'verified',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {
+        exit_code: { type: 'integer', min: 0, max: 10 },
+      },
+      steps: [{
+        id: 'main',
+        description: 'echo fallback',
+        run: { command: 'echo', args: ['{{inputs.exit_code}}'], mode: 'structured', timeoutMs: 5000 },
+      }],
+      guardrails: { constraints: ['structured'], invariants: ['mode: structured'] },
+    };
+    recipe.signature = signRecipe(recipe);
+    writeRecipeFile(join(dir, 'recipes'), recipe);
+
+    const def = makeWorkflowDef({
+      projectRoot: dir,
+      entryStep: 'producer',
+      services: [],
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'node', args: ['-e', 'process.exit(0)'], cwd: dir, mode: 'structured', timeoutMs: 5000 },
+          validator: 'exit_code',
+          updateSource: 'none',
+          outputs: { exitValue: { type: 'string', from: 'exitCode' } },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'task',
+          run: { command: 'echo', args: ['ok'], cwd: dir, mode: 'structured', timeoutMs: 5000 },
+          validator: 'exit_code',
+          updateSource: 'none',
+          on: { success: 'done', validation_failed: 'abort', failure: 'abort' },
+        },
+      ],
+    });
+    const defPath = writeDefFile(dir, def, 'shared-type-mismatch.json');
+    const manifestPath = join(dir, '.guardrail', 'workflows', 'shared-type-mismatch.approved.json');
+    createAckedWorkflowManifest(def, dir, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'validation_failed');
+    assert.equal(result.failedStep, 'producer');
+    assert.match(result.terminalReason, /type mismatch/);
+  });
+
+  it('fails when resolved recipe_ref input violates recipe schema', async () => {
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'recipes'), { recursive: true });
+    const recipe = {
+      id: 'integration-schema-mismatch-recipe',
+      name: 'Integration Schema Mismatch Recipe',
+      description: 'Recipe input schema validation failure for workflow state value',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'verified',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {
+        exit_code: { type: 'integer', min: 1, max: 10 },
+      },
+      steps: [{
+        id: 'main',
+        description: 'echo numeric input',
+        run: { command: 'echo', args: ['{{inputs.exit_code}}'], mode: 'structured', timeoutMs: 5000 },
+      }],
+      guardrails: { constraints: ['structured'], invariants: ['mode: structured'] },
+    };
+    recipe.signature = signRecipe(recipe);
+    writeRecipeFile(join(dir, 'recipes'), recipe);
+
+    const def = makeWorkflowDef({
+      projectRoot: dir,
+      entryStep: 'producer',
+      services: [],
+      steps: [
+        {
+          id: 'producer',
+          type: 'task',
+          run: { command: 'node', args: ['-e', 'process.exit(0)'], cwd: dir, mode: 'structured', timeoutMs: 5000 },
+          validator: 'exit_code',
+          updateSource: 'none',
+          outputs: { exitStatus: { type: 'string', from: 'validationStatus' } },
+          on: { success: 'consumer', validation_failed: 'abort' },
+        },
+        {
+          id: 'consumer',
+          type: 'recipe_ref',
+          recipe: 'integration-schema-mismatch-recipe',
+          inputs: { exit_code: '{{state.producer.exitStatus}}' },
+          on: { success: 'done', validation_failed: 'abort' },
+        },
+      ],
+    });
+    const defPath = writeDefFile(dir, def, 'shared-recipe-validation.json');
+    const manifestPath = join(dir, '.guardrail', 'workflows', 'shared-recipe-validation.approved.json');
+    createAckedWorkflowManifest(def, dir, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'validation_failed');
+    assert.equal(result.failedStep, 'consumer');
+    assert.match(result.terminalReason, /Recipe input validation failed/);
+  });
+});
+
+// ===========================================================================
 // 3. Template supervisor: runtime policy integration
 // ===========================================================================
 
 describe('Integration: Template Supervisor Runtime Policy', () => {
+  it('reuses approved template non-interactively when enum input changes within bounded envelope', async () => {
+    const dir = tmpDir();
+    const tmplPath = join(dir, 'tmpl.json');
+    const manifestPath = join(dir, '.guardrail', 'templates', 'test-bounded.approved.json');
+    const templateDef = {
+      ...makeTemplate(),
+      inputs: {
+        name: { type: 'string', enum: ['hello', 'world'] },
+      },
+    };
+    writeFileSync(tmplPath, JSON.stringify(templateDef));
+
+    mkdirSync(resolve(dir, '.guardrail', 'templates'), { recursive: true });
+    createApprovedTemplateManifest(templateDef, {
+      inputValues: { name: 'hello' },
+      manifestPath,
+    });
+
+    const result = await runTemplateSupervisor({
+      templatePath: tmplPath,
+      inputs: { name: 'world' },
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'success');
+  });
+
+  it('detects template drift when candidate input leaves approved bounded envelope', async () => {
+    const dir = tmpDir();
+    const tmplPath = join(dir, 'tmpl.json');
+    const manifestPath = join(dir, '.guardrail', 'templates', 'test-envelope-drift.approved.json');
+    const templateDef = makeTemplate();
+    writeFileSync(tmplPath, JSON.stringify(templateDef));
+
+    mkdirSync(resolve(dir, '.guardrail', 'templates'), { recursive: true });
+    const manifest = createApprovedTemplateManifest(templateDef, {
+      inputValues: { name: 'hello' },
+      manifestPath,
+    });
+    manifest.inputApprovalEnvelopes = {
+      name: { type: 'enum', values: ['hello'] },
+    };
+    saveManifest(manifest, manifestPath);
+
+    const result = await runTemplateSupervisor({
+      templatePath: tmplPath,
+      inputs: { name: 'world' },
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'drift_detected');
+  });
+
   it('requires explicit env allow-list when template declares requires_env', async () => {
     const dir = tmpDir();
     const tmplPath = join(dir, 'tmpl.json');
@@ -679,6 +1030,74 @@ describe('Integration: Template Supervisor Runtime Policy', () => {
 // ===========================================================================
 
 describe('Integration: Recipe Supervisor Runtime Policy', () => {
+  it('reuses approved recipe non-interactively when enum input changes within bounded envelope', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    const recipe = makeRecipe({
+      inputs: {
+        target: { type: 'string', pattern: '^[a-z]+$' },
+        deploy_env: { type: 'string', enum: ['dev', 'staging'] },
+      },
+      steps: [
+        {
+          id: 'step-1',
+          description: 'echo target and env',
+          run: { command: 'echo', args: ['{{inputs.target}}', '{{inputs.deploy_env}}'], mode: 'structured', timeoutMs: 5000 },
+        },
+      ],
+    });
+    const sourcePath = writeRecipeFile(recipesDir, recipe);
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+
+    createApprovedRecipeManifest(recipe, dir, manifestPath, sourcePath, {
+      resolvedInputs: { target: 'hello', deploy_env: 'dev' },
+    });
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { target: 'hello', deploy_env: 'staging' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'success');
+  });
+
+  it('detects recipe drift when candidate input leaves approved bounded envelope', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    const recipe = makeRecipe();
+    const sourcePath = writeRecipeFile(recipesDir, recipe);
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+
+    const manifest = createApprovedRecipeManifest(recipe, dir, manifestPath, sourcePath, {
+      resolvedInputs: { target: 'hello' },
+    });
+    manifest.inputApprovalEnvelopes = {
+      target: { type: 'enum', values: ['hello'] },
+    };
+    saveManifest(manifest, manifestPath);
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { target: 'world' },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'drift_detected');
+  });
+
   it('requires acknowledged risk assessment before non-interactive reuse', async () => {
     const dir = tmpDir();
     const recipesDir = join(dir, 'recipes');

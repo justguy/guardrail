@@ -1,6 +1,6 @@
 # Guardrail — Technical Status & Roadmap
 
-**Last updated:** 2026-04-07
+**Last updated:** 2026-04-09
 
 ---
 
@@ -306,12 +306,13 @@ docs/                    Product requirements, specs, invariants, implementation
 |---------|--------|----------|
 | CLI negotiate command | Not started | Low — agent round-trip via CLI (API available via negotiateWorkflowDelta) |
 | Agent-initiated retry for idempotent steps | Not started | Low — transition system handles retries, but no agent-triggered retry API |
+| Workflow helper-script gap | Done (partial) | High — typed shared-state outputs now cover `task` and `recipe_ref`; untyped workflow handoff remains for non-covered step producers |
 
 ### Template System Gaps
 
 | Feature | Status | Priority |
 |---------|--------|----------|
-| Bounded parameter approvals | Not started | High — schemas constrain values, but manifest reuse still binds to exact resolved inputs |
+| Bounded parameter approvals | Done (partial) | High — enum/numeric envelope reuse is implemented for template non-interactive reuse. Exact-value rules remain for unsupported or ambiguous schemas. |
 | Remote template pinning (SHA + URI) | Not started | Medium — `github://org/repo/file.json@SHA` |
 | Template composition / imports | Deferred | Intentionally out of v1 scope |
 | Trusted registries config | Not started | Needed for remote templates |
@@ -328,7 +329,7 @@ docs/                    Product requirements, specs, invariants, implementation
 
 | Feature | Status | Priority |
 |---------|--------|----------|
-| Range-based recipe approvals | Not started | High — recipe inputs are schema-validated, but approval reuse is still exact-value based |
+| Range-based recipe approvals | Done (partial) | High — bounded reuse now supports deterministic schema-constrained inputs while preserving `review_each_time`, `never_reuse`, and `content_hash` hard boundaries. |
 | Recipe execution via `guardrail run <recipe-id>` | Done | `run --recipe <id> --input k=v [--dry-run]` |
 | Recipe install (local + remote) | Done | `recipe install <path\|url\|github://...@sha>` with trusted source config; GitHub installs support authenticated fallback for private repos |
 | Recipe registry / remote publishing | Done | Local registry plus GitHub-backed community publish/install; broader hosted registry remains deferred to SaaS |
@@ -512,8 +513,8 @@ Three product phases, each with its own go-to-market motion.
 | D0f | Multiple recipe-root precedence and collision policy | v0.3 | Safe mixed local/shared/org recipe stacks | Not started — define deterministic resolution when the same recipe ID exists in more than one root, including explicit ordering, drift behavior, and user-facing diagnostics. |
 | D0g | Repo/config-level default recipe roots | v0.3 | Cleaner CI and per-repo setup | Not started — today `--recipe-search-dir` is explicit per invocation. Long term, a repo or user config should declare trusted default recipe roots so workflows do not need to repeat the flag. |
 | D0h | Cross-platform recipe-root and wrapper-path normalization | v0.4 | Reliable Windows/macOS/Linux portability | Not started — current cross-repo path handling is Unix-first. Add Windows-aware path normalization, separator handling, and fixture coverage for workflow recipe discovery and bundled wrappers. |
-| D0i | Workflow outputs and typed shared state between steps | v0.3 | Helper-free dynamic workflows | Not started — workflows still need helper scripts when one step produces data (for example a project ID) that later steps must consume. Add bounded step outputs, typed state, and explicit interpolation rules instead of ad hoc temp files. |
-| D0j | Bounded parameter approvals (reuse within approved ranges/subsets) | v0.3 | Lower re-approval churn for safe input changes | Not started — approval reuse is still exact-value based even when schemas already constrain values. Add manifest semantics for approved ranges, enums, and declared bounded subsets without widening outside the approved envelope. |
+| D0i | Workflow outputs and typed shared state between steps | v0.3 | Helper-free dynamic workflows | Done — step-level typed outputs and shared state references are implemented for `task` and `recipe_ref`; runtime resolves shared outputs, enforces declared types, and validates schema-bound consumption in workflow execution. |
+| D0j | Bounded parameter approvals (reuse within approved ranges/subsets) | v0.3 | Lower re-approval churn for safe input changes | Done — template and recipe reuse can proceed within approved bounded envelopes for deterministic input definitions, with exact-match and review/never-reuse protections still enforced. |
 | D0j1 | Bounded commit-plan support | v0.3 | Safe commit automation after unknown-file edits settle | Not started — today commit automation requires an exact predeclared path list. Add a reviewed commit-plan artifact or bounded commit contract so a workflow can propose changed files, let a human approve the bounded set, and then execute commit within that approved slice without falling back to “commit whatever changed.” |
 | D0k | Wrapper/version coupling and provenance policy | v0.3 | Safe upgrades for Guardrail-shipped wrapper recipes | Not started — recipes that depend on local wrapper helpers need explicit drift/provenance rules when the helper changes independently of the recipe artifact. Define how wrapper hashes, bundled versions, and recipe compatibility are pinned and surfaced to users. |
 | D0l | Org policy for trusted recipe roots and external execution sources | v0.4 | Central governance for shared recipe libraries | Not started — today extra recipe roots are caller-supplied. Add org/repo policy controls for which external recipe roots, mounted paths, or registries are trusted and when human approval is still required. |

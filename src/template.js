@@ -648,10 +648,113 @@ export function hashTemplateExecution(templateDef, resolvedInputs, envIntersecti
 // Template manifest
 // ---------------------------------------------------------------------------
 
+function createTemplateDefinitionHash(templateDef) {
+  return createHash('sha256').update(serializeStable(templateDef)).digest('hex');
+}
+
+function buildInputApprovalEnvelope(schema) {
+  if (!schema || typeof schema !== 'object') {
+    return null;
+  }
+  const explicitMode = typeof schema.approval_mode === 'string'
+    ? schema.approval_mode
+    : null;
+  if (explicitMode === 'review_each_time' || explicitMode === 'exact') {
+    return null;
+  }
+
+  if (schema.type === 'string' && Array.isArray(schema.enum) && schema.enum.length > 0) {
+    if (explicitMode && explicitMode !== 'enum') {
+      return null;
+    }
+    return {
+      type: 'enum',
+      values: [...schema.enum],
+    };
+  }
+
+  if (
+    schema.type === 'integer' &&
+    Number.isFinite(schema.min) &&
+    Number.isFinite(schema.max) &&
+    typeof schema.min === 'number' &&
+    typeof schema.max === 'number'
+  ) {
+    if (explicitMode && explicitMode !== 'range') {
+      return null;
+    }
+    return {
+      type: 'integer_range',
+      min: schema.min,
+      max: schema.max,
+    };
+  }
+
+  return null;
+}
+
+function buildInputApprovalEnvelopes(inputSchema) {
+  const envelopes = {};
+  for (const [key, schema] of Object.entries(inputSchema || {})) {
+    const envelope = buildInputApprovalEnvelope(schema);
+    if (envelope) {
+      envelopes[key] = envelope;
+    }
+  }
+  return envelopes;
+}
+
+function isBoundedInputEnvelopeMatch(value, envelope) {
+  if (!envelope || typeof envelope !== 'object') {
+    return false;
+  }
+
+  if (envelope.type === 'enum') {
+    return Array.isArray(envelope.values) && envelope.values.includes(value);
+  }
+
+  if (envelope.type === 'integer_range') {
+    return Number.isInteger(value) && value >= envelope.min && value <= envelope.max;
+  }
+
+  return false;
+}
+
+function stringifyEnvelope(envelope) {
+  if (!envelope || typeof envelope !== 'object') {
+    return 'unbounded';
+  }
+  if (envelope.type === 'enum') {
+    return `enum(${JSON.stringify(envelope.values)})`;
+  }
+  if (envelope.type === 'integer_range') {
+    return `integer_range[min=${envelope.min}, max=${envelope.max}]`;
+  }
+  return envelope.type;
+}
+
+function diffInputValue(key, candidateValue, approvedValue, envelope, diffs) {
+  if (JSON.stringify(candidateValue) === JSON.stringify(approvedValue)) {
+    return;
+  }
+
+  if (envelope && isBoundedInputEnvelopeMatch(candidateValue, envelope) && isBoundedInputEnvelopeMatch(approvedValue, envelope)) {
+    return;
+  }
+
+  if (envelope) {
+    diffs.push(`~ input "${key}" outside approved envelope: ${JSON.stringify(approvedValue)} -> ${JSON.stringify(candidateValue)} (envelope: ${stringifyEnvelope(envelope)})`);
+    return;
+  }
+
+  diffs.push(`~ input "${key}": ${JSON.stringify(approvedValue)} -> ${JSON.stringify(candidateValue)}`);
+}
+
 /**
  * Create a template approval manifest.
  */
 export function createTemplateManifest(templateDef, templateHash, riskAssessment, resolvedInputs, envIntersection) {
+  const inputApprovalEnvelopes = buildInputApprovalEnvelopes(templateDef.inputs || {});
   return {
     version: TEMPLATE_MANIFEST_VERSION,
     tool: 'guardrail',
@@ -660,7 +763,9 @@ export function createTemplateManifest(templateDef, templateHash, riskAssessment
     templateKind: templateDef.kind,
     approvedAt: new Date().toISOString(),
     templateHash,
+    templateDefHash: createTemplateDefinitionHash(templateDef),
     resolvedInputs,
+    inputApprovalEnvelopes,
     envIntersection,
     riskAssessment: {
       trustClass:                 riskAssessment.trustClass   ?? templateDef.trust_class,
@@ -683,18 +788,32 @@ export function diffTemplateManifests(candidate, approved) {
   if (candidate.template !== approved.template) {
     diffs.push(`~ template name: "${approved.template}" -> "${candidate.template}"`);
   }
-  if (candidate.templateHash !== approved.templateHash) {
-    diffs.push(`~ templateHash: ${approved.templateHash?.slice(0, 12)}... -> ${candidate.templateHash?.slice(0, 12)}...`);
+  const hasApprovalEnvelopes = approved && Object.keys(approved.inputApprovalEnvelopes || {}).length > 0;
+  const hasTemplateDefHashMetadata =
+    approved?.templateDefHash !== undefined && candidate?.templateDefHash !== undefined;
+
+  if (hasTemplateDefHashMetadata && candidate.templateDefHash !== approved.templateDefHash) {
+    diffs.push(`~ templateDefHash: ${approved.templateDefHash?.slice(0, 12)}... -> ${candidate.templateDefHash?.slice(0, 12)}...`);
   }
 
   // Compare resolved inputs
   const cInputs = candidate.resolvedInputs || {};
   const aInputs = approved.resolvedInputs || {};
   const allKeys = new Set([...Object.keys(cInputs), ...Object.keys(aInputs)]);
-  for (const key of allKeys) {
-    if (JSON.stringify(cInputs[key]) !== JSON.stringify(aInputs[key])) {
-      diffs.push(`~ input "${key}": ${JSON.stringify(aInputs[key])} -> ${JSON.stringify(cInputs[key])}`);
+  if (!hasApprovalEnvelopes) {
+    for (const key of allKeys) {
+      if (JSON.stringify(cInputs[key]) !== JSON.stringify(aInputs[key])) {
+        diffs.push(`~ input "${key}": ${JSON.stringify(aInputs[key])} -> ${JSON.stringify(cInputs[key])}`);
+      }
     }
+  } else {
+    for (const key of allKeys) {
+      diffInputValue(key, cInputs[key], aInputs[key], approved.inputApprovalEnvelopes[key], diffs);
+    }
+  }
+
+  if (!hasApprovalEnvelopes && candidate.templateHash !== approved.templateHash) {
+    diffs.push(`~ templateHash: ${approved.templateHash?.slice(0, 12)}... -> ${candidate.templateHash?.slice(0, 12)}...`);
   }
 
   // Compare env intersection

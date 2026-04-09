@@ -31,6 +31,14 @@ const SERVICE_STEP_TYPES = new Set([
 
 const RUN_DEFAULTS = { mode: 'structured', timeoutMs: 60000 };
 const STEP_DEFAULTS = { validator: 'exit_code', updateSource: 'none' };
+const VALID_OUTPUT_TYPES = new Set(['string', 'number', 'boolean', 'json']);
+const OUTPUT_PATH_SEGMENT_RE = /^[A-Za-z0-9_]+$/;
+const OUTPUT_FROM_ALLOWED_ROOTS = new Map([
+  ['task', new Set(['protocolMessages', 'validationStatus', 'exitCode'])],
+  ['recipe_ref', new Set(['status', 'stepsExecuted', 'reason', 'results'])],
+]);
+const STATE_REF_RE = /^\{\{state\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\}\}$/;
+const STATE_REF_TOKEN_RE = /\{\{|}}/;
 
 // ---------------------------------------------------------------------------
 // Validation error
@@ -85,6 +93,40 @@ function collectUniqueIds(items, label) {
   return { ids, errors };
 }
 
+function parseStateReference(value) {
+  if (typeof value !== 'string') return { type: 'not_reference' };
+  const match = value.match(STATE_REF_RE);
+  if (!match) {
+    if (STATE_REF_TOKEN_RE.test(value)) {
+      return { type: 'malformed', value };
+    }
+    return { type: 'not_reference' };
+  }
+  const [, path] = match;
+  const segments = path.split('.');
+  if (segments.length !== 2 || segments.some(segment => !OUTPUT_PATH_SEGMENT_RE.test(segment))) {
+    return { type: 'malformed', value };
+  }
+  return {
+    type: 'reference',
+    segments,
+    producerId: segments[0],
+    outputKey: segments[1],
+    value,
+  };
+}
+
+function parseOutputFromPath(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return { type: 'error', message: 'from must be a non-empty string' };
+  }
+  const segments = value.split('.');
+  if (!segments.length || segments.some(segment => !OUTPUT_PATH_SEGMENT_RE.test(segment))) {
+    return { type: 'error', message: `from path must be dot-delimited segments of [A-Za-z0-9_]` };
+  }
+  return { type: 'ok', segments };
+}
+
 function validateEntryStep(entryStep, stepIds) {
   if (typeof entryStep !== 'string' || entryStep.trim() === '') {
     return [`entryStep must be a non-empty string, got ${JSON.stringify(entryStep)}`];
@@ -127,6 +169,148 @@ function validateStepBody(step, serviceIds) {
     if (step.inputs !== undefined && (!step.inputs || typeof step.inputs !== 'object' || Array.isArray(step.inputs))) {
       errors.push(`${prefix}: recipe_ref inputs must be an object when provided`);
     }
+  }
+
+  return errors;
+}
+
+function validateStepOutputs(step, errors) {
+  const prefix = `step ${JSON.stringify(step.id)}`;
+  const { outputs } = step;
+
+  if (outputs === undefined) return;
+
+  if (SERVICE_STEP_TYPES.has(step.type)) {
+    errors.push(`${prefix}: outputs are not supported for service steps`);
+    return;
+  }
+
+  if (step.type !== 'task' && step.type !== 'recipe_ref') {
+    errors.push(`${prefix}: outputs are only supported for task and recipe_ref steps`);
+    return;
+  }
+
+  if (!outputs || typeof outputs !== 'object' || Array.isArray(outputs)) {
+    errors.push(`${prefix}: outputs must be an object`);
+    return;
+  }
+
+  const allowedFromRoots = OUTPUT_FROM_ALLOWED_ROOTS.get(step.type);
+
+  for (const [outputKey, outputSpec] of Object.entries(outputs)) {
+    if (!OUTPUT_PATH_SEGMENT_RE.test(outputKey)) {
+      errors.push(`${prefix}.outputs: output key ${JSON.stringify(outputKey)} must use only [A-Za-z0-9_]`);
+      continue;
+    }
+    if (!outputSpec || typeof outputSpec !== 'object' || Array.isArray(outputSpec)) {
+      errors.push(`${prefix}.outputs.${JSON.stringify(outputKey)}: must be an object`);
+      continue;
+    }
+    if (!VALID_OUTPUT_TYPES.has(outputSpec.type)) {
+      errors.push(`${prefix}.outputs.${JSON.stringify(outputKey)}.type must be one of ${[...VALID_OUTPUT_TYPES].join(', ')}`);
+    }
+    const parsedFrom = parseOutputFromPath(outputSpec.from);
+    if (parsedFrom.type === 'error') {
+      errors.push(`${prefix}.outputs.${JSON.stringify(outputKey)}.from: ${parsedFrom.message}`);
+      continue;
+    }
+    if (!allowedFromRoots.has(parsedFrom.segments[0])) {
+      errors.push(
+        `${prefix}.outputs.${JSON.stringify(outputKey)}.from has disallowed root ${JSON.stringify(parsedFrom.segments[0])}`
+      );
+    }
+  }
+}
+
+function collectDeclaredOutputs(steps) {
+  const declared = new Map();
+  for (const step of steps) {
+    if (typeof step.id !== 'string' || step.id.trim() === '') continue;
+    const outputKeys = new Set();
+    if (step.outputs && typeof step.outputs === 'object' && !Array.isArray(step.outputs)) {
+      for (const key of Object.keys(step.outputs)) {
+        outputKeys.add(key);
+      }
+    }
+    declared.set(step.id, outputKeys);
+  }
+  return declared;
+}
+
+function validateStateReferenceGraph(steps, declaredOutputsByStep) {
+  const errors = [];
+  const referencesByConsumer = new Map();
+
+  for (const step of steps) {
+    if (typeof step.id !== 'string' || !step.id.trim()) continue;
+    const refs = [];
+    if (step.type === 'task') {
+      const args = Array.isArray(step.run?.args) ? step.run.args : [];
+      args.forEach((arg, index) => {
+        const parsed = parseStateReference(arg);
+        if (parsed.type === 'malformed') {
+          errors.push(`${JSON.stringify(step.id)}.${index}: malformed state reference ${JSON.stringify(arg)}`);
+        } else if (parsed.type === 'reference') {
+          refs.push(parsed);
+        }
+      });
+    }
+    if (step.type === 'recipe_ref') {
+      for (const [key, value] of Object.entries(step.inputs || {})) {
+        if (typeof value !== 'string') continue;
+        const parsed = parseStateReference(value);
+        if (parsed.type === 'malformed') {
+          errors.push(`${JSON.stringify(step.id)}.inputs.${key}: malformed state reference ${JSON.stringify(value)}`);
+        } else if (parsed.type === 'reference') {
+          refs.push(parsed);
+        }
+      }
+    }
+
+    for (const parsed of refs) {
+      const { producerId, outputKey, value } = parsed;
+      if (!declaredOutputsByStep.has(producerId)) {
+        errors.push(`${JSON.stringify(step.id)}: state reference ${JSON.stringify(value)} does not reference a declared step`);
+      } else if (!declaredOutputsByStep.get(producerId).has(outputKey)) {
+        errors.push(`${JSON.stringify(step.id)}: state reference ${JSON.stringify(value)} does not match declared outputs on ${JSON.stringify(producerId)}`);
+      }
+    }
+    if (refs.length > 0) {
+      referencesByConsumer.set(step.id, refs.map((ref) => ref.producerId));
+    }
+  }
+
+  const visited = new Set();
+  const active = new Set();
+  const stackPath = [];
+
+  const dfs = (node) => {
+    if (active.has(node)) {
+      const start = stackPath.indexOf(node);
+      const cycle = [...stackPath.slice(start), node].join(' -> ');
+      errors.push(`state reference cycle detected: ${cycle}`);
+      return;
+    }
+    if (visited.has(node)) return;
+
+    const nextNodes = referencesByConsumer.get(node);
+    if (!nextNodes || nextNodes.length === 0) {
+      visited.add(node);
+      return;
+    }
+
+    active.add(node);
+    stackPath.push(node);
+    for (const next of nextNodes) {
+      dfs(next);
+    }
+    active.delete(node);
+    stackPath.pop();
+    visited.add(node);
+  };
+
+  for (const node of referencesByConsumer.keys()) {
+    dfs(node);
   }
 
   return errors;
@@ -213,9 +397,12 @@ function validateWorkflowDefinition(def) {
     if (typeof step.id !== 'string' || step.id.trim() === '') continue;
     errors.push(...validateStepBody(step, svcResult.ids));
     errors.push(...validateStepTransitions(step, stepResult.ids));
+    validateStepOutputs(step, errors);
   }
 
   errors.push(...validateRollbackSection(def));
+  const declaredOutputsByStep = collectDeclaredOutputs(steps);
+  errors.push(...validateStateReferenceGraph(steps, declaredOutputsByStep));
 
   // ReDoS safety check: reject any validator regex with catastrophic backtracking potential
   for (const step of steps) {
@@ -359,6 +546,25 @@ function normalizeService(svc, projectRoot) {
   return normalized;
 }
 
+function normalizeRecipeRefInputs(recipeInputs = {}, stepId) {
+  const staticInputs = {};
+  const templateInputRefs = {};
+
+  for (const [key, value] of Object.entries(recipeInputs)) {
+    const parsed = parseStateReference(value);
+    if (parsed.type === 'reference') {
+      templateInputRefs[key] = value;
+      continue;
+    }
+    if (parsed.type === 'malformed') {
+      throw new Error(`Workflow step "${stepId}": ${JSON.stringify(value)} is a malformed state reference in recipe inputs`);
+    }
+    staticInputs[key] = value;
+  }
+
+  return { staticInputs, templateInputRefs };
+}
+
 function resolveRecipeAllowUnverified(step, options = {}) {
   if (Object.prototype.hasOwnProperty.call(step, 'allow_unverified')) {
     return !!step.allow_unverified;
@@ -388,11 +594,33 @@ function normalizeRecipeRefStep(step, projectRoot, options = {}) {
     throw new Error(`Workflow step "${step.id}": ${err.message}`);
   }
 
+  const { staticInputs, templateInputRefs } = normalizeRecipeRefInputs(step.inputs || {}, step.id);
+
   let inputResult;
   try {
-    inputResult = resolveInputs(resolvedRecipe.recipe, step.inputs || {}, { execution_shape: 'structured' });
+    inputResult = resolveInputs(resolvedRecipe.recipe, staticInputs, { execution_shape: 'structured' });
   } catch (err) {
-    throw new Error(`Workflow step "${step.id}": ${err.message}`);
+    const missingTemplateReferences = Object.keys(templateInputRefs).filter((name) => !Object.prototype.hasOwnProperty.call(staticInputs, name));
+    const message = err.message
+      .split('\n')
+      .filter((line) => {
+        if (!line.startsWith('  - Missing required input: ')) return true;
+        const match = line.match(/  - Missing required input: "([^"]+)"/);
+        return !match || !missingTemplateReferences.includes(match[1]);
+      })
+      .join('\n');
+    const normalizedMessage = message.trim();
+    const hasOnlyHeader = normalizedMessage === 'Input validation failed:';
+    if (normalizedMessage && !hasOnlyHeader) {
+      throw new Error(`Workflow step "${step.id}": ${normalizedMessage}`);
+    }
+    inputResult = { resolved: {}, flagged: [] };
+  }
+
+  for (const refInput of Object.keys(templateInputRefs)) {
+    if (!Object.prototype.hasOwnProperty.call(resolvedRecipe.recipe.inputs || {}, refInput)) {
+      throw new Error(`Workflow step "${step.id}": recipe input "${refInput}" is not declared`);
+    }
   }
 
   const { version: requestedVersion } = parseRecipeSpecifier(step.recipe);
@@ -422,6 +650,7 @@ function normalizeRecipeRefStep(step, projectRoot, options = {}) {
     allowUnverified,
     resolvedInputs: inputResult.resolved,
     flaggedInputs,
+    ...(Object.keys(templateInputRefs).length > 0 ? { templateInputs: templateInputRefs } : {}),
     inputContentHashes: collectRecipeInputContentHashes(resolvedRecipe.recipe, inputResult.resolved, {
       cwd: projectRoot,
     }),
@@ -541,6 +770,9 @@ function diffStepFields(id, cStep, aStep) {
   }
   if (cStep.updateSource !== aStep.updateSource) {
     diffs.push(`~ Step ${id} updateSource: ${pretty(aStep.updateSource)} -> ${pretty(cStep.updateSource)}`);
+  }
+  if (!deepEqual(cStep.outputs, aStep.outputs)) {
+    diffs.push(`~ Step ${id} outputs: ${pretty(aStep.outputs)} -> ${pretty(cStep.outputs)}`);
   }
 
   return diffs;

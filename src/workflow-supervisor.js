@@ -43,7 +43,7 @@ import {
 } from './negotiation.js';
 import { checkTimePolicy, acquireLock } from './runtime-policy.js';
 import { createAuditLog } from './audit.js';
-import { resolveRecipeById } from './recipe-runner.js';
+import { resolveInputs, resolveRecipeById } from './recipe-runner.js';
 import { hashRecipe } from './recipe.js';
 import { executeRecipe } from './recipe-executor.js';
 import { verifyRecipeInputContentHashes } from './prompt-inputs.js';
@@ -53,6 +53,9 @@ import {
   emitExecutionEnd as emitSupervisorExecutionEnd,
   mapResultStatusToProgressStatus,
 } from './progress-events.js';
+
+const STATE_REFERENCE_RE = /\{\{state\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\}\}/g;
+const SHARED_OUTPUT_TYPES = new Set(['string', 'number', 'boolean', 'json']);
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -135,6 +138,140 @@ function formatRecipeRefBoundaryMismatch(expected = {}, actual = {}) {
   }
   if (parts.length === 0) return null;
   return parts.join(', ');
+}
+
+function splitStatePath(path) {
+  if (typeof path !== 'string') return [];
+  return path.match(/[^.[\]]+/g) ?? [];
+}
+
+function resolveByPath(context, path) {
+  const segments = splitStatePath(path);
+  let value = context;
+
+  for (const segment of segments) {
+    if (value === null || value === undefined) return undefined;
+
+    const index = String(Number(segment)) === segment ? Number(segment) : segment;
+    value = value[index];
+    if (value === undefined) return undefined;
+  }
+
+  return value;
+}
+
+function isTypedMatch(value, expectedType) {
+  if (expectedType === 'string') return typeof value === 'string';
+  if (expectedType === 'number') return typeof value === 'number' && Number.isFinite(value);
+  if (expectedType === 'boolean') return typeof value === 'boolean';
+  return value !== undefined; // json
+}
+
+function resolveStateReferenceValue(raw, runtimeState, { preserveType = false } = {}) {
+  if (typeof raw !== 'string') {
+    return { value: raw, consumed: false };
+  }
+
+  const matches = [...raw.matchAll(STATE_REFERENCE_RE)];
+  if (matches.length === 0) {
+    return { value: raw, consumed: false };
+  }
+
+  const resolved = raw.replace(STATE_REFERENCE_RE, (_, stepId, outputKey) => {
+    const stepState = runtimeState[stepId];
+    if (!stepState || !(outputKey in stepState)) {
+      throw new Error(`Missing state reference {{state.${stepId}.${outputKey}}}`);
+    }
+
+    const value = stepState[outputKey];
+    return value === undefined ? '' : String(value);
+  });
+
+  if (preserveType && matches.length === 1 && raw === matches[0][0]) {
+    const stepId = matches[0][1];
+    const outputKey = matches[0][2];
+    return { value: runtimeState[stepId]?.[outputKey], consumed: true };
+  }
+
+  return { value: resolved, consumed: true };
+}
+
+function resolveTaskArgs(runArgs, runtimeState) {
+  const resolved = [];
+  for (const arg of runArgs ?? []) {
+    try {
+      const result = resolveStateReferenceValue(arg, runtimeState, { preserveType: false });
+      resolved.push(String(result.value));
+    } catch (err) {
+      return { terminalReason: err.message };
+    }
+  }
+
+  return { resolvedArgs: resolved, terminalReason: null };
+}
+
+function resolveRecipeInputs(rawInputs, runtimeState, stepId) {
+  const resolvedInputs = {};
+  const sourceInputs = rawInputs || {};
+
+  for (const [key, raw] of Object.entries(sourceInputs)) {
+    try {
+      const result = resolveStateReferenceValue(raw, runtimeState, { preserveType: true });
+      if (result.consumed && result.value === undefined) {
+        return {
+          terminalReason: `Missing state reference in recipe_ref step "${stepId}" input "${key}"`,
+        };
+      }
+      resolvedInputs[key] = result.value;
+    } catch (err) {
+      return { terminalReason: `Missing state reference in recipe_ref step "${stepId}" input "${key}"` };
+    }
+  }
+
+  return { resolvedInputs };
+}
+
+function publishSharedOutputs(stepDef, executionContext, runtimeState, stepId) {
+  const outputs = stepDef?.outputs;
+  if (!outputs || typeof outputs !== 'object') return { terminalReason: null };
+
+  if (Object.keys(outputs).length === 0) return { terminalReason: null };
+
+  if (!runtimeState[stepId]) {
+    runtimeState[stepId] = {};
+  }
+
+  for (const [outputKey, outputSpec] of Object.entries(outputs)) {
+    if (!outputSpec || typeof outputSpec !== 'object') {
+      return { terminalReason: `Step "${stepId}" output "${outputKey}" declaration is invalid.` };
+    }
+
+    const outputType = outputSpec.type;
+    const from = outputSpec.from;
+
+    if (!SHARED_OUTPUT_TYPES.has(outputType)) {
+      return { terminalReason: `Step "${stepId}" output "${outputKey}" has unsupported type "${String(outputType)}".` };
+    }
+
+    if (typeof from !== 'string' || from.length === 0) {
+      return { terminalReason: `Step "${stepId}" output "${outputKey}" has an invalid from path.` };
+    }
+
+    const value = resolveByPath(executionContext, from);
+    if (value === undefined) {
+      return { terminalReason: `Step "${stepId}" output "${outputKey}" is missing value at "${from}".` };
+    }
+
+    if (!isTypedMatch(value, outputType)) {
+      return {
+        terminalReason: `Step "${stepId}" output "${outputKey}" type mismatch: expected ${outputType}, got ${typeof value}`,
+      };
+    }
+
+    runtimeState[stepId][outputKey] = value;
+  }
+
+  return { terminalReason: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -369,13 +506,13 @@ async function executeServiceStep(stepDef, workflow, serviceRegistry, logger) {
   }
 }
 
-async function executeTaskStep(stepDef, stepId, ctx) {
+async function executeTaskStep(stepDef, stepId, ctx, runtimeArgs, runtimeState = {}) {
   const { logger } = ctx;
   let { iteration } = ctx;
 
   const contract = createContract({
     command:   stepDef.run.command,
-    args:      stepDef.run.args || [],
+    args:      runtimeArgs ?? (stepDef.run.args || []),
     cwd:       stepDef.run.cwd,
     mode:      stepDef.run.mode || 'structured',
     timeoutMs: stepDef.run.timeoutMs,
@@ -433,11 +570,39 @@ async function executeTaskStep(stepDef, stepId, ctx) {
         return { outcome: 'validation_failed', iteration, terminalReason: null };
       }
     }
-    return { outcome: 'success', iteration, terminalReason: null };
+    const publishResult = publishSharedOutputs(stepDef, {
+      protocolMessages: workerResult.protocolMessages ?? [],
+      validationStatus: validation.status,
+      exitCode: workerResult.exitCode,
+    }, runtimeState, stepId);
+
+    if (publishResult.terminalReason) {
+      return { outcome: 'validation_failed', iteration, terminalReason: publishResult.terminalReason };
+    }
+
+    return {
+      outcome: 'success',
+      iteration,
+      terminalReason: null,
+      executionContext: {
+        protocolMessages: workerResult.protocolMessages ?? [],
+        validationStatus: validation.status,
+        exitCode: workerResult.exitCode,
+      },
+    };
   }
 
   if (validation.status === 'update_requested' && validation.updateProposal) {
-    return handleUpdateProposal(validation.updateProposal, contract, stepDef, stepId, ctx, iteration);
+    return handleUpdateProposal(
+      validation.updateProposal,
+      contract,
+      stepDef,
+      stepId,
+      ctx,
+      iteration,
+      runtimeArgs ?? (stepDef.run.args || []),
+      runtimeState,
+    );
   }
 
   if (validation.status === 'validation_failed') {
@@ -453,7 +618,7 @@ async function executeTaskStep(stepDef, stepId, ctx) {
   return { outcome: 'failure', iteration, terminalReason: `Unknown validation status: ${validation.status}` };
 }
 
-async function executeRecipeRefStep(stepDef, stepId, ctx) {
+async function executeRecipeRefStep(stepDef, stepId, ctx, runtimeState) {
   const {
     logger,
     workflow,
@@ -524,7 +689,25 @@ async function executeRecipeRefStep(stepDef, stepId, ctx) {
     };
   }
 
-  const execution = await executeRecipe(resolvedRecipe.recipe, stepDef.recipeRef.resolvedInputs, {
+  const templateInputResult = resolveRecipeInputs(stepDef.recipeRef.templateInputs || {}, runtimeState, stepId);
+  if (templateInputResult.terminalReason) {
+    return { outcome: 'validation_failed', terminalReason: templateInputResult.terminalReason };
+  }
+
+  const resolvedInputs = {
+    ...(stepDef.recipeRef.resolvedInputs || {}),
+    ...(templateInputResult.resolvedInputs || {}),
+  };
+
+  let recipeInputs;
+  try {
+    const inputResult = resolveInputs(resolvedRecipe.recipe, resolvedInputs, { execution_shape: 'structured' });
+    recipeInputs = inputResult.resolved;
+  } catch (err) {
+    return { outcome: 'validation_failed', terminalReason: `Recipe input validation failed for step "${stepId}": ${err.message}` };
+  }
+
+  const execution = await executeRecipe(resolvedRecipe.recipe, recipeInputs, {
     allowUnverified: stepDef.recipeRef.allowUnverified ?? false,
     cwd: workflow.projectRoot,
     stateDir,
@@ -535,6 +718,17 @@ async function executeRecipeRefStep(stepDef, stepId, ctx) {
   });
 
   if (execution.status === 'success') {
+    const publishResult = publishSharedOutputs(stepDef, {
+      status: execution.status,
+      stepsExecuted: execution.stepsExecuted,
+      reason: execution.reason,
+      results: execution.results,
+    }, runtimeState, stepId);
+
+    if (publishResult.terminalReason) {
+      return { outcome: 'validation_failed', terminalReason: publishResult.terminalReason };
+    }
+
     logger.info('recipe_ref_completed', { stepId, recipeId: resolvedRecipe.recipe.id, recipeVersion: resolvedRecipe.version });
     return { outcome: 'success' };
   }
@@ -544,7 +738,7 @@ async function executeRecipeRefStep(stepDef, stepId, ctx) {
   return { outcome: 'failure', terminalReason: reason };
 }
 
-async function handleUpdateProposal(proposal, contract, stepDef, stepId, ctx, iteration) {
+async function handleUpdateProposal(proposal, contract, stepDef, stepId, ctx, iteration, runtimeArgs, runtimeState) {
   const { logger, jsonOutput, maxIterations } = ctx;
 
   logger.info('update_proposed', { stepId, action: proposal.proposedUpdate?.action });
@@ -575,7 +769,7 @@ async function handleUpdateProposal(proposal, contract, stepDef, stepId, ctx, it
 
   if (iteration < maxIterations) {
     iteration += 1;
-    return executeTaskStep(stepDef, stepId, { ...ctx, iteration });
+    return executeTaskStep(stepDef, stepId, { ...ctx, iteration }, runtimeArgs, runtimeState);
   }
 
   return { outcome: 'failure', iteration, terminalReason: `Max iterations reached during update cycle for step "${stepId}"` };
@@ -673,6 +867,7 @@ async function executeWorkflow(workflow, {
   let failedStep = null;
   let finalStatus = 'success';
   let terminalReason = null;
+  const runtimeState = {};
 
   logger.info('workflow_execution_start', { entryStep: currentStep, maxIterations: workflow.maxIterations });
 
@@ -718,16 +913,26 @@ async function executeWorkflow(workflow, {
     } else if (stepDef.type === 'recipe_ref') {
       const recipeResult = await executeRecipeRefStep(stepDef, currentStep, {
         logger, workflow, recipeSearchDirs, auditLog, runId, workflowHash, stateDir,
-      });
+      }, runtimeState);
       outcome = recipeResult.outcome;
       if (recipeResult.terminalReason) terminalReason = recipeResult.terminalReason;
     } else if (stepDef.type === 'task') {
-      const taskResult = await executeTaskStep(stepDef, currentStep, {
-        logger, jsonOutput, maxIterations: workflow.maxIterations, iteration,
-      });
-      outcome = taskResult.outcome;
-      iteration = taskResult.iteration;
-      if (taskResult.terminalReason) terminalReason = taskResult.terminalReason;
+      const argsResult = resolveTaskArgs(stepDef.run.args, runtimeState);
+      if (argsResult.terminalReason) {
+        outcome = 'validation_failed';
+        terminalReason = argsResult.terminalReason;
+      } else {
+        const taskResult = await executeTaskStep(
+          stepDef,
+          currentStep,
+          { logger, jsonOutput, maxIterations: workflow.maxIterations, iteration },
+          argsResult.resolvedArgs,
+          runtimeState,
+        );
+        outcome = taskResult.outcome;
+        iteration = taskResult.iteration;
+        if (taskResult.terminalReason) terminalReason = taskResult.terminalReason;
+      }
     } else {
       logger.error('unknown_step_type', { stepId: currentStep, type: stepDef.type });
       return { stepsExecuted, failedStep: currentStep, finalStatus: 'policy_violation', terminalReason: `Unknown step type: ${stepDef.type}`, iteration };

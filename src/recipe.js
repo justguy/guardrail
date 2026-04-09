@@ -200,6 +200,77 @@ function validateGuardrails(guardrails) {
   return errors;
 }
 
+function makeInputApprovalEnvelope(schema) {
+  if (!schema || typeof schema !== 'object') return null;
+  const explicitMode = typeof schema.approval_mode === 'string'
+    ? schema.approval_mode
+    : null;
+  if (explicitMode === 'review_each_time' || explicitMode === 'exact') return null;
+  if (schema.content_hash === true) return null;
+
+  if (schema.type === 'string') {
+    if (explicitMode && explicitMode !== 'enum') return null;
+    if (!Array.isArray(schema.enum) || schema.enum.length === 0) return null;
+    return {
+      type: 'enum',
+      values: [...schema.enum],
+    };
+  }
+
+  if (schema.type === 'integer') {
+    if (explicitMode && explicitMode !== 'range') return null;
+    if (!Number.isInteger(schema.min) || !Number.isInteger(schema.max)) return null;
+    if (schema.min > schema.max) return null;
+    return {
+      type: 'integer_range',
+      min: schema.min,
+      max: schema.max,
+    };
+  }
+
+  return null;
+}
+
+function buildInputApprovalEnvelopes(recipe) {
+  if (!recipe || typeof recipe !== 'object' || !recipe.inputs || typeof recipe.inputs !== 'object') {
+    return {};
+  }
+
+  const envelopes = {};
+  for (const [key, schema] of Object.entries(recipe.inputs)) {
+    const envelope = makeInputApprovalEnvelope(schema);
+    if (envelope) {
+      envelopes[key] = envelope;
+    }
+  }
+  return envelopes;
+}
+
+function isWithinInputApprovalEnvelope(value, envelope) {
+  if (!envelope || typeof envelope !== 'object') return false;
+  if (envelope.type === 'enum') {
+    return Array.isArray(envelope.values) && envelope.values.includes(value);
+  }
+
+  if (envelope.type === 'integer_range') {
+    if (!Number.isInteger(value)) return false;
+    return value >= envelope.min && value <= envelope.max;
+  }
+
+  return false;
+}
+
+function describeInputApprovalEnvelope(envelope) {
+  if (!envelope || typeof envelope !== 'object') return '';
+  if (envelope.type === 'enum') {
+    return `enum(${envelope.values.map(v => JSON.stringify(v)).join(', ')})`;
+  }
+  if (envelope.type === 'integer_range') {
+    return `integer_range(${envelope.min}..${envelope.max})`;
+  }
+  return '';
+}
+
 // ---------------------------------------------------------------------------
 // Public API — validate
 // ---------------------------------------------------------------------------
@@ -439,6 +510,7 @@ export function loadPackedRecipe(filePath) {
 export function createRecipeManifest(recipe, recipeHash, riskAssessment, resolvedInputs, options = {}) {
   const requestedVersion = options.requestedVersion ?? null;
   const resolutionMode = requestedVersion ? 'pinned' : 'latest';
+  const inputApprovalEnvelopes = buildInputApprovalEnvelopes(recipe);
 
   return {
     version: RECIPE_MANIFEST_VERSION,
@@ -459,6 +531,7 @@ export function createRecipeManifest(recipe, recipeHash, riskAssessment, resolve
       allowUnverified: options.allowUnverified ?? false,
     },
     resolvedInputs,
+    inputApprovalEnvelopes,
     inputContentHashes: options.inputContentHashes ?? {},
     riskAssessment: {
       trustClass:                 riskAssessment.trustClass   ?? 'unknown',
@@ -477,6 +550,8 @@ export function diffRecipeManifests(candidate, approved) {
   const aRecipe = approved.recipe ?? {};
   const cRisk = candidate.riskAssessment ?? {};
   const aRisk = approved.riskAssessment ?? {};
+  const aInputEnvelopes = approved.inputApprovalEnvelopes ?? {};
+  const hasInputApprovalEnvelopes = Object.prototype.hasOwnProperty.call(approved, 'inputApprovalEnvelopes');
 
   if (!deepEqual(candidate.projectRoot, approved.projectRoot)) {
     diffs.push(`~ projectRoot: ${pretty(approved.projectRoot)} -> ${pretty(candidate.projectRoot)}`);
@@ -499,7 +574,25 @@ export function diffRecipeManifests(candidate, approved) {
   for (const key of allInputs) {
     const cVal = candidate.resolvedInputs?.[key];
     const aVal = approved.resolvedInputs?.[key];
+    const envelope = hasInputApprovalEnvelopes ? aInputEnvelopes[key] : null;
+
     if (!deepEqual(cVal, aVal)) {
+      if (
+        envelope
+        && isWithinInputApprovalEnvelope(cVal, envelope)
+        && isWithinInputApprovalEnvelope(aVal, envelope)
+      ) {
+        continue;
+      }
+
+      if (envelope) {
+        const envelopeText = describeInputApprovalEnvelope(envelope);
+        diffs.push(
+          `~ input "${key}": ${pretty(aVal)} -> ${pretty(cVal)} (outside approved envelope${envelopeText ? `: ${envelopeText}` : ''})`,
+        );
+        continue;
+      }
+
       diffs.push(`~ input "${key}": ${pretty(aVal)} -> ${pretty(cVal)}`);
     }
   }
