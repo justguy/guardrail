@@ -146,6 +146,32 @@ Templates support two kinds:
 
 Templates enforce structured mode only (no shell), require constrained inputs (pattern or enum for strings), and use an explicit environment handshake so templates cannot silently harvest env vars.
 
+Minimal valid template JSON example:
+
+```json
+{
+  "version": 1,
+  "kind": "template",
+  "name": "echo-message",
+  "description": "Print one message to stdout",
+  "trust_class": "reviewed_internal",
+  "risk": "green",
+  "inputs": {
+    "message": {
+      "type": "string",
+      "required": true,
+      "description": "Text to print",
+      "pattern": "^.{1,64}$"
+    }
+  },
+  "run": {
+    "command": "echo",
+    "args": ["{{message}}"],
+    "mode": "structured"
+  }
+}
+```
+
 Template inputs are constrained by schema, but approval reuse is still exact-value based on the resolved input set recorded in the manifest.
 
 ---
@@ -478,7 +504,7 @@ guardrail run --json --non-interactive --approved-manifest .guardrail/approved.j
 
 ### Supervisor progress stream
 
-For machine consumers, stream supervisor progress with `--json-stream`:
+For machine consumers, stream supervisor progress with `--json-stream` across all supported modes:
 
 ```bash
 # Command mode
@@ -507,6 +533,8 @@ guardrail workflow run --definition workflows/server-cycle.json \
   --non-interactive --approved-manifest .guardrail/workflows/server-cycle.approved.json \
   --json --json-stream
 ```
+
+When approval is required, `approval_pending` is emitted before execution in the active mode. After harmonization of runtime approval streaming, this applies to command, template, and recipe as well as workflow mode.
 
 Stream events are one JSON object per line (NDJSON) and include:
 

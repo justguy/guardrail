@@ -29,7 +29,7 @@ First interactive approval must have a real TTY. If you are invoking Guardrail t
 TPF_LLM_TOOL=codex tpf --passthrough-tty node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js ...
 ```
 
-Use `--passthrough-tty` only for approval-bearing interactive runs. The approval prompt expects the literal string `APPROVE`, not `y` or `yes`. After the manifest exists, go back to the normal wrapped non-interactive path.
+Use `--passthrough-tty` only for approval-bearing interactive runs. The approval prompt expects the literal string `APPROVE` (mode-agnostic), not `y` or `yes`. After the manifest exists, go back to the normal wrapped non-interactive path.
 
 ## Command Mode
 
@@ -67,6 +67,8 @@ Live progress stream:
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow run --definition <workflow-definition-path> --non-interactive --approved-manifest <approved-workflow-manifest-path> --json-stream
 ```
 
+When approval is required, `approval_pending` is the explicit approval event before runtime start in workflow mode. The runtime harmonization is intended to keep this behavior aligned for command and template/recipe modes as well.
+
 Workflow note:
 
 - Workflow steps can be `task`, `service_start`, `service_stop`, `service_restart`, or `recipe_ref`.
@@ -85,6 +87,50 @@ node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js workflow run \
   --definition /Users/adilevinshtein/Documents/dev/Project-Phalanx/workflows/review-and-commit.json \
   --recipe-search-dir /Users/adilevinshtein/Documents/dev/Guardian/recipes \
   --manifest /Users/adilevinshtein/Documents/dev/Project-Phalanx/.guardrail/workflows/review-and-commit.approved.json
+```
+
+## Template Mode
+
+Template authors should include these top-level fields at minimum:
+- `version`
+- `kind`
+- `name`
+- `description`
+- `trust_class`
+- `risk`
+- `inputs` as an object map
+- `run`
+
+Minimal valid template JSON:
+
+```json
+{
+  "version": 1,
+  "kind": "template",
+  "name": "echo-message",
+  "description": "Print one message to stdout",
+  "trust_class": "reviewed_internal",
+  "risk": "green",
+  "inputs": {
+    "message": {
+      "type": "string",
+      "required": true,
+      "description": "Text to print",
+      "pattern": "^.{1,64}$"
+    }
+  },
+  "run": {
+    "command": "echo",
+    "args": ["{{message}}"],
+    "mode": "structured"
+  }
+}
+```
+
+Template execution remains:
+
+```bash
+node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --template <TEMPLATE_PATH> --input message=hello --approved-manifest <APPROVED_TEMPLATE_MANIFEST_PATH>
 ```
 
 ## Recipe Mode
