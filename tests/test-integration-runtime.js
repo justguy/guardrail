@@ -270,7 +270,7 @@ describe('Integration: Command Supervisor Runtime Policy', () => {
     mkdirSync(manifestDir, { recursive: true });
     const manifestPath = join(manifestDir, 'approved.json');
 
-    createApprovedCommandManifest('echo', ['hello'], dir, manifestPath);
+    createApprovedCommandManifest('echo', ['stream'], dir, manifestPath);
 
     const result = await runSupervisor({
       command: 'echo',
@@ -296,7 +296,7 @@ describe('Integration: Command Supervisor Runtime Policy', () => {
     mkdirSync(manifestDir, { recursive: true });
     const manifestPath = join(manifestDir, 'approved.json');
 
-    createApprovedCommandManifest('echo', ['hello'], dir, manifestPath);
+    createApprovedCommandManifest('echo', ['stream'], dir, manifestPath);
 
     const events = [];
     const result = await runSupervisor({
@@ -306,6 +306,7 @@ describe('Integration: Command Supervisor Runtime Policy', () => {
       manifestPath,
       nonInteractive: true,
       jsonOutput: true,
+      trustClass: 'reviewed_internal',
       progressSink: (event) => events.push(event),
     });
 
