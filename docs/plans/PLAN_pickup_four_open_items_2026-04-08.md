@@ -369,6 +369,15 @@ Roadmap anchors:
 
 The adapter system exists and works for `stdin-json` and `env-shim`, but the public contract, trust surface, and end-to-end proof are still partial. This track hardens the current adapter surface first, then defines the clean path to future MCP transport support without pretending it is already safe.
 
+### Intent
+
+The intent of MCP support is additive transport compatibility, not a rewrite of Guardrail's approval model.
+
+- use MCP to reduce integration friction for MCP-first tools such as `cline`
+- keep `stdin-json` and `env-shim` working as-is
+- preserve the same approval, drift, trust, and auth-preflight semantics regardless of transport
+- fail closed when MCP transport state, correlation, or capability negotiation becomes ambiguous
+
 ### Current Gap
 
 Today:
@@ -385,6 +394,7 @@ Today:
 3. Keep the MCP gate explicit until transport, approval, trust, and auth semantics are fully designed and tested.
 4. Treat `cline` as a policy boundary artifact, not as a half-enabled runtime.
 5. Prefer end-to-end contract proofs over additional surface area.
+6. When MCP lands, ship it as an opt-in transport alongside existing adapter paths rather than as a replacement.
 
 ### Likely Files
 

@@ -21,6 +21,7 @@ Goal: Provide copy-paste prompt files for the remaining near-term Guardrail road
 - `docs/prompts/PROMPT_D0h_cross_platform_recipe_root_normalization.md`
 - `docs/prompts/PROMPT_D0j1_bounded_commit_plan_support.md`
 - `docs/prompts/PROMPT_D0k_wrapper_version_coupling_and_provenance.md`
+- `docs/prompts/PROMPT_recipe_launch_batch_ship_now_2026-04-09.md`
 
 ## Recommended Execution Order
 

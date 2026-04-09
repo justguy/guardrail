@@ -733,6 +733,8 @@ This check belongs in `adapter-cli.js`, not `adapter-engine.js`.
 
 Deferred to v0.3:
 
+- additive, opt-in MCP transport support that does not replace `stdin-json` or `env-shim`
+- parity with existing approval, drift, trust, and auth-preflight semantics before any MCP path is considered runnable
 - MCP server transport handling
 - bidirectional request/response correlation
 - streaming partial tool results
