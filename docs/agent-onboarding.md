@@ -162,6 +162,33 @@ Recipe version rules:
 - Recipe dry-run remains a preview path and does not require an approved manifest.
 - Recipe input constraints validate what values are allowed, but approval reuse still binds to the exact resolved input values saved in the manifest.
 
+Finding recipes:
+
+- List available recipes:
+
+```bash
+cd /Users/adilevinshtein/Documents/dev/Guardian
+node src/cli.js list
+node src/cli.js list --json
+node src/cli.js list --category <category> --search <text>
+```
+
+- Show installed versions for one recipe id:
+
+```bash
+cd /Users/adilevinshtein/Documents/dev/Guardian
+node src/cli.js recipe versions <recipe-id>
+```
+
+- To find the bundled Claude recipe specifically, look for `claude-exec` in `node src/cli.js list` output or run `node src/cli.js recipe versions claude-exec`.
+
+- Recipe lookup locations:
+  - `recipes`
+  - `node_modules/.guardrail/recipes`
+  - `~/.guardrail/recipes`
+
+- Use `--recipe-search-dir <path>` when workflow recipes are in another repo. Add it on both `workflow lint` and `workflow run` for each additional recipe root.
+
 Bundled Codex recipe:
 
 - `recipes/codex-exec.recipe.json` wraps `codex exec` through `src/codex-exec-wrapper.js`
@@ -188,11 +215,24 @@ node src/cli.js run --recipe codex-exec \
 Bundled Claude recipe:
 
 - `recipes/claude-exec.recipe.json` wraps `claude --print` through `src/claude-exec-wrapper.js`
-- supports inline prompt text, `input_files` prompt context, explicit working directory control, optional `allowed_tools`, `max_budget_usd`, `system_prompt`, and `session_name`
-- `working_dir` sets the Claude process cwd; `add_dirs` only grants additional tool-access roots
+- supports inline prompt text, `input_files` prompt context, explicit working directory control, optional `allowed_tools`, `max_budget_usd`, `system_prompt`, `session_name`, and session lifecycle inputs (`lifecycle`, `session_id`)
+- `working_dir` is a relative path that sets the Claude process cwd; `add_dirs` only grants additional tool-access roots
+- `input_files` are resolved relative to `working_dir`, read by the wrapper, and injected directly into Claude's prompt payload as tagged file blocks. Do not rely on a separate instruction telling Claude to open those files just to provide prompt context.
+- there is no separate `prompt_file` or `system_prompt_file` input on this recipe. Use `input_files` for stable file-backed prompt context and inline `system_prompt` only when you intentionally want review-on-every-run behavior.
 - omit `allowed_tools` to let Claude use its default built-in tool set
-- inline `prompt` and `system_prompt` are `review_each_time`; reusable prompt context should live in `input_files`
+- at least one prompt source must be present before Claude runs: inline `prompt`, one or more `input_files`, or both.
+- inline `prompt` and `system_prompt` are `review_each_time`; reusable prompt context should live in `input_files`. Session contracts do NOT override prompt reapproval.
 - `claude-exec` is not an outer sandbox. If it runs outside your host sandbox/container boundary, Claude executes with host privileges subject to Claude's own permission model. Guardrail warns about this in recipe approval risk reasons.
+
+Agent session contracts (`lifecycle`, `session_name`, `session_id`):
+
+- `lifecycle` defaults to `start` and accepts `start`, `continue`, or `attach`. Explicit lifecycle intent is required for reuse; nothing silently continues an ambient local session.
+- `no_session_persistence` defaults to enabled on this recipe, so `continue` / `attach` enforce Guardrail-side session identity and approval boundaries only. Do not assume they rehydrate Claude's own local conversation state.
+- `session_name` is required by the recipe and becomes the Guardrail session slot. Pass an explicit value matching `[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`; do not rely on storage-layer fallback names.
+- The session contract is persisted at `<projectRoot>/.guardrail/agent-sessions/<recipeId>/<slot>.json` and is independent from the recipe manifest. It binds tool, recipeId, recipeVersion, workingDir, scope (sorted `addDirs`), sessionName, and sessionId.
+- `continue` and `attach` fail closed with stable machine-readable reasons: `session_missing`, `session_drift`, `session_attach_mismatch`, or `session_already_exists`. Any identity-field change (tool, cwd, scope, recipe version, sessionName, sessionId) forces fresh approval.
+- Guardrail never reads `~/.claude/*` or `~/.codex/*`. Session IDs come from the caller via `--input session_id=...`, not from scraping the external CLI, and `lifecycle` / `session_id` stay Guardrail-side metadata rather than Claude CLI flags.
+- Both wrappers write `[guardrail-session] <json>` to stderr before spawning the underlying CLI so audit and test tooling can observe the lifecycle without parsing the child's stdout.
 
 Example interactive run:
 

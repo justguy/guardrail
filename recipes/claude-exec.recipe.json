@@ -21,13 +21,13 @@
     },
     "prompt": {
       "type": "string",
-      "description": "Inline prompt text to send to Claude",
+      "description": "Inline prompt text to send to Claude. Use this for per-run instructions; keep stable file-backed context in input_files.",
       "approval_mode": "review_each_time",
       "required": false
     },
     "input_files": {
       "type": "string",
-      "description": "One or more relative file paths whose contents become tagged prompt blocks. Repeat --input input_files=... to pass multiple files.",
+      "description": "One or more relative file paths resolved from working_dir. The wrapper reads their contents and injects them into Claude's prompt payload as tagged <input_file> blocks. Repeat --input input_files=... to pass multiple files. There is no separate prompt_file input.",
       "approval_mode": "list",
       "content_hash": true,
       "base_dir_input": "working_dir",
@@ -75,12 +75,12 @@
     },
     "system_prompt": {
       "type": "string",
-      "description": "Prompt appended to Claude's default system prompt. Use review_each_time because wording changes execution behavior.",
+      "description": "Prompt appended to Claude's default system prompt. This is inline text only; there is no system_prompt_file input. Use review_each_time because wording changes execution behavior.",
       "approval_mode": "review_each_time"
     },
     "working_dir": {
       "type": "string",
-      "description": "Relative directory Claude should use as its process cwd",
+      "description": "Relative directory Claude should use as its process cwd. input_files are resolved from this directory.",
       "approval_mode": "path_policy",
       "rules": {
         "must_be_relative": true,
@@ -105,13 +105,26 @@
     },
     "session_name": {
       "type": "string",
-      "description": "Display name for the session",
+      "description": "Session slot identifier used by the Guardrail agent-session contract. This value keys the stored session-contract file and bounds continue/attach lifecycle operations.",
       "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
     },
     "no_session_persistence": {
       "type": "boolean",
-      "description": "Disable Claude session persistence",
+      "description": "Disable Claude session persistence. Default true. Guardrail lifecycle/session_id inputs remain Guardrail-side session-contract metadata and do not by themselves rehydrate Claude conversation state.",
       "default": true,
+      "required": false
+    },
+    "lifecycle": {
+      "type": "string",
+      "description": "Session lifecycle intent: start a fresh named session, continue an existing one, or attach to a previously named session. Defaults to 'start'.",
+      "enum": ["start", "continue", "attach"],
+      "default": "start",
+      "required": false
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Machine-readable session identifier. Optional for 'start'; required for 'continue' and 'attach' if the approved session contract has one.",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$",
       "required": false
     }
   },
@@ -135,7 +148,9 @@
           "--working-dir", "{{inputs.working_dir}}",
           "--add-dirs", "{{inputs.add_dirs}}",
           "--session-name", "{{inputs.session_name}}",
-          "--no-session-persistence", "{{inputs.no_session_persistence}}"
+          "--no-session-persistence", "{{inputs.no_session_persistence}}",
+          "--lifecycle", "{{inputs.lifecycle}}",
+          "--session-id", "{{inputs.session_id}}"
         ],
         "mode": "structured"
       },
