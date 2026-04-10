@@ -293,14 +293,14 @@ AI execution recipes:
 - `content_hash` and `review_each_time` are still stronger than bounded list reuse. If a file-bearing input is content-hash bound, changing the file set or file contents still causes drift/reapproval even when the input itself is a list.
 - Some AI recipes include other required prompt-bearing inputs, which can make the recipe effectively approval-per-run. Check the recipe file before assuming unattended reuse is possible.
 - For direct interactive chat that must survive repeated host-runtime turns, prefer the resident lane CLI surface over repeated outer transport launches:
-  - `node src/cli.js lane start --id <lane-id> ...`
+  - `node src/cli.js lane start --id <lane-id> [--tool claude|codex] ...`
   - `node src/cli.js lane send --id <lane-id> --prompt "<message>"`
   - `node src/cli.js lane result --id <lane-id> [--request-id <id>]`
   - `node src/cli.js lane status --id <lane-id>`
   - `node src/cli.js lane stop --id <lane-id>`
 - `node src/cli.js lane list [--json]`
 - `node src/cli.js lane prune [--include-failed true] [--json]`
-- `lane start` is the one-time host-runtime step. It launches the resident daemon through a short-lived helper in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under `~/.guardrail/lanes/<id>.key`, writes an explicit `.guardrail/lanes/<id>/identity.json` record plus a fresh boot nonce, and fixes the executable boundary for later messages.
+- `lane start` is the one-time host-runtime step. It launches the resident daemon through a short-lived helper in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under `~/.guardrail/lanes/<id>.key`, writes an explicit `.guardrail/lanes/<id>/identity.json` record plus a fresh boot nonce, records the selected tool, and fixes the executable boundary for later messages.
 - `lane send` is the per-message step. It reads the host-side key through the Guardrail CLI, signs the request, writes the strict JSON payload into the lane FIFO, and reads the matching response back without reopening the outer transport/runtime hop.
 - If a request outlives the client-side wait window, `lane send` now returns a structured `pending` result with the request id instead of reporting `lane_expired`. Treat that as “the lane accepted the request and it is still running,” not as proof that Claude failed.
 - `lane result` is the bounded recovery/read step for those cases. Use it to fetch the stored output for the latest or named request after a long-running turn completes.
@@ -308,6 +308,8 @@ AI execution recipes:
 - `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is ready, busy, failed, expired, stale, or stopped, includes the current request id/start time plus the last completed result path, and surfaces `failureReason`, `failureStage`, `logPath`, lane identity, and boot nonce metadata when bootstrap, immediate post-start, or runtime startup failed. If the daemon disappears before the first request and no explicit failure metadata was written, Guardrail now infers that as `failed/post_start` instead of leaving a silent stale lane.
 - `lane list` is the portfolio view. Use it before starting another lane when multiple agents may already be active in the same repo.
 - `lane prune` removes dead lane artifacts (`stale`, `expired`, `stopped` by default). Use it after diagnosis/cleanup, not as a first reaction to a live lane you have not inspected yet.
+- Claude-oriented lane flags: `--system-prompt`, `--permission-mode`, `--allowed-tools`, `--max-budget-usd`, `--effort`, `--output-format`.
+- Codex-oriented lane flags: `--profile`, `--sandbox`, `--image-files`, `--color`, `--oss`, `--local-provider`, `--skip-git-repo-check`, `--ephemeral`, `--full-auto`.
 - The practical review-loop shape is:
   - start one approved Claude session with the full planned doc set in `input_files`
   - keep `system_prompt` fixed for the entire loop

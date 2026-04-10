@@ -34,18 +34,11 @@ export function parseResidentLaneArgs(argv) {
     laneDir: '',
     guardrailRepo: '',
     workingDir: '',
-    tool: '',
     model: '',
-    effort: '',
-    permissionMode: '',
-    outputFormat: '',
-    maxBudgetUsd: '',
-    allowedTools: '',
-    systemPrompt: '',
-    addDirs: '',
-    inputFiles: '',
     profile: '',
     sandbox: '',
+    addDirs: '',
+    inputFiles: '',
     imageFiles: '',
     color: '',
     oss: '',
@@ -59,7 +52,6 @@ export function parseResidentLaneArgs(argv) {
     bootNonce: '',
     sessionName: '',
     sessionId: '',
-    noSessionPersistence: '',
     authFd: '',
     pollIntervalMs: '',
     idleTimeoutMs: '',
@@ -83,44 +75,8 @@ export function parseResidentLaneArgs(argv) {
         options.workingDir = value;
         i += 1;
         break;
-      case '--tool':
-        options.tool = value;
-        i += 1;
-        break;
       case '--model':
         options.model = value;
-        i += 1;
-        break;
-      case '--effort':
-        options.effort = value;
-        i += 1;
-        break;
-      case '--permission-mode':
-        options.permissionMode = value;
-        i += 1;
-        break;
-      case '--output-format':
-        options.outputFormat = value;
-        i += 1;
-        break;
-      case '--max-budget-usd':
-        options.maxBudgetUsd = value;
-        i += 1;
-        break;
-      case '--allowed-tools':
-        options.allowedTools = value;
-        i += 1;
-        break;
-      case '--system-prompt':
-        options.systemPrompt = value;
-        i += 1;
-        break;
-      case '--add-dirs':
-        options.addDirs = value;
-        i += 1;
-        break;
-      case '--input-files':
-        options.inputFiles = value;
         i += 1;
         break;
       case '--profile':
@@ -129,6 +85,14 @@ export function parseResidentLaneArgs(argv) {
         break;
       case '--sandbox':
         options.sandbox = value;
+        i += 1;
+        break;
+      case '--add-dirs':
+        options.addDirs = value;
+        i += 1;
+        break;
+      case '--input-files':
+        options.inputFiles = value;
         i += 1;
         break;
       case '--image-files':
@@ -183,10 +147,6 @@ export function parseResidentLaneArgs(argv) {
         options.sessionId = value;
         i += 1;
         break;
-      case '--no-session-persistence':
-        options.noSessionPersistence = value;
-        i += 1;
-        break;
       case '--auth-fd':
         options.authFd = value;
         i += 1;
@@ -226,22 +186,15 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     : guardrailRepo;
 
   return {
-    adapterId: rawOptions.tool || 'claude',
+    adapterId: 'codex',
     laneDir,
     guardrailRepo,
     workingDir,
-    tool: rawOptions.tool || 'claude',
-    model: rawOptions.model || 'sonnet',
-    effort: rawOptions.effort || 'low',
-    permissionMode: rawOptions.permissionMode || 'default',
-    outputFormat: rawOptions.outputFormat || 'text',
-    maxBudgetUsd: rawOptions.maxBudgetUsd || '1.00',
-    allowedTools: rawOptions.allowedTools || '',
-    systemPrompt: rawOptions.systemPrompt || '',
-    addDirs: splitCsv(rawOptions.addDirs).map((dir) => resolve(workingDir, dir)),
-    inputFiles: splitCsv(rawOptions.inputFiles),
+    model: rawOptions.model || '',
     profile: rawOptions.profile || '',
     sandbox: rawOptions.sandbox || '',
+    addDirs: splitCsv(rawOptions.addDirs).map((dir) => resolve(workingDir, dir)),
+    inputFiles: splitCsv(rawOptions.inputFiles),
     imageFiles: splitCsv(rawOptions.imageFiles).map((file) => resolve(workingDir, file)),
     color: rawOptions.color || '',
     oss: shellTruthy(rawOptions.oss),
@@ -255,7 +208,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     bootNonce: rawOptions.bootNonce || '',
     sessionName: rawOptions.sessionName,
     sessionId: rawOptions.sessionId || '',
-    noSessionPersistence: shellTruthy(rawOptions.noSessionPersistence),
+    noSessionPersistence: false,
     authFd: parseInteger(rawOptions.authFd, null, 'auth_fd', 3),
     pollIntervalMs: parseInteger(rawOptions.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, 'poll_interval_ms', 50),
     idleTimeoutMs: parseInteger(rawOptions.idleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS, 'idle_timeout_ms', 1000),
@@ -265,39 +218,28 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
 }
 
 function buildWrapperArgs(options, request, lifecycle) {
-  const wrapperName = options.tool === 'codex' ? 'src/codex-exec-wrapper.js' : 'src/claude-exec-wrapper.js';
-  const wrapperPath = resolve(options.guardrailRepo, wrapperName);
+  const wrapperPath = resolve(options.guardrailRepo, 'src/codex-exec-wrapper.js');
   const args = [wrapperPath, '--prompt', request.prompt];
   if (options.inputFiles.length > 0) args.push('--input-files', options.inputFiles.join(','));
   if (options.model) args.push('--model', options.model);
+  if (options.profile) args.push('--profile', options.profile);
+  if (options.sandbox) args.push('--sandbox', options.sandbox);
   args.push('--working-dir', options.workingDir);
   if (options.addDirs.length > 0) args.push('--add-dirs', options.addDirs.join(','));
-  if (options.tool === 'codex') {
-    if (options.profile) args.push('--profile', options.profile);
-    if (options.sandbox) args.push('--sandbox', options.sandbox);
-    if (options.imageFiles.length > 0) args.push('--image-files', options.imageFiles.join(','));
-    if (options.color) args.push('--color', options.color);
-    if (options.oss) args.push('--oss', 'true');
-    if (options.localProvider) args.push('--local-provider', options.localProvider);
-    if (options.skipGitRepoCheck) args.push('--skip-git-repo-check', 'true');
-    if (options.ephemeral) args.push('--ephemeral', 'true');
-    if (options.fullAuto) args.push('--full-auto', 'true');
-  } else {
-    if (options.effort) args.push('--effort', options.effort);
-    if (options.permissionMode) args.push('--permission-mode', options.permissionMode);
-    if (options.outputFormat) args.push('--output-format', options.outputFormat);
-    if (options.maxBudgetUsd) args.push('--max-budget-usd', options.maxBudgetUsd);
-    if (options.allowedTools) args.push('--allowed-tools', options.allowedTools);
-    if (options.systemPrompt) args.push('--system-prompt', options.systemPrompt);
-  }
+  if (options.imageFiles.length > 0) args.push('--image-files', options.imageFiles.join(','));
+  if (options.color) args.push('--color', options.color);
+  if (options.oss) args.push('--oss', 'true');
+  if (options.localProvider) args.push('--local-provider', options.localProvider);
+  if (options.skipGitRepoCheck) args.push('--skip-git-repo-check', 'true');
+  if (options.ephemeral) args.push('--ephemeral', 'true');
+  if (options.fullAuto) args.push('--full-auto', 'true');
   args.push('--session-name', options.sessionName);
-  if (options.noSessionPersistence && options.tool !== 'codex') args.push('--no-session-persistence', 'true');
   args.push('--lifecycle', lifecycle);
   if (options.sessionId) args.push('--session-id', options.sessionId);
   return args;
 }
 
-async function spawnClaudeWrapper(args, cwd) {
+async function spawnCodexWrapper(args, cwd) {
   return await new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(process.execPath, args, {
       cwd,
@@ -315,7 +257,7 @@ async function spawnClaudeWrapper(args, cwd) {
     child.on('error', rejectPromise);
     child.on('close', (code, signal) => {
       if (signal) {
-        resolvePromise({ code: 1, stdout, stderr: `${stderr}\nclaude wrapper exited on signal ${signal}`.trim() });
+        resolvePromise({ code: 1, stdout, stderr: `${stderr}\ncodex wrapper exited on signal ${signal}`.trim() });
         return;
       }
       resolvePromise({ code: code ?? 1, stdout, stderr });
@@ -325,8 +267,8 @@ async function spawnClaudeWrapper(args, cwd) {
 
 const selfPath = fileURLToPath(import.meta.url);
 
-const CLAUDE_LANE_ADAPTER = {
-  adapterId: 'claude',
+const CODEX_LANE_ADAPTER = {
+  adapterId: 'codex',
   buildHelperArgs(options, helperAuthFd) {
     const args = [
       selfPath,
@@ -334,29 +276,21 @@ const CLAUDE_LANE_ADAPTER = {
       '--lane-dir', options.laneDir,
       '--guardrail-repo', options.guardrailRepo,
       '--working-dir', options.workingDir,
-      '--tool', options.tool || 'claude',
       '--lane-id', options.laneId || '',
       '--key-path', options.keyPath || '',
       '--session-name', options.sessionName,
       '--session-id', options.sessionId || '',
-      '--no-session-persistence', String(options.noSessionPersistence),
       '--poll-interval-ms', String(options.pollIntervalMs),
       '--idle-timeout-ms', String(options.idleTimeoutMs),
       '--model', options.model,
-      '--effort', options.effort,
-      '--permission-mode', options.permissionMode,
-      '--output-format', options.outputFormat,
-      '--max-budget-usd', options.maxBudgetUsd,
-      '--allowed-tools', options.allowedTools,
-      '--system-prompt', options.systemPrompt,
+      '--profile', options.profile,
+      '--sandbox', options.sandbox,
       '--add-dirs', options.addDirs.join(','),
       '--input-files', options.inputFiles.join(','),
-      '--profile', options.profile || '',
-      '--sandbox', options.sandbox || '',
       '--image-files', options.imageFiles.join(','),
-      '--color', options.color || '',
+      '--color', options.color,
       '--oss', String(options.oss),
-      '--local-provider', options.localProvider || '',
+      '--local-provider', options.localProvider,
       '--skip-git-repo-check', String(options.skipGitRepoCheck),
       '--ephemeral', String(options.ephemeral),
       '--full-auto', String(options.fullAuto),
@@ -375,29 +309,21 @@ const CLAUDE_LANE_ADAPTER = {
       '--lane-dir', options.laneDir,
       '--guardrail-repo', options.guardrailRepo,
       '--working-dir', options.workingDir,
-      '--tool', options.tool || 'claude',
       '--lane-id', options.laneId || '',
       '--key-path', options.keyPath || '',
       '--session-name', options.sessionName,
       '--session-id', options.sessionId || '',
-      '--no-session-persistence', String(options.noSessionPersistence),
       '--poll-interval-ms', String(options.pollIntervalMs),
       '--idle-timeout-ms', String(options.idleTimeoutMs),
       '--model', options.model,
-      '--effort', options.effort,
-      '--permission-mode', options.permissionMode,
-      '--output-format', options.outputFormat,
-      '--max-budget-usd', options.maxBudgetUsd,
-      '--allowed-tools', options.allowedTools,
-      '--system-prompt', options.systemPrompt,
+      '--profile', options.profile,
+      '--sandbox', options.sandbox,
       '--add-dirs', options.addDirs.join(','),
       '--input-files', options.inputFiles.join(','),
-      '--profile', options.profile || '',
-      '--sandbox', options.sandbox || '',
       '--image-files', options.imageFiles.join(','),
-      '--color', options.color || '',
+      '--color', options.color,
       '--oss', String(options.oss),
-      '--local-provider', options.localProvider || '',
+      '--local-provider', options.localProvider,
       '--skip-git-repo-check', String(options.skipGitRepoCheck),
       '--ephemeral', String(options.ephemeral),
       '--full-auto', String(options.fullAuto),
@@ -410,7 +336,7 @@ const CLAUDE_LANE_ADAPTER = {
     return args;
   },
   async runRequest(options, request, state, deps = {}) {
-    const runner = deps.runner || spawnClaudeWrapper;
+    const runner = deps.runner || spawnCodexWrapper;
     const lifecycle = state.startedConversation ? 'continue' : 'start';
     const startedAt = new Date().toISOString();
     const result = await runner(buildWrapperArgs(options, request, lifecycle), options.guardrailRepo);
@@ -429,17 +355,17 @@ const CLAUDE_LANE_ADAPTER = {
 };
 
 export async function runLaneRequest(options, request, state, deps = {}) {
-  return runResidentLaneRequest(CLAUDE_LANE_ADAPTER, options, request, state, deps);
+  return runResidentLaneRequest(CODEX_LANE_ADAPTER, options, request, state, deps);
 }
 
 export async function launchResidentLane(rawOptions, deps = {}) {
   const options = normalizeResidentLaneOptions(rawOptions);
-  return launchResidentLaneWithAdapter(options, CLAUDE_LANE_ADAPTER, deps);
+  return launchResidentLaneWithAdapter(options, CODEX_LANE_ADAPTER, deps);
 }
 
 export function launchResidentLaneDaemonHelper(rawOptions) {
   const options = normalizeResidentLaneOptions(rawOptions);
-  return launchResidentLaneDaemonHelperWithAdapter(options, CLAUDE_LANE_ADAPTER);
+  return launchResidentLaneDaemonHelperWithAdapter(options, CODEX_LANE_ADAPTER);
 }
 
 async function main() {
@@ -452,7 +378,7 @@ async function main() {
       return;
     }
     if (options.daemon) {
-      await runResidentLaneDaemonWithAdapter(options, CLAUDE_LANE_ADAPTER);
+      await runResidentLaneDaemonWithAdapter(options, CODEX_LANE_ADAPTER);
       return;
     }
 

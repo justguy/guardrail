@@ -39,6 +39,7 @@ function normalizeLaneCliOptions(raw = {}) {
     laneId,
     laneDir,
     keyPath,
+    tool: raw.tool || 'claude',
     sessionName: raw.sessionName || laneId || '',
     guardrailRepo: raw.guardrailRepo || '.',
     workingDir: raw.workingDir || '.',
@@ -119,6 +120,7 @@ async function appendLaneAuditEntry(laneOpts, event, details = {}) {
       trace_id: `lane:${laneOpts.laneId || laneOpts.sessionName || 'resident'}`,
       lane_id: laneOpts.laneId || null,
       lane_dir: laneOpts.laneDir || null,
+      tool: laneOpts.tool || 'claude',
       session_name: laneOpts.sessionName || null,
       session_id: laneOpts.sessionId || null,
       ...details,
@@ -207,6 +209,7 @@ Examples:
   guardrail run --shell "npm test && npm run lint"
   guardrail run --template ./templates/npm-publish.json --input package_dir=packages/my-lib --input tag=beta
   guardrail lane start --id claude-live
+  guardrail lane start --id codex-live --tool codex
   guardrail lane send --id claude-live --prompt "2x3=?"
   guardrail lane result --id claude-live
   guardrail lane result --id claude-live --request-id req-123
@@ -664,6 +667,7 @@ export function parseArgs(argv) {
       '--key-path': 'keyPath',
       '--guardrail-repo': 'guardrailRepo',
       '--working-dir': 'workingDir',
+      '--tool': 'tool',
       '--model': 'model',
       '--effort': 'effort',
       '--permission-mode': 'permissionMode',
@@ -673,6 +677,15 @@ export function parseArgs(argv) {
       '--system-prompt': 'systemPrompt',
       '--add-dirs': 'addDirs',
       '--input-files': 'inputFiles',
+      '--profile': 'profile',
+      '--sandbox': 'sandbox',
+      '--image-files': 'imageFiles',
+      '--color': 'color',
+      '--oss': 'oss',
+      '--local-provider': 'localProvider',
+      '--skip-git-repo-check': 'skipGitRepoCheck',
+      '--ephemeral': 'ephemeral',
+      '--full-auto': 'fullAuto',
       '--session-name': 'sessionName',
       '--session-id': 'sessionId',
       '--no-session-persistence': 'noSessionPersistence',
@@ -1122,7 +1135,7 @@ async function main() {
   // --- lane start/send -----------------------------------------------------
 
   if (parsed.subcommand === 'lane-start') {
-    const { launchResidentLane } = await import('./claude-resident-lane.js');
+    const { launchResidentLane } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     if (!laneOpts.laneId && !laneOpts.laneDir) {
       console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane start');
@@ -1178,6 +1191,7 @@ async function main() {
     } else {
       console.log(`Lane started: ${summary.sessionName}`);
       if (laneOpts.laneId) console.log(`  Lane id:       ${laneOpts.laneId}`);
+      console.log(`  Tool:          ${summary.tool || summary.adapterId || laneOpts.tool || 'claude'}`);
       console.log(`  Lane dir:      ${summary.laneDir}`);
       if (summary.keyPath) console.log(`  Key path:      ${summary.keyPath}`);
       console.log(`  Request FIFO:  ${summary.requestFifo}`);
@@ -1193,8 +1207,8 @@ async function main() {
   }
 
   if (parsed.subcommand === 'lane-send') {
-    const { sendResidentLaneMessage } = await import('./claude-resident-lane-client.js');
-    const { getResidentLaneResult, getResidentLaneStatus } = await import('./claude-resident-lane.js');
+    const { sendResidentLaneMessage } = await import('./resident-lane-client.js');
+    const { getResidentLaneResult, getResidentLaneStatus } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     if (!laneOpts.laneId && !laneOpts.laneDir) {
       console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane send');
@@ -1302,7 +1316,7 @@ async function main() {
   }
 
   if (parsed.subcommand === 'lane-result') {
-    const { getResidentLaneResult } = await import('./claude-resident-lane.js');
+    const { getResidentLaneResult } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     if (!laneOpts.laneId && !laneOpts.laneDir) {
       console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane result');
@@ -1327,7 +1341,7 @@ async function main() {
   }
 
   if (parsed.subcommand === 'lane-stop') {
-    const { stopResidentLane } = await import('./claude-resident-lane.js');
+    const { stopResidentLane } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     if (!laneOpts.laneId && !laneOpts.laneDir) {
       console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane stop');
@@ -1354,7 +1368,7 @@ async function main() {
   }
 
   if (parsed.subcommand === 'lane-list') {
-    const { listResidentLanes } = await import('./claude-resident-lane.js');
+    const { listResidentLanes } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     const listing = listResidentLanes(laneOpts);
     if (parsed.json) {
@@ -1371,6 +1385,7 @@ async function main() {
         for (const lane of listing.lanes) {
           const name = lane.laneId || lane.sessionName || lane.laneDir;
           console.log(`${name}: ${lane.status}${lane.alive ? ' (alive)' : ''}`);
+          console.log(`  Tool:          ${lane.tool ?? lane.adapterId ?? 'claude'}`);
           console.log(`  Lane dir:      ${lane.laneDir}`);
           console.log(`  Session:       ${lane.sessionName ?? 'n/a'}`);
           console.log(`  Request:       ${lane.currentRequestId ?? lane.lastRequestId ?? 'n/a'}`);
@@ -1383,7 +1398,7 @@ async function main() {
   }
 
   if (parsed.subcommand === 'lane-prune') {
-    const { pruneResidentLanes } = await import('./claude-resident-lane.js');
+    const { pruneResidentLanes } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     const result = pruneResidentLanes(laneOpts);
     for (const lane of result.pruned) {
@@ -1410,7 +1425,7 @@ async function main() {
   }
 
   if (parsed.subcommand === 'lane-status') {
-    const { getResidentLaneStatus } = await import('./claude-resident-lane.js');
+    const { getResidentLaneStatus } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     if (!laneOpts.laneId && !laneOpts.laneDir) {
       console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane status');
@@ -1421,6 +1436,7 @@ async function main() {
       console.log(JSON.stringify(status, null, 2));
     } else {
       console.log(`Lane status: ${status.status}`);
+      console.log(`  Tool:               ${status.tool ?? status.adapterId ?? 'claude'}`);
       if (laneOpts.laneId) console.log(`  Lane id:            ${laneOpts.laneId}`);
       console.log(`  Lane dir:           ${status.laneDir}`);
       if (status.sessionName) console.log(`  Session name:       ${status.sessionName}`);

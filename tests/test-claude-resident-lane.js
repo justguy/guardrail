@@ -33,6 +33,12 @@ import {
   validateLaneRequest,
   waitForResidentLaneBootstrap,
 } from '../src/claude-resident-lane.js';
+// Exercise the generic lane entrypoint, which now dispatches to Claude/Codex adapters.
+import {
+  parseResidentLaneArgs as parseGenericResidentLaneArgs,
+  normalizeResidentLaneOptions as normalizeGenericResidentLaneOptions,
+  runLaneRequest as runGenericLaneRequest,
+} from '../src/resident-lane.js';
 import { sendResidentLaneMessage } from '../src/claude-resident-lane-client.js';
 
 function tmpLaneDir() {
@@ -67,10 +73,13 @@ function makeFakeLaunchHelper(daemonPid, options = {}) {
 
 describe('Claude resident lane', () => {
   it('parses lane args by flag name', () => {
-    const parsed = parseResidentLaneArgs([
+    const parsed = parseGenericResidentLaneArgs([
       '--lane-dir', '.guardrail/lanes/math',
       '--guardrail-repo', '.',
       '--working-dir', '.',
+      '--tool', 'codex',
+      '--profile', 'dev',
+      '--sandbox', 'workspace-write',
       '--session-name', 'math-live-session',
       '--session-id', 'math-live-session-1',
       '--poll-interval-ms', '250',
@@ -81,6 +90,9 @@ describe('Claude resident lane', () => {
     assert.equal(parsed.laneDir, '.guardrail/lanes/math');
     assert.equal(parsed.guardrailRepo, '.');
     assert.equal(parsed.workingDir, '.');
+    assert.equal(parsed.tool, 'codex');
+    assert.equal(parsed.profile, 'dev');
+    assert.equal(parsed.sandbox, 'workspace-write');
     assert.equal(parsed.sessionName, 'math-live-session');
     assert.equal(parsed.sessionId, 'math-live-session-1');
     assert.equal(parsed.pollIntervalMs, '250');
@@ -90,7 +102,7 @@ describe('Claude resident lane', () => {
 
   it('normalizes resident lane options', () => {
     const dir = tmpLaneDir();
-    const options = normalizeResidentLaneOptions({
+    const options = normalizeGenericResidentLaneOptions({
       laneDir: '.guardrail/lanes/math',
       guardrailRepo: '.',
       workingDir: '.',
@@ -104,6 +116,7 @@ describe('Claude resident lane', () => {
     assert.equal(options.laneDir, resolve(dir, '.guardrail/lanes/math'));
     assert.equal(options.guardrailRepo, resolve(dir));
     assert.equal(options.workingDir, resolve(dir));
+    assert.equal(options.tool, 'claude');
     assert.equal(options.sessionName, 'math-live-session');
     assert.equal(options.sessionId, 'math-live-session-1');
     assert.equal(options.noSessionPersistence, false);
@@ -121,7 +134,7 @@ describe('Claude resident lane', () => {
 
   it('uses lifecycle start for the first request and continue after success', async () => {
     const dir = tmpLaneDir();
-    const options = normalizeResidentLaneOptions({
+    const options = normalizeGenericResidentLaneOptions({
       laneDir: '.guardrail/lanes/math',
       guardrailRepo: '.',
       workingDir: '.',
@@ -153,6 +166,49 @@ describe('Claude resident lane', () => {
     assert.ok(calls[1].includes('continue'));
     assert.ok(calls[0].includes('--session-name'));
     assert.ok(calls[0].includes('math-live-session'));
+  });
+
+  it('builds codex lane wrapper args when tool=codex', async () => {
+    const dir = tmpLaneDir();
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/codex',
+      guardrailRepo: '.',
+      workingDir: '.',
+      tool: 'codex',
+      sessionName: 'codex-live-session',
+      sessionId: 'codex-live-session-1',
+      model: 'gpt-5-codex',
+      profile: 'dev',
+      sandbox: 'workspace-write',
+      addDirs: 'docs,tests',
+      imageFiles: 'fixtures/a.png,fixtures/b.webp',
+      color: 'never',
+      oss: 'true',
+      localProvider: 'ollama',
+      skipGitRepoCheck: 'true',
+      ephemeral: 'true',
+      fullAuto: 'true',
+    }, dir);
+
+    const calls = [];
+    const runner = async (args) => {
+      calls.push(args);
+      return { code: 0, stdout: 'done\n', stderr: '' };
+    };
+
+    await runGenericLaneRequest(options, { id: 'req-1', prompt: 'review this' }, { startedConversation: false }, { runner });
+
+    assert.ok(calls[0][0].endsWith('src/codex-exec-wrapper.js'));
+    assert.ok(calls[0].includes('--profile'));
+    assert.ok(calls[0].includes('dev'));
+    assert.ok(calls[0].includes('--sandbox'));
+    assert.ok(calls[0].includes('workspace-write'));
+    assert.ok(calls[0].includes('--image-files'));
+    assert.ok(calls[0].includes(resolve(dir, 'fixtures/a.png') + ',' + resolve(dir, 'fixtures/b.webp')));
+    assert.ok(calls[0].includes('--full-auto'));
+    assert.ok(calls[0].includes('true'));
+    assert.ok(calls[0].includes('--session-name'));
+    assert.ok(calls[0].includes('codex-live-session'));
   });
 
   it('reuses an already-running lane instead of failing', async () => {
@@ -635,6 +691,7 @@ describe('Claude resident lane', () => {
       pid: process.pid,
       status: 'ready',
       laneId: 'math',
+      tool: 'codex',
       sessionName: 'math-live-session',
       sessionId: 'math-live-session-1',
       lastRequestId: 'req-1',
@@ -647,6 +704,7 @@ describe('Claude resident lane', () => {
     const status = getResidentLaneStatus({ laneDir, keyPath, guardrailRepo: dir, laneId: 'math' });
     assert.equal(status.status, 'ready');
     assert.equal(status.alive, true);
+    assert.equal(status.tool, 'codex');
     assert.equal(status.keyPresent, true);
     assert.equal(status.requestFifoPresent, true);
     assert.equal(status.responseFifoPresent, true);

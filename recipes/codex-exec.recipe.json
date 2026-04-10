@@ -227,8 +227,8 @@
       "Prompt-bearing file inputs are content-hash bound at approval time and rechecked before execution",
       "Input files are appended as explicit tagged blocks so the prompt boundary is visible",
       "Guardrail does not provide outer sandboxing for Codex itself; running this recipe outside an external sandbox uses host privileges subject to Codex's own permission model",
-      "The wrapper only forwards supported codex exec flags and drops unset parameters"
-      ,
+      "The wrapper only forwards supported codex exec flags and drops unset parameters",
+      "For repeated interactive use after startup, prefer the resident lane CLI surface (`guardrail lane start --tool codex`, then `guardrail lane send`) instead of repeating outer transport launches",
       "The inline prompt uses interactive_message semantics: later user messages may change without reapproval only for the same persistent named session. Session-identity or runtime-boundary changes still require approval"
     ],
     "invariants": [

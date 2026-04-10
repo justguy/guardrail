@@ -458,6 +458,7 @@ describe('README Feature: Resident Lane Mode', () => {
         pid: sleeper.pid,
         status: 'ready',
         laneId: 'math-live',
+        tool: 'codex',
         sessionName: 'math-live',
         keyPath,
         lastActivityAt: new Date().toISOString(),
@@ -468,6 +469,7 @@ describe('README Feature: Resident Lane Mode', () => {
       const parsed = JSON.parse(r.stdout);
       assert.equal(parsed.status, 'ready');
       assert.equal(parsed.alive, true);
+      assert.equal(parsed.tool, 'codex');
       assert.equal(parsed.recommendedAction, 'send');
     } finally {
       sleeper.kill('SIGTERM');
@@ -490,6 +492,7 @@ describe('README Feature: Resident Lane Mode', () => {
     writeFileSync(keyPath, 'secret\n', 'utf8');
     writeFileSync(join(readyLaneDir, 'identity.json'), JSON.stringify({
       laneId: 'math-ready',
+      tool: 'codex',
       laneDir: readyLaneDir,
       guardrailRepo: repoDir,
       keyPath,
@@ -497,6 +500,7 @@ describe('README Feature: Resident Lane Mode', () => {
     }), 'utf8');
     writeFileSync(join(staleLaneDir, 'identity.json'), JSON.stringify({
       laneId: 'math-stale',
+      tool: 'claude',
       laneDir: staleLaneDir,
       guardrailRepo: repoDir,
       identityNonce: 'nonce-stale',
@@ -505,6 +509,7 @@ describe('README Feature: Resident Lane Mode', () => {
       pid: process.pid,
       status: 'ready',
       laneId: 'math-ready',
+      tool: 'codex',
       sessionName: 'math-ready',
       keyPath,
       identityNonce: 'nonce-ready',
@@ -520,6 +525,8 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.counts.ready, 1);
     assert.equal(parsed.counts.stale, 1);
     assert.equal(parsed.lanes.length, 2);
+    assert.equal(parsed.lanes[0].tool, 'codex');
+    assert.equal(parsed.lanes[1].tool, 'claude');
   });
 
   it('guardrail lane send writes one prompt through a resident lane FIFO', async () => {

@@ -252,9 +252,15 @@ guardrail lane list --json
 
 # Remove stale/expired/stopped lane artifacts once you're done diagnosing them
 guardrail lane prune --json
+
+# Start a Codex-backed lane with the same lifecycle/status/result surface
+guardrail lane start \
+  --id codex-live \
+  --tool codex \
+  --profile dev
 ```
 
-Resident lanes are for direct interactive use when the executable boundary should stay fixed but later user messages should not count as execution drift. The shipped Claude lane helper:
+Resident lanes are for direct interactive use when the executable boundary should stay fixed but later user messages should not count as execution drift. The shipped lane control plane now supports both `claude` and `codex` adapters behind the same `lane start` / `lane send` / `lane result` / `lane status` / `lane stop` surface. The current helper:
 - creates owner-only FIFOs (`0600`) under the lane directory
 - stores an ephemeral per-lane HMAC key outside the workspace at `~/.guardrail/lanes/<id>.key`
 - accepts only strict JSON requests with `id` and `prompt`
@@ -267,7 +273,7 @@ Resident lanes are for direct interactive use when the executable boundary shoul
 
 Resident lanes are also the first step toward the broader "manager of managers" direction for Guardrail. Today Guardrail ships lifecycle control for individual named lanes; portfolio-level lane registry, stale-lane pruning, collision-aware swarm scope coordination, and transport-generalized lanes remain roadmap items.
 
-Lane startup still has to happen in a runtime where the downstream CLI auth already works. Direct AI recipes can now declare bounded `requires_auth` checks too, so Guardrail fails before launch with `missing_auth_prerequisite` instead of letting the underlying CLI die late. The same bounded preflight now applies when those recipes are executed through workflow `recipe_ref` steps, so chained recipe workflows stop before launch on missing tool auth instead of surfacing a late downstream CLI failure. `lane start` now launches the daemon through a short-lived helper so the resident lane survives the wrapped CLI process exiting, records a fresh boot nonce in the lane identity record, and fails closed if another live lane with the same lane id already exists in that repo lane registry. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again.
+Lane startup still has to happen in a runtime where the downstream CLI auth already works. Direct AI recipes can now declare bounded `requires_auth` checks too, so Guardrail fails before launch with `missing_auth_prerequisite` instead of letting the underlying CLI die late. The same bounded preflight now applies when those recipes are executed through workflow `recipe_ref` steps, so chained recipe workflows stop before launch on missing tool auth instead of surfacing a late downstream CLI failure. `lane start` now launches the daemon through a short-lived helper so the resident lane survives the wrapped CLI process exiting, records a fresh boot nonce in the lane identity record, and fails closed if another live lane with the same lane id already exists in that repo lane registry. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again. Use `--tool claude` (default) or `--tool codex` to bind that lane to the right wrapped executor.
 Guardrail now exposes first-class startup and long-turn state for resident lanes. If a request outlives the client-side wait window, `lane send` returns a structured `pending` response with the request id instead of collapsing into `lane_expired`. `lane start` also now fails early with `lane_boot_failed` when the daemon dies during bootstrap or in the immediate post-start window, and `lane status` reports `failureReason`, `failureStage`, and `logPath` when a lane is in `failed` state. If the daemon disappears before the first request and leaves no explicit failure metadata, Guardrail now infers that as `failed/post_start` instead of showing a bare `stale` lane. Use `lane status` to see whether the lane is `ready`, `busy`, `failed`, `expired`, `stale`, or `stopped`, including the current request id/start time, lane identity metadata, and the last completed result path. Use `lane result` to read the stored output for the latest or named request once it completes. Use `lane list` to inspect every repo-local lane in one portfolio view, and `lane prune` to remove dead lane artifacts with explicit audit entries once diagnosis is complete. Raw host inspection should be the last resort, not the default recovery path.
 If a direct recipe run and a composed host-runtime recipe both fail with the same downstream tool-auth error such as `Not logged in`, treat that as missing auth in the target host runtime, not as Guardrail drift. Direct recipes now preflight in the current runtime; composed host-runtime recipes re-run the same bounded auth check inside the hosted surface before the downstream CLI starts. For Claude, the bundled recipes now use a real bounded `claude --print` probe instead of trusting `claude auth status` alone. Hosted transport wrappers still isolate the child env with `env -i` and rehydrate only the approved vars, so seeing `env -i` in a pane capture is expected; missing runtime vars or false-positive shell-level auth are the real failure modes. The bundled `cmux-claude-exec` recipe now defaults to one hosted auth repair attempt too: if the hosted probe or exec hits login, Guardrail runs `claude auth login --console` in that exact hosted runtime, reruns the probe, and retries the original exec once. If login itself still needs a human to finish it, the run now fails with `auth_repair_pending_user_input` instead of pretending the slice ran. For repeated interaction or monitoring after startup, prefer the resident FIFO lane over repeated raw host-surface inspection commands so you do not trigger another approval-bearing transport hop every turn.
 
@@ -278,13 +284,15 @@ Communication matrix:
 - `lifecycle=start`: create a fresh bounded session
 - `lifecycle=continue` / `attach`: later turns in the same session
 - `session_name` / `session_id`: session identity keys
-- `lane start`: one-time host-runtime startup
+- `lane start`: one-time host-runtime startup for a selected tool (`claude` by default; `--tool codex` when needed)
 - `lane send`: later message traffic through the resident lane
 - `lane result`: read the stored output for the latest or named request
-- `lane status`: inspect ready/busy/failed/expired/stale/stopped lane state plus current request visibility and startup failure detail
+- `lane status`: inspect ready/busy/failed/expired/stale/stopped lane state plus tool, current request visibility, and startup failure detail
 - `lane stop`: explicit teardown
 - `lane list`: enumerate repo-local lanes and their current state
 - `lane prune`: remove dead lane artifacts from the repo-local registry
+- Claude-oriented lane flags: `--system-prompt`, `--permission-mode`, `--allowed-tools`, `--max-budget-usd`, `--effort`, `--output-format`
+- Codex-oriented lane flags: `--profile`, `--sandbox`, `--image-files`, `--color`, `--oss`, `--local-provider`, `--skip-git-repo-check`, `--ephemeral`, `--full-auto`
 
 Recommended multi-doc review loop:
 - approve the full planned doc set up front in repeated `input_files`

@@ -589,11 +589,15 @@ describe('CLI bare recipe name detection', () => {
     const result = parseArgs([
       'lane', 'start',
       '--id', 'claude-live',
+      '--tool', 'codex',
+      '--profile', 'dev',
       '--system-prompt', 'Answer briefly.',
       '--json',
     ]);
     assert.equal(result.subcommand, 'lane-start');
     assert.equal(result.laneOpts.id, 'claude-live');
+    assert.equal(result.laneOpts.tool, 'codex');
+    assert.equal(result.laneOpts.profile, 'dev');
     assert.equal(result.laneOpts.systemPrompt, 'Answer briefly.');
     assert.equal(result.json, true);
   });
