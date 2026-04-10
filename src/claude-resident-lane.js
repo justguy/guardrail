@@ -622,7 +622,6 @@ async function waitForResidentLaneBootstrap(options, child, deps = {}) {
       }
     } else {
       healthySinceMs = null;
-      postStartSinceMs = null;
     }
 
     if ((nowFn() - startedAtMs) >= timeoutMs) {

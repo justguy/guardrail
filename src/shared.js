@@ -83,7 +83,7 @@ export function persistStateSafe(stateDir, state) {
 // Execute a command as a subprocess (used for update proposals)
 // ---------------------------------------------------------------------------
 
-export function executeSubprocess(command, args, cwd) {
+export function executeSubprocess(command, args, cwd, options = {}) {
   return new Promise((resolvePromise) => {
     if (!command) {
       return resolvePromise({ success: false, error: 'No command provided', hasChanges: false });
@@ -91,6 +91,7 @@ export function executeSubprocess(command, args, cwd) {
 
     const spawnArgs = Array.isArray(args) ? args : [];
     const spawnCwd = cwd || process.cwd();
+    const spawnEnv = options.env || buildEnvFromPolicy(options.envPolicy);
 
     let child;
     try {
@@ -98,6 +99,7 @@ export function executeSubprocess(command, args, cwd) {
         cwd: spawnCwd,
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: spawnEnv,
       });
     } catch (err) {
       return resolvePromise({ success: false, error: err.message, hasChanges: false });

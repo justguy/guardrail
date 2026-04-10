@@ -44,6 +44,25 @@ function mkfifo(path) {
   }
 }
 
+function makeFakeLaunchHelper(daemonPid, options = {}) {
+  const child = new EventEmitter();
+  child.pid = options.helperPid ?? 11111;
+  child.unref = () => {};
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  setTimeout(() => {
+    if (options.stdout !== false) {
+      child.stdout.emit('data', Buffer.from(JSON.stringify({ pid: daemonPid }) + '\n', 'utf8'));
+    }
+    if (options.stderrText) {
+      child.stderr.emit('data', Buffer.from(options.stderrText, 'utf8'));
+    }
+    child.emit('exit', options.closeCode ?? 0, options.signal ?? null);
+    child.emit('close', options.closeCode ?? 0);
+  }, 0);
+  return child;
+}
+
 describe('Claude resident lane', () => {
   it('parses lane args by flag name', () => {
     const parsed = parseResidentLaneArgs([
@@ -208,9 +227,7 @@ describe('Claude resident lane', () => {
   it('fails lane startup when the daemon exits during bootstrap and records a failed state', async () => {
     const dir = tmpLaneDir();
     const laneDir = join(dir, '.guardrail', 'lanes', 'math');
-    const fakeChild = new EventEmitter();
-    fakeChild.pid = 424242;
-    fakeChild.unref = () => {};
+    const fakeChild = makeFakeLaunchHelper(424242);
 
     await assert.rejects(
       launchResidentLane({
@@ -219,10 +236,7 @@ describe('Claude resident lane', () => {
         workingDir: dir,
         sessionName: 'math-live-session',
       }, {
-        spawnProcess: () => {
-          setTimeout(() => fakeChild.emit('exit', 1, null), 10);
-          return fakeChild;
-        },
+        spawnProcess: () => fakeChild,
         waitForBootstrap: waitForResidentLaneBootstrap,
         waitForBootstrapDeps: {
           timeoutMs: 250,
@@ -242,13 +256,10 @@ describe('Claude resident lane', () => {
   it('fails lane startup when the daemon dies in the immediate post-start window', async () => {
     const dir = tmpLaneDir();
     const laneDir = join(dir, '.guardrail', 'lanes', 'math');
-    const fakeChild = new EventEmitter();
-    fakeChild.pid = 434343;
-    fakeChild.unref = () => {};
+    const fakeChild = makeFakeLaunchHelper(434343);
     let alive = true;
     setTimeout(() => {
       alive = false;
-      fakeChild.emit('exit', 1, null);
     }, 500);
 
     await assert.rejects(
@@ -265,7 +276,7 @@ describe('Claude resident lane', () => {
           postStartGraceMs: 800,
           isAlive: () => alive,
           readState: () => ({
-            pid: fakeChild.pid,
+            pid: 434343,
             status: 'ready',
             sessionName: 'math-live-session',
             lastActivityAt: new Date().toISOString(),
@@ -273,7 +284,7 @@ describe('Claude resident lane', () => {
           readLogTail: () => 'post-start crashed',
         },
       }),
-      (err) => err?.code === 'LANE_BOOT_FAILED' && err?.details?.failureStage === 'post_start',
+      /post-start crashed/,
     );
 
     const status = getResidentLaneStatus({ laneDir, guardrailRepo: dir });

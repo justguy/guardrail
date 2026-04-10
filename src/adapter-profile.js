@@ -20,7 +20,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 export const VALID_PROTOCOLS = new Set(['stdin-json', 'env-shim', 'mcp']);
-export const VALID_AUTH_TYPES = new Set(['claude_login', 'gh_auth']);
+export const VALID_AUTH_TYPES = new Set(['claude_login', 'claude_exec_probe', 'gh_auth']);
 
 const DEFERRED_PROTOCOLS = new Set(['http', 'python-callable', 'node-callable']);
 

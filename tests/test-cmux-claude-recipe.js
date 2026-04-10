@@ -94,14 +94,14 @@ describe('CMUX Claude recipe', () => {
         inject: {},
       },
       authPreflight: {
-        requirements: [{ type: 'claude_login' }],
+        requirements: [{ type: 'claude_exec_probe' }],
       },
     }));
 
     assert.equal(contract.command, 'node');
     assert.deepEqual(contract.args, ['./src/claude-exec-wrapper.js', '--prompt', 'Solve it']);
     assert.equal(contract.cwd, '/tmp/work');
-    assert.deepEqual(contract.authPreflight, { requirements: [{ type: 'claude_login' }] });
+    assert.deepEqual(contract.authPreflight, { requirements: [{ type: 'claude_exec_probe' }] });
   });
 
   it('renders the hosted exec command with env isolation and exit sentinel', () => {
@@ -305,7 +305,7 @@ describe('CMUX Claude recipe', () => {
     assert.ok(calls[2].args.at(-1).includes('[guardrail-exec-exit:'));
   });
 
-  it('fails hosted auth preflight when claude auth status exits zero but reports loggedIn false', async () => {
+  it('fails hosted auth preflight when the Claude exec probe reports Not logged in', async () => {
     const contract = encodeContract({
       command: 'node',
       args: ['./src/claude-exec-wrapper.js', '--prompt', 'Solve it'],
@@ -315,7 +315,7 @@ describe('CMUX Claude recipe', () => {
         inject: {},
       },
       authPreflight: {
-        requirements: [{ type: 'claude_login' }],
+        requirements: [{ type: 'claude_exec_probe' }],
       },
     });
 
@@ -324,7 +324,7 @@ describe('CMUX Claude recipe', () => {
       if (args[0] === 'list-panels') return { stdout: '* surface:4 terminal [focused]\n', stderr: '' };
       if (args[0] === 'send') return { stdout: '', stderr: '' };
       if (args[0] === 'capture-pane') {
-        return { stdout: '{"loggedIn":false,"authMethod":"none"}\n[guardrail-exec-exit:auth-0:0]\n', stderr: '' };
+        return { stdout: 'Not logged in\nPlease run /login\n[guardrail-exec-exit:auth-0:1]\n', stderr: '' };
       }
       throw new Error(`unexpected cmux call: ${args[0]}`);
     };

@@ -2,6 +2,7 @@ import { executeSubprocess } from './shared.js';
 
 const AUTH_ENV_HINTS = {
   claude_login: ['CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'HOME'],
+  claude_exec_probe: ['CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'HOME'],
   gh_auth: ['GH_CONFIG_DIR', 'XDG_CONFIG_HOME', 'HOME'],
 };
 
@@ -69,6 +70,13 @@ export function resolveAuthCheckDefinition(requirement) {
         code: 'missing_auth_prerequisite',
         message: requirement.message || 'Claude CLI is not logged in for this runtime. Run claude auth login.',
       };
+    case 'claude_exec_probe':
+      return {
+        command: 'claude',
+        args: ['--print', '--output-format', 'text', '--no-session-persistence', '__guardrail_auth_probe__'],
+        code: 'missing_auth_prerequisite',
+        message: requirement.message || 'Claude CLI cannot execute a real print request in this runtime. Repair Claude login in this exact runtime or rerun Guardrail from a runtime where claude --print succeeds.',
+      };
     case 'gh_auth':
       return {
         command: 'gh',
@@ -117,6 +125,18 @@ function validateClaudeLoginResult(result) {
   return { ok: true };
 }
 
+function validateClaudeExecProbeResult(result) {
+  const stdout = String(result?.stdout || '').trim();
+  const stderr = String(result?.stderr || '').trim();
+  const combined = [stdout, stderr].filter(Boolean).join('\n').trim();
+
+  if (/not logged in|please run\s+\/?login/i.test(combined)) {
+    return { ok: false, detail: combined };
+  }
+
+  return { ok: true };
+}
+
 export function evaluateAuthCheckResult(requirement, result) {
   const definition = resolveAuthCheckDefinition(requirement);
   if (!definition) {
@@ -139,6 +159,18 @@ export function evaluateAuthCheckResult(requirement, result) {
 
   if (requirement?.type === 'claude_login') {
     const validation = validateClaudeLoginResult(result);
+    if (!validation.ok) {
+      return {
+        ok: false,
+        code: definition.code,
+        message: definition.message,
+        detail: validation.detail || (result?.stdout || result?.stderr || '').trim(),
+      };
+    }
+  }
+
+  if (requirement?.type === 'claude_exec_probe') {
+    const validation = validateClaudeExecProbeResult(result);
     if (!validation.ok) {
       return {
         ok: false,

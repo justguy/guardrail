@@ -58,7 +58,10 @@ function isLikelyLaneAlive(laneDir) {
     if (!Number.isInteger(state?.pid) || state.pid <= 0) return false;
     process.kill(state.pid, 0);
     return state.status !== 'expired' && state.status !== 'stopped';
-  } catch {
+  } catch (err) {
+    if (err?.code === 'EPERM') {
+      return true;
+    }
     return false;
   }
 }

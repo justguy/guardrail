@@ -298,7 +298,7 @@ AI execution recipes:
   - `node src/cli.js lane result --id <lane-id> [--request-id <id>]`
   - `node src/cli.js lane status --id <lane-id>`
   - `node src/cli.js lane stop --id <lane-id>`
-- `lane start` is the one-time host-runtime step. It starts a detached daemon in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under `~/.guardrail/lanes/<id>.key`, and fixes the executable boundary for later messages.
+- `lane start` is the one-time host-runtime step. It launches the resident daemon through a short-lived helper in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under `~/.guardrail/lanes/<id>.key`, and fixes the executable boundary for later messages.
 - `lane send` is the per-message step. It reads the host-side key through the Guardrail CLI, signs the request, writes the strict JSON payload into the lane FIFO, and reads the matching response back without reopening the outer transport/runtime hop.
 - If a request outlives the client-side wait window, `lane send` now returns a structured `pending` result with the request id instead of reporting `lane_expired`. Treat that as “the lane accepted the request and it is still running,” not as proof that Claude failed.
 - `lane result` is the bounded recovery/read step for those cases. Use it to fetch the stored output for the latest or named request after a long-running turn completes.
@@ -343,7 +343,7 @@ AI execution recipes:
 - Today, if a transport/orchestration recipe launches an inner `guardrail run`, the outer transport layer and inner exec layer are separate approval units with separate manifests. Do not assume nested runs collapse into one approval automatically.
 - If that transport/orchestration path later fails, do not immediately switch to ad hoc host-surface commands for investigation. Check the bounded Guardrail status path first, because raw host-surface inspection is itself another approval-bearing boundary.
 - Bundled `cmux-claude-exec` now uses the composed single-approval path instead of a nested inner Guardrail run. Use it when Claude must run inside that terminal surface and you want one approval that still binds the composed `claude-exec` trust/env/input/session semantics honestly.
-- For composed host-runtime Claude runs, the wrapper intentionally isolates the child environment with `env -i` and then rehydrates only the approved env intersection. If you see `env -i` in a pane capture, do not treat that alone as the bug; the real questions are whether the required vars were explicitly approved and whether `claude auth status` in that exact wrapped runtime reports `loggedIn: true`.
+- For composed host-runtime Claude runs, the wrapper intentionally isolates the child environment with `env -i` and then rehydrates only the approved env intersection. If you see `env -i` in a pane capture, do not treat that alone as the bug; the real questions are whether the required vars were explicitly approved and whether the bounded wrapped-runtime Claude exec probe succeeds.
 - Diagnosis rule for host-runtime auth failures:
   - if direct exec in the current shell fails with a tool-auth error such as `Not logged in`
   - and the composed host-runtime recipe for the same tool fails with the same tool-auth error
@@ -498,7 +498,7 @@ Useful adapter subcommands:
 Bounded auth preflight behavior:
 
 - `requires_env` requires explicit env mappings. If a required variable is not in `--env-allow`, `adapter run` fails before execution with `missing_auth_mapping`.
-- `requires_auth` validates bounded runtime state for known checks (for example `claude_login`, `gh_auth`) before process launch; missing checks fail with `missing_auth_prerequisite`.
+- `requires_auth` validates bounded runtime state for known checks (for example `claude_login`, `claude_exec_probe`, `gh_auth`) before process launch; missing checks fail with `missing_auth_prerequisite`.
 - The same env/auth preflight applies to `adapter probe` before the MCP stdio transport is launched. If the probe blocks on `missing_auth_mapping` or `missing_auth_prerequisite`, fix the runtime and rerun the probe; do not assume the probe can bypass adapter auth requirements.
 - Auth preflight returns blocked status and stops. It does not log the agent in for you; authentication must already exist in the same runtime (`claude auth login` / `gh auth status/login`).
 - Explicit env mapping may still be insufficient for CLIs whose login state lives in OS-managed secure stores or other process-identity-gated locations. In those cases the practical fix is to run Guardrail from the same working launcher/runtime, or to redo login from the exact shell/runtime that will later launch Guardrail.

@@ -18,6 +18,7 @@ import {
 import {
   runRecipeSupervisor,
   formatAllowUnverifiedReapprovalNotice,
+  preflightRecipeAuthRuntime,
 } from '../src/recipe-supervisor.js';
 import { signRecipe } from '../src/recipe-channel.js';
 import { saveManifest } from '../src/manifest.js';
@@ -173,7 +174,7 @@ describe('Claude recipe', () => {
       recipe.requires_env,
       ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'TERM_PROGRAM', 'LANG', 'TMPDIR', 'PWD', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR'],
     );
-    assert.deepEqual(recipe.requires_auth, [{ type: 'claude_login' }]);
+    assert.deepEqual(recipe.requires_auth, [{ type: 'claude_exec_probe' }]);
     assert.match(recipe.description, /OS-managed secure stores|process-identity-gated runtime state/);
     assert.match(recipe.description, /exact same shell\/runtime that will later launch Guardrail/);
     assert.ok(
@@ -249,6 +250,39 @@ describe('Claude recipe', () => {
     });
 
     assert.equal(message, 'claude --print failed with exit code 1: Not logged in | Run claude login');
+  });
+
+  it('runs Claude auth preflight under the guarded env intersection instead of the parent shell env', async () => {
+    const recipe = loadRecipe(join(process.cwd(), 'recipes', 'claude-exec.recipe.json'));
+    let seenOptions = null;
+
+    const result = await preflightRecipeAuthRuntime({
+      recipe,
+      envAllow: recipe.requires_env,
+      cwd: process.cwd(),
+      currentEnv: {
+        ...process.env,
+        HOME: '/host/home',
+        XDG_CONFIG_HOME: '/host/xdg',
+        CLAUDE_CONFIG_DIR: '/host/claude',
+        SHOULD_NOT_LEAK: '1',
+      },
+      authCheckFn: async (_command, _args, _cwd, options) => {
+        seenOptions = options;
+        return {
+          success: true,
+          stdout: '{"loggedIn":true}',
+          stderr: '',
+        };
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(seenOptions?.envPolicy, {
+      inherit: false,
+      allow: [...new Set(['PATH', ...recipe.requires_env])],
+      inject: {},
+    });
   });
 
   it('explains reapproval when --allow-unverified widens the recipe trust boundary', () => {

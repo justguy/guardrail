@@ -1,7 +1,7 @@
 {
   "id": "claude-exec",
   "name": "Claude Exec",
-  "description": "Run claude --print through a Guardrail-managed wrapper with inline prompt text, input_files prompt context, working-directory control, and structured flag wiring. This recipe declares the shell/runtime environment it needs; standalone recipe execution must allow those vars explicitly with repeated --env-allow flags, and that env contract is part of approval drift. The same bounded auth/runtime contract also applies when this recipe is executed through workflow `recipe_ref` steps. It also declares a bounded runtime auth preflight (`claude_login`), so Guardrail now fails before launch with `missing_auth_prerequisite` when the selected runtime is not logged into Claude. Claude CLI authentication must already exist in the same runtime that launches Guardrail. Start by comparing the resolved claude binary plus auth-location environment (for example HOME, XDG_CONFIG_HOME, and CLAUDE_CONFIG_DIR), but do not assume env alignment is always sufficient: some CLI login state is backed by OS-managed secure stores or other process-identity-gated runtime state. When Claude reports `Not logged in`, prefer running Guardrail from a shell where `claude auth status` already succeeds. If the same `Not logged in` error also appears through a composed host-runtime recipe, stop treating it as Guardrail drift and conclude that the target host runtime itself is missing Claude auth. If login must be redone for Guardrail reuse, perform `claude auth login --claudeai` (or `--console`) from the exact same shell/runtime that will later launch Guardrail, then rerun the same approved Guardrail command.",
+  "description": "Run claude --print through a Guardrail-managed wrapper with inline prompt text, input_files prompt context, working-directory control, and structured flag wiring. This recipe declares the shell/runtime environment it needs; standalone recipe execution must allow those vars explicitly with repeated --env-allow flags, and that env contract is part of approval drift. The same bounded auth/runtime contract also applies when this recipe is executed through workflow `recipe_ref` steps. It also declares a bounded runtime auth preflight (`claude_exec_probe`), so Guardrail now fails before launch with `missing_auth_prerequisite` when the selected runtime cannot execute a real Claude print probe. Claude CLI authentication must already exist in the same runtime that launches Guardrail. Start by comparing the resolved claude binary plus auth-location environment (for example HOME, XDG_CONFIG_HOME, and CLAUDE_CONFIG_DIR), but do not assume env alignment is always sufficient: some CLI login state is backed by OS-managed secure stores or other process-identity-gated runtime state. A green `claude auth status` alone is not enough if `claude --print` still fails under the Guardrail env contract. If the same `Not logged in` error also appears through a composed host-runtime recipe, stop treating it as Guardrail drift and conclude that the target host runtime itself is missing usable Claude exec auth. If login must be redone for Guardrail reuse, perform `claude auth login --claudeai` (or `--console`) from the exact same shell/runtime that will later launch Guardrail, then rerun the same approved Guardrail command.",
   "version": "1.0.0",
   "author": {
     "name": "Guardrail Team",
@@ -23,7 +23,7 @@
   ],
   "requires_auth": [
     {
-      "type": "claude_login"
+      "type": "claude_exec_probe"
     }
   ],
   "inputs": {
@@ -186,7 +186,7 @@
       "input_files are limited to approved relative paths and content-hash bound at approval time",
       "working_dir controls the Claude process cwd; add_dirs only grants additional tool access",
       "Guardrail does not provide outer sandboxing for Claude itself; running this recipe outside an external sandbox uses host privileges subject to Claude's own permission model",
-      "This recipe declares requires_auth via `claude_login`, so Guardrail preflights Claude CLI auth before launch and fails with `missing_auth_prerequisite` instead of letting `claude --print` die late. The same bounded preflight now applies when `claude-exec` is invoked through workflow `recipe_ref`.",
+      "This recipe declares requires_auth via `claude_exec_probe`, so Guardrail preflights a real bounded `claude --print` probe before launch and fails with `missing_auth_prerequisite` instead of trusting `claude auth status` alone. The same bounded preflight now applies when `claude-exec` is invoked through workflow `recipe_ref`.",
       "Guardrail does not perform `claude auth login` for this recipe. If preflight or Claude itself reports `Not logged in`, fix the Claude CLI auth state in the same runtime that launches Guardrail, then rerun the same approved command",
       "If this recipe and a composed host-runtime recipe for the same tool both fail with the same `Not logged in` error, treat that as missing auth in the target host runtime rather than Guardrail drift or recipe failure",
       "If another shell or tool can run Claude successfully, compare `which -a claude` and `claude auth status` there versus the Guardrail runtime before changing approval state. Start with PATH, HOME, XDG_CONFIG_HOME, or CLAUDE_CONFIG_DIR, but do not assume env alignment alone will solve secure-store-backed CLI auth",
