@@ -30,6 +30,8 @@ export function parseWrapperArgs(argv) {
     captureDelayMs: '',
     pollIntervalMs: '',
     waitTimeoutMs: '',
+    authRepair: '',
+    authRepairTimeoutMs: '',
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -66,6 +68,14 @@ export function parseWrapperArgs(argv) {
         break;
       case '--wait-timeout-ms':
         options.waitTimeoutMs = value;
+        i += 1;
+        break;
+      case '--auth-repair':
+        options.authRepair = value;
+        i += 1;
+        break;
+      case '--auth-repair-timeout-ms':
+        options.authRepairTimeoutMs = value;
         i += 1;
         break;
       default:
@@ -139,6 +149,8 @@ function normalizeOptions(rawOptions) {
     captureDelayMs: normalizeInteger(rawOptions.captureDelayMs, 200, 'capture_delay_ms', 0, 10000),
     pollIntervalMs: normalizeInteger(rawOptions.pollIntervalMs, 400, 'poll_interval_ms', 50, 5000),
     waitTimeoutMs: normalizeInteger(rawOptions.waitTimeoutMs, 20000, 'wait_timeout_ms', 500, 120000),
+    authRepair: rawOptions.authRepair || 'none',
+    authRepairTimeoutMs: normalizeInteger(rawOptions.authRepairTimeoutMs, 300000, 'auth_repair_timeout_ms', 1000, 900000),
   };
 }
 
@@ -311,6 +323,58 @@ function buildHostedAuthCommand(contract = {}, requirement) {
   };
 }
 
+function isHostedClaudeAuthRepairEnabled(options, requirement) {
+  return options.authRepair === 'console'
+    && (requirement?.type === 'claude_exec_probe' || requirement?.type === 'claude_login');
+}
+
+function buildHostedClaudeAuthRepairCommand(contract = {}) {
+  const envPrefix = buildEnvPrefix(contract.envPolicy);
+  const rendered = `cd ${shellQuote(contract.cwd)} && ${envPrefix}'claude' 'auth' 'login' '--console'`;
+  return {
+    commandText: rendered,
+    failureMessage: 'Claude hosted auth repair did not complete successfully in the target runtime.',
+  };
+}
+
+async function attemptHostedClaudeAuthRepair(runner, wait, options, workspace, surface, contract, requirement, tokenSuffix = 'repair') {
+  if (!isHostedClaudeAuthRepairEnabled(options, requirement)) {
+    return { attempted: false, repaired: false, detail: '' };
+  }
+
+  const repair = buildHostedClaudeAuthRepairCommand(contract);
+  let repairResult;
+  try {
+    repairResult = await runHostedSurfaceCommand(
+      runner,
+      wait,
+      {
+        ...options,
+        waitTimeoutMs: options.authRepairTimeoutMs,
+      },
+      workspace,
+      surface,
+      buildWrappedRenderedCommand(repair.commandText, tokenSuffix),
+      tokenSuffix,
+    );
+  } catch (err) {
+    if (/Timed out waiting for hosted exec completion/i.test(String(err?.message || ''))) {
+      throw new Error('auth_repair_pending_user_input: Claude auth repair is still waiting for interactive login in the target runtime.');
+    }
+    throw err;
+  }
+  const repairDetail = stripExitSentinels(repairResult.capture);
+  if (repairResult.execExitCode !== 0) {
+    throw new Error(`missing_auth_prerequisite: ${repair.failureMessage}${repairDetail ? ` Detail: ${repairDetail}` : ''}`);
+  }
+
+  return {
+    attempted: true,
+    repaired: true,
+    detail: repairDetail,
+  };
+}
+
 export async function runCmuxClaudeRecipe(rawOptions, deps = {}) {
   const options = normalizeOptions(rawOptions);
   const runner = deps.runner || runCmuxCommand;
@@ -330,54 +394,143 @@ export async function runCmuxClaudeRecipe(rawOptions, deps = {}) {
   const surface = parseSurfaceRef(panelsResult.stdout || panelsResult.stderr);
 
   const requirements = options.execContract.authPreflight?.requirements || [];
-  for (let index = 0; index < requirements.length; index += 1) {
-    const requirement = requirements[index];
-    const token = `auth-${index}`;
-    const { commandText, failureMessage } = buildHostedAuthCommand(options.execContract, requirement);
-    const authResult = await runHostedSurfaceCommand(
+  const runHostedPreflight = async () => {
+    for (let index = 0; index < requirements.length; index += 1) {
+      const requirement = requirements[index];
+      const token = `auth-${index}`;
+      const { commandText, failureMessage } = buildHostedAuthCommand(options.execContract, requirement);
+      const authResult = await runHostedSurfaceCommand(
+        runner,
+        wait,
+        options,
+        workspace,
+        surface,
+        buildWrappedRenderedCommand(commandText, token),
+        token,
+      );
+      const detail = stripExitSentinels(authResult.capture);
+      const evaluated = evaluateAuthCheckResult(requirement, {
+        success: authResult.execExitCode === 0,
+        stdout: detail,
+        stderr: '',
+      });
+      if (!evaluated.ok) {
+        const repair = await attemptHostedClaudeAuthRepair(
+          runner,
+          wait,
+          options,
+          workspace,
+          surface,
+          options.execContract,
+          requirement,
+          `repair-${index}`,
+        );
+        if (repair.repaired) {
+          const retryResult = await runHostedSurfaceCommand(
+            runner,
+            wait,
+            options,
+            workspace,
+            surface,
+            buildWrappedRenderedCommand(commandText, `${token}-retry`),
+            `${token}-retry`,
+          );
+          const retryDetail = stripExitSentinels(retryResult.capture);
+          const retryEvaluated = evaluateAuthCheckResult(requirement, {
+            success: retryResult.execExitCode === 0,
+            stdout: retryDetail,
+            stderr: '',
+          });
+          if (retryEvaluated.ok) {
+            continue;
+          }
+          throw new Error(`missing_auth_prerequisite: ${failureMessage}${retryDetail ? ` Detail: ${retryDetail}` : ''}`);
+        }
+        throw new Error(`missing_auth_prerequisite: ${failureMessage}${detail ? ` Detail: ${detail}` : ''}`);
+      }
+    }
+  };
+
+  await runHostedPreflight();
+
+  const runHostedExec = async (token = 'main') => {
+    const execCommand = buildWrappedSurfaceCommand(options.execContract, token);
+    const execResult = await runHostedSurfaceCommand(
       runner,
       wait,
       options,
       workspace,
       surface,
-      buildWrappedRenderedCommand(commandText, token),
+      execCommand,
       token,
     );
-    const detail = stripExitSentinels(authResult.capture);
-    const evaluated = evaluateAuthCheckResult(requirement, {
-      success: authResult.execExitCode === 0,
-      stdout: detail,
-      stderr: '',
-    });
-    if (!evaluated.ok) {
-      throw new Error(`missing_auth_prerequisite: ${failureMessage}${detail ? ` Detail: ${detail}` : ''}`);
+    return {
+      execCommand,
+      capture: execResult.capture,
+      execExitCode: execResult.execExitCode,
+      execDetail: stripExitSentinels(execResult.capture),
+    };
+  };
+
+  let execRun = await runHostedExec('main');
+
+  if (execRun.execExitCode !== 0) {
+    for (const requirement of requirements) {
+      const evaluated = evaluateAuthCheckResult(requirement, {
+        success: true,
+        stdout: execRun.execDetail,
+        stderr: '',
+      });
+      if (!evaluated.ok) {
+        const repair = await attemptHostedClaudeAuthRepair(
+          runner,
+          wait,
+          options,
+          workspace,
+          surface,
+          options.execContract,
+          requirement,
+          'repair-main',
+        );
+        if (repair.repaired) {
+          await runHostedPreflight();
+          execRun = await runHostedExec('main-retry');
+          if (execRun.execExitCode === 0) {
+            const result = {
+              workspace,
+              surface,
+              launchCwd: options.launchCwd,
+              execCommand: execRun.execCommand,
+              execExitCode: execRun.execExitCode,
+              capture: execRun.capture,
+            };
+            if (emitStdout) {
+              process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+            }
+            return result;
+          }
+          const retried = evaluateAuthCheckResult(requirement, {
+            success: true,
+            stdout: execRun.execDetail,
+            stderr: '',
+          });
+          if (!retried.ok) {
+            throw new Error(`missing_auth_prerequisite: ${retried.message}${retried.detail ? ` Detail: ${retried.detail}` : ''}`);
+          }
+        }
+        throw new Error(`missing_auth_prerequisite: ${evaluated.message}${evaluated.detail ? ` Detail: ${evaluated.detail}` : ''}`);
+      }
     }
-  }
-
-  const execCommand = buildWrappedSurfaceCommand(options.execContract, 'main');
-  const execResult = await runHostedSurfaceCommand(
-    runner,
-    wait,
-    options,
-    workspace,
-    surface,
-    execCommand,
-    'main',
-  );
-  const capture = execResult.capture;
-  const execExitCode = execResult.execExitCode;
-
-  if (execExitCode !== 0) {
-    throw new Error(`Hosted exec failed with exit code ${execExitCode}.`);
+    throw new Error(`Hosted exec failed with exit code ${execRun.execExitCode}.${execRun.execDetail ? ` Detail: ${execRun.execDetail}` : ''}`);
   }
 
   const result = {
     workspace,
     surface,
     launchCwd: options.launchCwd,
-    execCommand,
-    execExitCode,
-    capture,
+    execCommand: execRun.execCommand,
+    execExitCode: execRun.execExitCode,
+    capture: execRun.capture,
   };
 
   if (emitStdout) {

@@ -326,6 +326,7 @@ AI execution recipes:
 - Do not jump straight to raw host process inspection (`ps`, `lsof`, direct pane capture, etc.) just because a resident lane is busy or a client timed out. First use `lane status`, `lane result`, and any lane-owned artifacts. Raw host inspection is a separate approval-bearing capability and will keep retriggering approvals.
 - If `lane start` returns `lane_boot_failed`, treat that as a bounded Guardrail diagnosis first, not as an instruction to capture the host pane immediately. Read `lane status` and the lane log path first; only fall back to raw host inspection if those Guardrail-owned surfaces still do not explain the failure.
 - For proof validation after a Guardrail run, prefer `node src/cli.js repo status --path <repo> --json` over ad hoc `git diff --name-only`. The Guardrail command surfaces staged, unstaged, and untracked files together so review does not silently miss newly created artifacts.
+- If the task declared a specific output artifact, such as a report file, patch file, or generated manifest, do not report the slice as complete until that exact artifact exists at the declared path. A green-looking run without the promised file is still an incomplete result.
 - The rule is: bounded surface first, raw surface second. Only fall back to direct host-surface commands when Guardrail does not already expose the needed state.
 - Treat host-runtime selection as an expected routing decision, not as a surprising late-stage workaround. If a tool is authenticated or functional only in a different launcher, terminal surface, remote shell, container, or similar runtime, choose that runtime early and explain it plainly as “this tool must run in the already-working host runtime,” not as a mysterious new failure after several retries.
 - When switching runtimes, name the reason in one sentence: same tool contract, different host runtime. Example: “the guarded Claude wrapper is unchanged; only the host runtime changes because the authenticated terminal surface is where Claude CLI login is currently valid.”
@@ -349,12 +350,21 @@ AI execution recipes:
 - If that transport/orchestration path later fails, do not immediately switch to ad hoc host-surface commands for investigation. Check the bounded Guardrail status path first, because raw host-surface inspection is itself another approval-bearing boundary.
 - Bundled `cmux-claude-exec` now uses the composed single-approval path instead of a nested inner Guardrail run. Use it when Claude must run inside that terminal surface and you want one approval that still binds the composed `claude-exec` trust/env/input/session semantics honestly.
 - For composed host-runtime Claude runs, the wrapper intentionally isolates the child environment with `env -i` and then rehydrates only the approved env intersection. If you see `env -i` in a pane capture, do not treat that alone as the bug; the real questions are whether the required vars were explicitly approved and whether the bounded wrapped-runtime Claude exec probe succeeds.
+- Bundled `cmux-claude-exec` now defaults to one hosted auth-repair attempt. If the hosted Claude probe or exec hits login in that selected runtime, Guardrail will run `claude auth login --console` there, rerun the bounded probe, and retry the original exec once before giving up.
+- If that hosted login still needs a human to finish it, expect the machine-readable failure `auth_repair_pending_user_input`. That means Guardrail already reached the right runtime and started the right repair command; the remaining action is to finish login there and rerun the same approved contract, not to invent a new execution path.
 - Diagnosis rule for host-runtime auth failures:
   - if direct exec in the current shell fails with a tool-auth error such as `Not logged in`
   - and the composed host-runtime recipe for the same tool fails with the same tool-auth error
   - stop treating it as Guardrail approval drift or recipe failure
   - conclude that the target host runtime is missing tool auth
   - next step: repair login in that exact host runtime, then rerun the same approved Guardrail contract
+- Hosted Claude auth-repair sequence:
+  - start `cmux-claude-exec` with the approved doc packet
+  - let Guardrail run its hosted `claude --print` probe
+  - if that hosted probe or exec hits login, Guardrail now starts `claude auth login --console` in that exact runtime automatically once
+  - if the hosted login completes and the wrapped probe passes, Guardrail retries the original Claude exec automatically
+  - if Guardrail returns `auth_repair_pending_user_input`, finish login in that already-selected host runtime and rerun the same approved manifest
+  - do not call the slice complete unless the declared output artifact now exists
 - Wording rule for those cases:
   - say `blocked by tool auth in the host runtime`
   - do not just say `blocked` without naming whether the block is Guardrail policy or downstream tool auth
@@ -362,6 +372,8 @@ AI execution recipes:
 - For repeated interaction or repeated monitoring in the same authenticated host runtime, prefer the resident FIFO lane over repeated transport recipe launches or repeated raw host-surface inspection. The FIFO lane exists specifically to avoid paying another approval-bearing host-surface hop for every send/capture/debug turn.
 - Guardrail transcripts and execution reports are accelerators, not proof. Before accepting a result, validate the actual branch state, changed files, and requested proof artifacts rather than trusting the session narrative alone.
 - The simplest branch-state proof check is `node src/cli.js repo status --path <repo> --json`. Use it when you need one bounded snapshot that includes tracked changes plus untracked outputs.
+- The completion rule is strict: if the promised artifact is missing, the slice is not done, even if the run produced logs, approvals, or partial stdout that look successful.
+- Apply that rule to hosted AI runs too: an approved manifest or a successful transport launch does not count as slice completion without the declared output artifact.
 - Path-bearing inputs like `guardrail_repo`, `working_dir`, `input_files`, `add_dirs`, or output-file paths usually use relative-path policy and often block `..`. If Guardrail lives in one repo and the target run lives in a sibling repo, choose a current working directory where both can be named without `..` segments.
 - Omit optional tool-capability knobs unless the caller actually needs them. Extra inputs widen the approval surface and create more drift opportunities.
 - When a structured command needs multiple files, use an exact `{{inputs.some_list}}` placeholder in the args array so the validated list expands into multiple structured argv entries. Do not fall back to a freeform string of space-separated paths.
@@ -505,7 +517,7 @@ Bounded auth preflight behavior:
 - `requires_env` requires explicit env mappings. If a required variable is not in `--env-allow`, `adapter run` fails before execution with `missing_auth_mapping`.
 - `requires_auth` validates bounded runtime state for known checks (for example `claude_login`, `claude_exec_probe`, `gh_auth`) before process launch; missing checks fail with `missing_auth_prerequisite`.
 - The same env/auth preflight applies to `adapter probe` before the MCP stdio transport is launched. If the probe blocks on `missing_auth_mapping` or `missing_auth_prerequisite`, fix the runtime and rerun the probe; do not assume the probe can bypass adapter auth requirements.
-- Auth preflight returns blocked status and stops. It does not log the agent in for you; authentication must already exist in the same runtime (`claude auth login` / `gh auth status/login`).
+- Auth preflight returns blocked status and stops. It does not log the agent in for you; authentication must already exist in the same runtime (`claude auth login` / `gh auth status/login`). Exception: the bundled composed Claude host-runtime recipe can perform one bounded hosted `claude auth login --console` repair attempt before it gives up with `auth_repair_pending_user_input`.
 - Explicit env mapping may still be insufficient for CLIs whose login state lives in OS-managed secure stores or other process-identity-gated locations. In those cases the practical fix is to run Guardrail from the same working launcher/runtime, or to redo login from the exact shell/runtime that will later launch Guardrail.
 - The same bounded `requires_env` / `requires_auth` preflight now applies to standalone recipe mode and workflow `recipe_ref` execution too. For composed host-runtime recipes, env mapping is checked before launch and the child tool-auth preflight runs again inside the selected host runtime before the downstream CLI starts.
 - MCP protocol profiles are intentionally blocked for `adapter run` in v0.2. Use `adapter probe` for bounded discovery or `adapter mcp call` for one explicit `tools/call`; do not reinterpret arbitrary shell commands as MCP requests.
@@ -517,6 +529,7 @@ Host runtime decision rule:
 - If `which -a <tool>` differs, fix the binary path first.
 - If the binary matches but auth/config env differs, align only the declared config inputs and rerun the subprocess test.
 - If the subprocess test still fails, stop modifying env and move the Guardrail run into a shell/runtime where the tool already works, or redo login in that exact shell/runtime.
+- For Claude specifically, do not over-trust shell-level green status. The exact Guardrail-launched wrapped subprocess must pass; “installed and authenticated somewhere on the machine” is not enough.
 
 ## Workflow Authoring Note
 

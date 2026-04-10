@@ -351,4 +351,210 @@ describe('CMUX Claude recipe', () => {
     );
   });
 
+  it('repairs hosted auth in the target runtime and retries the original exec once', async () => {
+    const contract = encodeContract({
+      command: 'node',
+      args: ['./src/claude-exec-wrapper.js', '--prompt', 'Solve it'],
+      cwd: '/tmp/work',
+      envPolicy: {
+        allow: ['PATH', 'HOME'],
+        inject: {},
+      },
+      authPreflight: {
+        requirements: [{ type: 'claude_exec_probe' }],
+      },
+    });
+
+    let captureCount = 0;
+    const runner = async (args) => {
+      if (args[0] === 'new-workspace') return { stdout: 'OK workspace:9\n', stderr: '' };
+      if (args[0] === 'list-panels') return { stdout: '* surface:4 terminal [focused]\n', stderr: '' };
+      if (args[0] === 'send') return { stdout: '', stderr: '' };
+      if (args[0] === 'capture-pane') {
+        captureCount += 1;
+        if (captureCount === 1) {
+          return { stdout: 'Not logged in\nPlease run /login\n[guardrail-exit:noop]\n[guardrail-exec-exit:auth-0:1]\n', stderr: '' };
+        }
+        if (captureCount === 2) {
+          return { stdout: 'Login complete\n[guardrail-exec-exit:repair-0:0]\n', stderr: '' };
+        }
+        if (captureCount === 3) {
+          return { stdout: '__guardrail_auth_probe__\n[guardrail-exec-exit:auth-0-retry:0]\n', stderr: '' };
+        }
+        return { stdout: '6\n[guardrail-exec-exit:main:0]\n', stderr: '' };
+      }
+      throw new Error(`unexpected cmux call: ${args[0]}`);
+    };
+
+    const result = await runCmuxClaudeRecipe(
+      {
+        socketPath: '/tmp/cmux.sock',
+        workspaceName: 'Claude Smoke',
+        launchCwd: '.',
+        execContractB64: contract,
+        captureLines: 80,
+        captureDelayMs: 0,
+        pollIntervalMs: 50,
+        waitTimeoutMs: 500,
+        authRepair: 'console',
+        authRepairTimeoutMs: 5000,
+      },
+      {
+        runner,
+        wait: async () => {},
+        emitStdout: false,
+      },
+    );
+
+    assert.equal(result.execExitCode, 0);
+    assert.match(result.capture, /\[guardrail-exec-exit:main:0\]/);
+  });
+
+  it('surfaces auth_repair_pending_user_input when hosted login does not finish', async () => {
+    const contract = encodeContract({
+      command: 'node',
+      args: ['./src/claude-exec-wrapper.js', '--prompt', 'Solve it'],
+      cwd: '/tmp/work',
+      envPolicy: {
+        allow: ['PATH', 'HOME'],
+        inject: {},
+      },
+      authPreflight: {
+        requirements: [{ type: 'claude_exec_probe' }],
+      },
+    });
+
+    let captureCount = 0;
+    const runner = async (args) => {
+      if (args[0] === 'new-workspace') return { stdout: 'OK workspace:9\n', stderr: '' };
+      if (args[0] === 'list-panels') return { stdout: '* surface:4 terminal [focused]\n', stderr: '' };
+      if (args[0] === 'send') return { stdout: '', stderr: '' };
+      if (args[0] === 'capture-pane') {
+        captureCount += 1;
+        if (captureCount === 1) {
+          return { stdout: 'Not logged in\nPlease run /login\n[guardrail-exec-exit:auth-0:1]\n', stderr: '' };
+        }
+        throw new Error('Timed out waiting for hosted exec completion after 5000ms.');
+      }
+      throw new Error(`unexpected cmux call: ${args[0]}`);
+    };
+
+    await assert.rejects(
+      runCmuxClaudeRecipe(
+        {
+          socketPath: '/tmp/cmux.sock',
+          workspaceName: 'Claude Smoke',
+          launchCwd: '.',
+          execContractB64: contract,
+          captureLines: 80,
+          captureDelayMs: 0,
+          pollIntervalMs: 50,
+          waitTimeoutMs: 500,
+          authRepair: 'console',
+          authRepairTimeoutMs: 5000,
+        },
+        {
+          runner,
+          wait: async () => {},
+          emitStdout: false,
+        },
+      ),
+      /auth_repair_pending_user_input/,
+    );
+  });
+
+  it('reclassifies hosted exec auth failures as missing_auth_prerequisite with detail', async () => {
+    const contract = encodeContract({
+      command: 'node',
+      args: ['./src/claude-exec-wrapper.js', '--prompt', 'Solve it'],
+      cwd: '/tmp/work',
+      envPolicy: {
+        allow: ['PATH', 'HOME'],
+        inject: {},
+      },
+      authPreflight: {
+        requirements: [{ type: 'claude_exec_probe' }],
+      },
+    });
+
+    let captureCount = 0;
+    const runner = async (args) => {
+      if (args[0] === 'new-workspace') return { stdout: 'OK workspace:9\n', stderr: '' };
+      if (args[0] === 'list-panels') return { stdout: '* surface:4 terminal [focused]\n', stderr: '' };
+      if (args[0] === 'send') return { stdout: '', stderr: '' };
+      if (args[0] === 'capture-pane') {
+        captureCount += 1;
+        if (captureCount === 1) {
+          return { stdout: '__guardrail_auth_probe__\n[guardrail-exec-exit:auth-0:0]\n', stderr: '' };
+        }
+        return { stdout: 'Not logged in\nPlease run /login\n[guardrail-exec-exit:main:1]\n', stderr: '' };
+      }
+      throw new Error(`unexpected cmux call: ${args[0]}`);
+    };
+
+    await assert.rejects(
+      runCmuxClaudeRecipe(
+        {
+          socketPath: '/tmp/cmux.sock',
+          workspaceName: 'Claude Smoke',
+          launchCwd: '.',
+          execContractB64: contract,
+          captureLines: 80,
+          captureDelayMs: 0,
+          pollIntervalMs: 50,
+          waitTimeoutMs: 500,
+        },
+        {
+          runner,
+          wait: async () => {},
+          emitStdout: false,
+        },
+      ),
+      /missing_auth_prerequisite: Claude CLI cannot execute a real print request in this runtime\./,
+    );
+  });
+
+  it('includes hosted exec detail when the inner command exits nonzero for non-auth reasons', async () => {
+    const contract = encodeContract({
+      command: 'node',
+      args: ['./src/claude-exec-wrapper.js', '--prompt', 'Solve it'],
+      cwd: '/tmp/work',
+      envPolicy: {
+        allow: ['PATH', 'HOME'],
+        inject: {},
+      },
+    });
+
+    const runner = async (args) => {
+      if (args[0] === 'new-workspace') return { stdout: 'OK workspace:9\n', stderr: '' };
+      if (args[0] === 'list-panels') return { stdout: '* surface:4 terminal [focused]\n', stderr: '' };
+      if (args[0] === 'send') return { stdout: '', stderr: '' };
+      if (args[0] === 'capture-pane') {
+        return { stdout: 'Wrapper crashed on input files\n[guardrail-exec-exit:main:1]\n', stderr: '' };
+      }
+      throw new Error(`unexpected cmux call: ${args[0]}`);
+    };
+
+    await assert.rejects(
+      runCmuxClaudeRecipe(
+        {
+          socketPath: '/tmp/cmux.sock',
+          workspaceName: 'Claude Smoke',
+          launchCwd: '.',
+          execContractB64: contract,
+          captureLines: 80,
+          captureDelayMs: 0,
+          pollIntervalMs: 50,
+          waitTimeoutMs: 500,
+        },
+        {
+          runner,
+          wait: async () => {},
+          emitStdout: false,
+        },
+      ),
+      /Hosted exec failed with exit code 1\. Detail: Wrapper crashed on input files/,
+    );
+  });
+
 });

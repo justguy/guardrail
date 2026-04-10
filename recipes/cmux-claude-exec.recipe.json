@@ -187,6 +187,21 @@
       "max": 120000,
       "default": 20000,
       "required": false
+    },
+    "auth_repair": {
+      "type": "string",
+      "description": "Hosted auth repair mode. Default `console` will run `claude auth login --console` in the exact target runtime if the hosted Claude probe or exec hits login there, then retry once.",
+      "enum": ["none", "console"],
+      "default": "console",
+      "required": false
+    },
+    "auth_repair_timeout_ms": {
+      "type": "integer",
+      "description": "Maximum time to wait for hosted auth repair to finish before surfacing auth_repair_pending_user_input.",
+      "min": 1000,
+      "max": 900000,
+      "default": 300000,
+      "required": false
     }
   },
   "steps": [
@@ -203,7 +218,9 @@
           "--capture-lines", "{{inputs.capture_lines}}",
           "--capture-delay-ms", "{{inputs.capture_delay_ms}}",
           "--poll-interval-ms", "{{inputs.poll_interval_ms}}",
-          "--wait-timeout-ms", "{{inputs.wait_timeout_ms}}"
+          "--wait-timeout-ms", "{{inputs.wait_timeout_ms}}",
+          "--auth-repair", "{{inputs.auth_repair}}",
+          "--auth-repair-timeout-ms", "{{inputs.auth_repair_timeout_ms}}"
         ],
         "mode": "structured"
       },
@@ -238,6 +255,7 @@
       "This recipe keeps the cmux host-runtime hop explicit, but composes the bundled claude-exec recipe into the same Guardrail approval unit instead of launching a nested inner guardrail run",
       "The wrapper creates a fresh workspace, executes a bounded composed contract, waits for a hosted exit sentinel, and captures pane output without shell-mode recipe steps",
       "The composed claude-exec layer still owns its trust boundary, session contract behavior, env handshake, and Claude CLI auth/runtime requirements. The cmux wrapper runs the child recipe's bounded auth preflight inside the hosted runtime before launching Claude. The hosted command intentionally uses `env -i` and then rehydrates only the approved env intersection, so seeing `env -i` in a pane capture is expected; the real failure modes are missing required vars or a host runtime where the bounded Claude exec probe still fails. `prompt` is interactive_message/session-bound; `system_prompt` remains review_each_time",
+      "With the default `auth_repair=console`, the wrapper will run `claude auth login --console` inside that exact hosted runtime if the hosted Claude probe or exec hits login there, rerun the bounded preflight, and retry the original exec once. If login itself still waits on human interaction, Guardrail fails with `auth_repair_pending_user_input` instead of pretending the slice ran",
       "For a human-reviewed multi-doc loop, approve the full doc set up front in input_files, keep system_prompt fixed, use this recipe only to reach the authenticated host runtime, and prefer the resident lane for later review/continue turns",
       "If the hosted run fails with the same downstream auth error as direct claude-exec, diagnose that as missing tool auth in the target host runtime rather than Guardrail drift",
       "socket_path is exact-match approved because it addresses a specific terminal control socket",
