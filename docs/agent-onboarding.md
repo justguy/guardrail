@@ -270,7 +270,7 @@ AI execution recipes:
   - `lane start`: one-time host-runtime startup for a resident interactive lane.
   - `lane send`: later turn/message traffic through an existing resident lane.
   - `lane result`: read the stored output for the latest or named resident-lane request.
-  - `lane status`: inspect whether the lane is ready, busy, expired, stale, or stopped before sending again.
+  - `lane status`: inspect whether the lane is ready, busy, failed, expired, stale, or stopped before sending again.
   - `lane stop`: explicit teardown of the resident lane.
 - Fast decision sequence for AI runtimes:
   - resolve the intended recipe source first; if Guardrail reports a duplicate-source collision, fix `cwd` or remove the duplicate source before doing anything else
@@ -303,7 +303,7 @@ AI execution recipes:
 - If a request outlives the client-side wait window, `lane send` now returns a structured `pending` result with the request id instead of reporting `lane_expired`. Treat that as “the lane accepted the request and it is still running,” not as proof that Claude failed.
 - `lane result` is the bounded recovery/read step for those cases. Use it to fetch the stored output for the latest or named request after a long-running turn completes.
 - `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
-- `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is ready, busy, expired, stale, or stopped, includes the current request id/start time plus the last completed result path, and tells you the safest next action.
+- `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is ready, busy, failed, expired, stale, or stopped, includes the current request id/start time plus the last completed result path, and surfaces `failureReason`, `failureStage`, and `logPath` when bootstrap or runtime startup failed.
 - The practical review-loop shape is:
   - start one approved Claude session with the full planned doc set in `input_files`
   - keep `system_prompt` fixed for the entire loop
@@ -320,6 +320,7 @@ AI execution recipes:
   - recipe/lane-managed status outputs
 - Do not jump straight to raw host-surface inspection commands just because a hosted run exited nonzero. Listing host surfaces, selecting runtimes, or capturing host-side output directly are escalation-only fallbacks and can trigger additional user approvals one command at a time.
 - Do not jump straight to raw host process inspection (`ps`, `lsof`, direct pane capture, etc.) just because a resident lane is busy or a client timed out. First use `lane status`, `lane result`, and any lane-owned artifacts. Raw host inspection is a separate approval-bearing capability and will keep retriggering approvals.
+- If `lane start` returns `lane_boot_failed`, treat that as a bounded Guardrail diagnosis first, not as an instruction to capture the host pane immediately. Read `lane status` and the lane log path first; only fall back to raw host inspection if those Guardrail-owned surfaces still do not explain the failure.
 - For proof validation after a Guardrail run, prefer `node src/cli.js repo status --path <repo> --json` over ad hoc `git diff --name-only`. The Guardrail command surfaces staged, unstaged, and untracked files together so review does not silently miss newly created artifacts.
 - The rule is: bounded surface first, raw surface second. Only fall back to direct host-surface commands when Guardrail does not already expose the needed state.
 - Treat host-runtime selection as an expected routing decision, not as a surprising late-stage workaround. If a tool is authenticated or functional only in a different launcher, terminal surface, remote shell, container, or similar runtime, choose that runtime early and explain it plainly as “this tool must run in the already-working host runtime,” not as a mysterious new failure after several retries.

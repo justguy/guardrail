@@ -12,6 +12,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -28,6 +29,7 @@ import {
   stopResidentLane,
   trackLaneRequestId,
   validateLaneRequest,
+  waitForResidentLaneBootstrap,
 } from '../src/claude-resident-lane.js';
 import { sendResidentLaneMessage } from '../src/claude-resident-lane-client.js';
 
@@ -160,6 +162,40 @@ describe('Claude resident lane', () => {
     assert.equal(summary.pid, process.pid);
     assert.equal(summary.requestFifo, paths.requestFifo);
     assert.equal(summary.responseFifo, paths.responseFifo);
+  });
+
+  it('fails lane startup when the daemon exits during bootstrap and records a failed state', async () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    const fakeChild = new EventEmitter();
+    fakeChild.pid = 424242;
+    fakeChild.unref = () => {};
+
+    await assert.rejects(
+      launchResidentLane({
+        laneDir,
+        guardrailRepo: dir,
+        workingDir: dir,
+        sessionName: 'math-live-session',
+      }, {
+        spawnProcess: () => {
+          setTimeout(() => fakeChild.emit('exit', 1, null), 10);
+          return fakeChild;
+        },
+        waitForBootstrap: waitForResidentLaneBootstrap,
+        waitForBootstrapDeps: {
+          timeoutMs: 250,
+          isAlive: () => false,
+          readLogTail: () => 'bootstrap crashed',
+        },
+      }),
+      (err) => err?.code === 'LANE_BOOT_FAILED',
+    );
+
+    const status = getResidentLaneStatus({ laneDir, guardrailRepo: dir });
+    assert.equal(status.status, 'failed');
+    assert.equal(status.failureStage, 'bootstrap');
+    assert.match(status.failureReason, /bootstrap/);
   });
 
   it('sends a prompt over the resident lane FIFOs', async () => {
@@ -471,5 +507,25 @@ describe('Claude resident lane', () => {
     assert.equal(status.alive, false);
     assert.equal(status.keyPresent, false);
     assert.equal(status.recommendedAction, 'start');
+  });
+
+  it('reports failed resident lane status with a failure reason', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    mkdirSync(laneDir, { recursive: true });
+    writeFileSync(lanePaths(laneDir).statePath, JSON.stringify({
+      pid: 12345,
+      status: 'failed',
+      laneId: 'math',
+      sessionName: 'math-live-session',
+      failureReason: 'bootstrap crashed',
+      failureStage: 'bootstrap',
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const status = getResidentLaneStatus({ laneDir, guardrailRepo: dir, laneId: 'math' });
+    assert.equal(status.status, 'failed');
+    assert.equal(status.failureReason, 'bootstrap crashed');
+    assert.equal(status.failureStage, 'bootstrap');
   });
 });

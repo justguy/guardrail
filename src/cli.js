@@ -79,6 +79,20 @@ function buildLaneExpiredResponse() {
   };
 }
 
+function buildLaneStartFailureResponse(err) {
+  const details = err?.details || {};
+  return {
+    status: 'error',
+    reason: err?.code === 'LANE_BOOT_FAILED' ? 'lane_boot_failed' : 'lane_start_failed',
+    message: err?.message || 'Resident lane failed to start.',
+    failureReason: details.failureReason || err?.message || null,
+    failureStage: details.failureStage || null,
+    statePath: details.statePath || null,
+    logPath: details.logPath || null,
+    pid: details.pid ?? null,
+  };
+}
+
 async function appendLaneAuditEntry(laneOpts, event, details = {}) {
   try {
     const { createAuditLog } = await import('./audit.js');
@@ -1105,10 +1119,29 @@ async function main() {
     const keyFd = laneOpts.keyPath ? openSync(laneOpts.keyPath, 'r') : null;
     let summary;
     try {
-      summary = await launchResidentLane({
-        ...laneOpts,
-        authFd: keyFd ?? '',
-      });
+      try {
+        summary = await launchResidentLane({
+          ...laneOpts,
+          authFd: keyFd ?? '',
+        });
+      } catch (err) {
+        const failure = buildLaneStartFailureResponse(err);
+        await appendLaneAuditEntry(laneOpts, 'lane_start', {
+          status: 'error',
+          reason: failure.reason,
+          pid: failure.pid,
+          failure_stage: failure.failureStage,
+        });
+        if (parsed.json) {
+          console.log(JSON.stringify(failure, null, 2));
+        } else {
+          console.error(failure.message);
+          if (failure.failureStage) console.error(`Failure stage: ${failure.failureStage}`);
+          if (failure.logPath) console.error(`Log path: ${failure.logPath}`);
+          if (failure.statePath) console.error(`State path: ${failure.statePath}`);
+        }
+        process.exit(1);
+      }
     } finally {
       if (keyFd !== null) closeSync(keyFd);
     }
@@ -1129,6 +1162,7 @@ async function main() {
       console.log(`  Response FIFO: ${summary.responseFifo}`);
       console.log(`  State path:    ${summary.statePath}`);
       console.log(`  PID:           ${summary.pid}`);
+      if (summary.logPath) console.log(`  Log path:      ${summary.logPath}`);
       if (summary.reused) {
         console.log('  Reused:        yes');
       }
@@ -1303,6 +1337,9 @@ async function main() {
       console.log(`  Last completed id:  ${status.lastCompletedRequestId ?? 'n/a'}`);
       console.log(`  Last completed at:  ${status.lastCompletedAt ?? 'n/a'}`);
       console.log(`  Last result path:   ${status.lastResultPath ?? 'n/a'}`);
+      console.log(`  Failure reason:     ${status.failureReason ?? 'n/a'}`);
+      console.log(`  Failure stage:      ${status.failureStage ?? 'n/a'}`);
+      console.log(`  Log path:           ${status.logPath ?? 'n/a'}`);
       console.log(`  Last activity at:   ${status.lastActivityAt ?? 'n/a'}`);
       console.log(`  Key present:        ${status.keyPresent ? 'yes' : 'no'}`);
       console.log(`  Request FIFO:       ${status.requestFifoPresent ? 'present' : 'missing'}`);

@@ -245,7 +245,7 @@ Resident lanes are for direct interactive use when the executable boundary shoul
 - appends `lane_start`, `lane_send`, `lane_result`, and `lane_stop` lifecycle entries to `.guardrail/audit.jsonl` so later ops review can distinguish lane creation, message traffic, result reads, expiry, and explicit teardown
 
 Lane startup still has to happen in a runtime where the downstream CLI auth already works. Direct AI recipes can now declare bounded `requires_auth` checks too, so Guardrail fails before launch with `missing_auth_prerequisite` instead of letting the underlying CLI die late. The same bounded preflight now applies when those recipes are executed through workflow `recipe_ref` steps, so chained recipe workflows stop before launch on missing tool auth instead of surfacing a late downstream CLI failure. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again.
-Guardrail now exposes first-class long-turn state for resident lanes. If a request outlives the client-side wait window, `lane send` returns a structured `pending` response with the request id instead of collapsing into `lane_expired`. Use `lane status` to see whether the lane is `ready`, `busy`, `expired`, `stale`, or `stopped`, including the current request id/start time and the last completed result path. Use `lane result` to read the stored output for the latest or named request once it completes. Raw host inspection should be the last resort, not the default recovery path.
+Guardrail now exposes first-class startup and long-turn state for resident lanes. If a request outlives the client-side wait window, `lane send` returns a structured `pending` response with the request id instead of collapsing into `lane_expired`. `lane start` also now fails early with `lane_boot_failed` when the daemon dies during bootstrap, and `lane status` reports `failureReason`, `failureStage`, and `logPath` when a lane is in `failed` state. Use `lane status` to see whether the lane is `ready`, `busy`, `failed`, `expired`, `stale`, or `stopped`, including the current request id/start time and the last completed result path. Use `lane result` to read the stored output for the latest or named request once it completes. Raw host inspection should be the last resort, not the default recovery path.
 If a direct recipe run and a composed host-runtime recipe both fail with the same downstream tool-auth error such as `Not logged in`, treat that as missing auth in the target host runtime, not as Guardrail drift. Direct recipes now preflight in the current runtime; composed host-runtime recipes re-run the same bounded auth check inside the hosted surface before the downstream CLI starts. Fix login in that exact runtime, then rerun the same approved Guardrail contract. For repeated interaction or monitoring after startup, prefer the resident FIFO lane over repeated raw host-surface inspection commands so you do not trigger another approval-bearing transport hop every turn.
 
 Communication matrix:
@@ -258,7 +258,7 @@ Communication matrix:
 - `lane start`: one-time host-runtime startup
 - `lane send`: later message traffic through the resident lane
 - `lane result`: read the stored output for the latest or named request
-- `lane status`: inspect ready/busy/expired/stale/stopped lane state plus current request visibility
+- `lane status`: inspect ready/busy/failed/expired/stale/stopped lane state plus current request visibility and startup failure detail
 - `lane stop`: explicit teardown
 
 Recommended multi-doc review loop:
@@ -278,6 +278,7 @@ Practical agent rule:
 - transport/orchestration recipe if the tool only works in a different authenticated host runtime
 - resident lane if the workflow needs repeated messages or repeated monitoring after startup
 - if `lane send` returns `pending`, check `lane status` and then `lane result` before considering a restart
+- if `lane start` fails with `lane_boot_failed`, read `lane status` before dropping to raw pane capture
 - use `guardrail repo status --path <repo>` when you need a proof check that includes staged, unstaged, and untracked files in one view
 - raw host-surface inspection only after Guardrail-managed status/result/audit paths are exhausted
 - Guardrail transport state does not replace proof validation against the real branch state. Use Guardrail reports to narrow the path quickly, then still verify the actual branch/files before accepting the result.

@@ -632,6 +632,28 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.recommendedAction, 'start');
   });
 
+  it('guardrail lane status reports failed bootstrap reasons cleanly', () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    mkdirSync(laneDir, { recursive: true });
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: 12345,
+      status: 'failed',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      failureReason: 'bootstrap crashed',
+      failureStage: 'bootstrap',
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane status --lane-dir ${laneDir} --json`);
+    assert.equal(r.exitCode, 0);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.status, 'failed');
+    assert.equal(parsed.failureReason, 'bootstrap crashed');
+    assert.equal(parsed.failureStage, 'bootstrap');
+  });
+
   it('guardrail lane result returns the stored output for a completed request', () => {
     const dir = tmpDir();
     const laneDir = join(dir, 'lane');

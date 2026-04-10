@@ -17,9 +17,13 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { EventEmitter } from 'node:events';
 
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+const STARTUP_POLL_INTERVAL_MS = 25;
+const STARTUP_TIMEOUT_MS = 2_000;
+const STARTUP_SETTLE_MS = 150;
 const MAX_TRACKED_REQUEST_IDS = 1024;
 const MAX_REQUEST_BYTES = 50_000;
 const MAX_PROMPT_CHARS = 32_000;
@@ -259,6 +263,16 @@ function writeJson(path, data) {
   writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
 }
 
+function readLogTail(path, maxLines = 10) {
+  try {
+    const text = readFileSync(path, 'utf8').trim();
+    if (!text) return '';
+    return text.split('\n').slice(-maxLines).join('\n');
+  } catch {
+    return '';
+  }
+}
+
 function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -283,6 +297,7 @@ function buildState(options, pid, startedConversation = false, extra = {}) {
     sessionId: options.sessionId || null,
     noSessionPersistence: options.noSessionPersistence,
     authMode: options.authFd ? 'hmac_fd' : 'none',
+    logPath: paths.logPath,
     startedConversation,
     pid,
     status: extra.status || 'ready',
@@ -293,6 +308,8 @@ function buildState(options, pid, startedConversation = false, extra = {}) {
     lastCompletedAt: extra.lastCompletedAt || null,
     lastExitCode: extra.lastExitCode ?? null,
     lastResultPath: extra.lastResultPath || null,
+    failureReason: extra.failureReason || null,
+    failureStage: extra.failureStage || null,
     lastActivityAt: extra.lastActivityAt || new Date().toISOString(),
     createdAt: extra.createdAt || new Date().toISOString(),
     pollIntervalMs: options.pollIntervalMs,
@@ -474,6 +491,144 @@ function writeLaneResult(laneDir, response) {
   return resultPath;
 }
 
+function deriveFailureReason(err, fallback = 'Resident lane bootstrap failed.') {
+  const message = String(err?.message || '').trim();
+  return message || fallback;
+}
+
+function persistLaneFailureState(options, err, failureStage = 'bootstrap') {
+  try {
+    mkdirSync(options.laneDir, { recursive: true });
+    mkdirSync(join(options.laneDir, 'logs'), { recursive: true });
+    const pid = err?.details?.pid ?? process.pid;
+    const state = buildState(options, pid, false, {
+      status: 'failed',
+      failureReason: deriveFailureReason(err),
+      failureStage,
+      lastActivityAt: new Date().toISOString(),
+    });
+    writeJson(lanePaths(options.laneDir).statePath, state);
+  } catch {
+    // Best effort.
+  }
+}
+
+function createLaneBootError(message, details = {}) {
+  const err = new Error(message);
+  err.code = 'LANE_BOOT_FAILED';
+  err.details = details;
+  return err;
+}
+
+async function waitForResidentLaneBootstrap(options, child, deps = {}) {
+  const readState = deps.readState || ((path) => readJson(path, null));
+  const isAlive = deps.isAlive || isPidAlive;
+  const sleepFn = deps.sleep || sleep;
+  const nowFn = deps.now || Date.now;
+  const logTailFn = deps.readLogTail || readLogTail;
+  const timeoutMs = deps.timeoutMs || STARTUP_TIMEOUT_MS;
+  const paths = lanePaths(options.laneDir);
+  const expectedPid = child?.pid ?? null;
+  const exitState = { code: null, signal: null, error: null };
+
+  if (child instanceof EventEmitter) {
+    child.once('error', (err) => {
+      exitState.error = err;
+    });
+    child.once('exit', (code, signal) => {
+      exitState.code = code;
+      exitState.signal = signal;
+    });
+  }
+
+  const startedAtMs = nowFn();
+  let healthySinceMs = null;
+
+  for (;;) {
+    const state = readState(paths.statePath);
+    const alive = expectedPid ? isAlive(expectedPid) : false;
+
+    if (state?.status === 'failed') {
+      throw createLaneBootError(
+        state.failureReason || 'Resident lane daemon failed during startup.',
+        {
+          pid: state.pid ?? expectedPid,
+          statePath: paths.statePath,
+          logPath: paths.logPath,
+          failureReason: state.failureReason || null,
+          failureStage: state.failureStage || null,
+        },
+      );
+    }
+
+    if (exitState.error) {
+      const logTail = logTailFn(paths.logPath);
+      throw createLaneBootError(
+        deriveFailureReason(exitState.error),
+        {
+          pid: expectedPid,
+          statePath: paths.statePath,
+          logPath: paths.logPath,
+          failureReason: deriveFailureReason(exitState.error),
+          failureStage: 'bootstrap',
+          logTail,
+        },
+      );
+    }
+
+    if ((exitState.code !== null || exitState.signal !== null) && !alive) {
+      const logTail = logTailFn(paths.logPath);
+      throw createLaneBootError(
+        logTail || `Resident lane daemon exited during startup (code=${exitState.code ?? 'null'}, signal=${exitState.signal ?? 'null'}).`,
+        {
+          pid: expectedPid,
+          statePath: paths.statePath,
+          logPath: paths.logPath,
+          failureReason: logTail || null,
+          failureStage: 'bootstrap',
+          exitCode: exitState.code,
+          signal: exitState.signal,
+        },
+      );
+    }
+
+    const appearsHealthy = !!(
+      state
+      && state.pid === expectedPid
+      && alive
+      && state.status !== 'failed'
+      && state.status !== 'expired'
+      && state.status !== 'stopped'
+    );
+
+    if (appearsHealthy) {
+      if (healthySinceMs === null) {
+        healthySinceMs = nowFn();
+      } else if ((nowFn() - healthySinceMs) >= STARTUP_SETTLE_MS) {
+        return state;
+      }
+    } else {
+      healthySinceMs = null;
+    }
+
+    if ((nowFn() - startedAtMs) >= timeoutMs) {
+      const logTail = logTailFn(paths.logPath);
+      throw createLaneBootError(
+        logTail || 'Resident lane daemon did not become ready before the startup deadline.',
+        {
+          pid: expectedPid,
+          statePath: paths.statePath,
+          logPath: paths.logPath,
+          failureReason: logTail || null,
+          failureStage: 'bootstrap',
+        },
+      );
+    }
+
+    await sleepFn(STARTUP_POLL_INTERVAL_MS);
+  }
+}
+
 function writeResponse(fd, payload) {
   writeSync(fd, `${JSON.stringify(payload)}\n`, undefined, 'utf8');
 }
@@ -554,12 +709,15 @@ export function getResidentLaneStatus(rawOptions) {
     createdAt: state?.createdAt ?? null,
     pollIntervalMs: state?.pollIntervalMs ?? null,
     idleTimeoutMs: state?.idleTimeoutMs ?? null,
+    logPath: state?.logPath ?? paths.logPath,
     keyPath: keyPath || state?.keyPath || null,
     keyPresent,
     requestFifoPresent,
     responseFifoPresent,
     startedConversation: state?.startedConversation ?? false,
     authMode: state?.authMode ?? null,
+    failureReason: state?.failureReason ?? null,
+    failureStage: state?.failureStage ?? null,
     recommendedAction: derived.recommendedAction,
   };
 }
@@ -626,6 +784,8 @@ function cleanupLaneArtifacts(options, status, extra = {}) {
       lastCompletedAt: extra.lastCompletedAt || null,
       lastExitCode: extra.lastExitCode ?? null,
       lastResultPath: extra.lastResultPath || null,
+      failureReason: extra.failureReason || null,
+      failureStage: extra.failureStage || null,
       lastActivityAt: new Date().toISOString(),
       createdAt: extra.createdAt || undefined,
     }),
@@ -712,7 +872,7 @@ async function runResidentLaneDaemon(options) {
   };
 
   let shuttingDown = false;
-  const shutdown = (status) => {
+  const shutdown = (status, err = null, failureStage = 'runtime') => {
     if (shuttingDown) return;
     shuttingDown = true;
     try {
@@ -724,6 +884,8 @@ async function runResidentLaneDaemon(options) {
         lastCompletedAt: state.lastCompletedAt,
         lastExitCode: state.lastExitCode,
         lastResultPath: state.lastResultPath,
+        failureReason: err ? deriveFailureReason(err) : state.failureReason,
+        failureStage: err ? failureStage : state.failureStage,
         createdAt: state.createdAt,
       });
     } finally {
@@ -735,8 +897,8 @@ async function runResidentLaneDaemon(options) {
 
   process.once('SIGINT', () => shutdown('stopped'));
   process.once('SIGTERM', () => shutdown('stopped'));
-  process.once('uncaughtException', () => shutdown('failed'));
-  process.once('unhandledRejection', () => shutdown('failed'));
+  process.once('uncaughtException', (err) => shutdown('failed', err, 'runtime'));
+  process.once('unhandledRejection', (err) => shutdown('failed', err instanceof Error ? err : new Error(String(err)), 'runtime'));
 
   try {
     const chunk = Buffer.alloc(4096);
@@ -800,7 +962,7 @@ async function runResidentLaneDaemon(options) {
   }
 }
 
-export async function launchResidentLane(rawOptions) {
+export async function launchResidentLane(rawOptions, deps = {}) {
   const options = normalizeResidentLaneOptions(rawOptions);
   ensureLaneLayout(options.laneDir);
   const paths = lanePaths(options.laneDir);
@@ -858,7 +1020,8 @@ export async function launchResidentLane(rawOptions) {
     childStdio.push(options.authFd);
   }
 
-  const child = spawn(process.execPath, daemonArgs, {
+  const spawnProcess = deps.spawnProcess || spawn;
+  const child = spawnProcess(process.execPath, daemonArgs, {
     cwd: options.guardrailRepo,
     detached: true,
     stdio: childStdio,
@@ -878,8 +1041,17 @@ export async function launchResidentLane(rawOptions) {
     authMode: options.authFd ? 'hmac_fd' : 'none',
     laneId: options.laneId || null,
     keyPath: options.keyPath || null,
+    logPath: paths.logPath,
   };
   writeJson(paths.launchPath, launchSummary);
+
+  try {
+    const waitForBootstrap = deps.waitForBootstrap || waitForResidentLaneBootstrap;
+    await waitForBootstrap(options, child, deps.waitForBootstrapDeps || {});
+  } catch (err) {
+    persistLaneFailureState(options, err, 'bootstrap');
+    throw err;
+  }
   return launchSummary;
 }
 
@@ -933,6 +1105,8 @@ export function stopResidentLane(rawOptions) {
 
 export {
   canonicalRequestPayload,
+  createLaneBootError,
+  waitForResidentLaneBootstrap,
   readSecretFromFd,
   signLaneRequest,
   verifyLaneRequestSignature,
@@ -941,14 +1115,27 @@ export {
 
 async function main() {
   const raw = parseResidentLaneArgs(process.argv.slice(2));
-  const options = normalizeResidentLaneOptions(raw);
-  if (options.daemon) {
-    await runResidentLaneDaemon(options);
-    return;
-  }
+  let options;
+  try {
+    options = normalizeResidentLaneOptions(raw);
+    if (options.daemon) {
+      await runResidentLaneDaemon(options);
+      return;
+    }
 
-  const summary = await launchResidentLane(raw);
-  process.stdout.write(`${JSON.stringify(summary)}\n`);
+    const summary = await launchResidentLane(raw);
+    process.stdout.write(`${JSON.stringify(summary)}\n`);
+  } catch (err) {
+    if (raw?.daemon) {
+      try {
+        const failureOptions = options || normalizeResidentLaneOptions(raw);
+        persistLaneFailureState(failureOptions, err, 'bootstrap');
+      } catch {
+        // Best effort.
+      }
+    }
+    throw err;
+  }
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
