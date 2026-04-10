@@ -622,6 +622,19 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.json, true);
   });
 
+  it('parses lane list flags', () => {
+    const result = parseArgs([
+      'lane', 'list',
+      '--guardrail-repo', '/tmp/repo',
+      '--lanes-dir', '.guardrail/lanes',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-list');
+    assert.equal(result.laneOpts.guardrailRepo, '/tmp/repo');
+    assert.equal(result.laneOpts.lanesDir, '.guardrail/lanes');
+    assert.equal(result.json, true);
+  });
+
   it('parses lane result flags', () => {
     const result = parseArgs([
       'lane', 'result',
@@ -642,6 +655,17 @@ describe('CLI bare recipe name detection', () => {
     ]);
     assert.equal(result.subcommand, 'lane-stop');
     assert.equal(result.laneOpts.id, 'claude-live');
+  });
+
+  it('parses lane prune flags', () => {
+    const result = parseArgs([
+      'lane', 'prune',
+      '--include-failed', 'true',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-prune');
+    assert.equal(result.laneOpts.includeFailed, 'true');
+    assert.equal(result.json, true);
   });
 
   it('parses repo status flags', () => {

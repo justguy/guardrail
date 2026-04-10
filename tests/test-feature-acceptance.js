@@ -474,6 +474,54 @@ describe('README Feature: Resident Lane Mode', () => {
     }
   });
 
+  it('guardrail lane list shows mixed lane states from the repo registry', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const lanesDir = join(repoDir, '.guardrail', 'lanes');
+    const readyLaneDir = join(lanesDir, 'math-ready');
+    const staleLaneDir = join(lanesDir, 'math-stale');
+    mkdirSync(readyLaneDir, { recursive: true });
+    mkdirSync(staleLaneDir, { recursive: true });
+    const readyRequestFifo = join(readyLaneDir, 'requests.fifo');
+    const readyResponseFifo = join(readyLaneDir, 'responses.fifo');
+    assert.equal(spawnSync('mkfifo', [readyRequestFifo]).status, 0);
+    assert.equal(spawnSync('mkfifo', [readyResponseFifo]).status, 0);
+    const keyPath = join(dir, 'ready.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(join(readyLaneDir, 'identity.json'), JSON.stringify({
+      laneId: 'math-ready',
+      laneDir: readyLaneDir,
+      guardrailRepo: repoDir,
+      keyPath,
+      identityNonce: 'nonce-ready',
+    }), 'utf8');
+    writeFileSync(join(staleLaneDir, 'identity.json'), JSON.stringify({
+      laneId: 'math-stale',
+      laneDir: staleLaneDir,
+      guardrailRepo: repoDir,
+      identityNonce: 'nonce-stale',
+    }), 'utf8');
+    writeFileSync(join(readyLaneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-ready',
+      sessionName: 'math-ready',
+      keyPath,
+      identityNonce: 'nonce-ready',
+      bootNonce: 'boot-ready',
+      requestFifo: readyRequestFifo,
+      responseFifo: readyResponseFifo,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane list --guardrail-repo ${repoDir} --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.counts.ready, 1);
+    assert.equal(parsed.counts.stale, 1);
+    assert.equal(parsed.lanes.length, 2);
+  });
+
   it('guardrail lane send writes one prompt through a resident lane FIFO', async () => {
     const dir = tmpDir();
     const guardrailRepo = join(dir, 'repo');
@@ -772,6 +820,35 @@ describe('README Feature: Resident Lane Mode', () => {
     const laneStopEntry = entries.find((entry) => entry.event === 'lane_stop');
     assert.ok(laneStopEntry, 'expected lane_stop audit entry');
     assert.equal(laneStopEntry.status, 'success');
+  });
+
+  it('guardrail lane prune removes stale lanes and appends audit entries', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const laneDir = join(repoDir, '.guardrail', 'lanes', 'math-stale');
+    mkdirSync(join(repoDir, '.guardrail'), { recursive: true });
+    mkdirSync(laneDir, { recursive: true });
+    const keyPath = join(dir, 'stale.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(join(laneDir, 'identity.json'), JSON.stringify({
+      laneId: 'math-stale',
+      laneDir,
+      guardrailRepo: repoDir,
+      keyPath,
+      identityNonce: 'nonce-stale',
+    }), 'utf8');
+
+    const r = run(`${CLI} lane prune --guardrail-repo ${repoDir} --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.pruned.length, 1);
+    assert.equal(parsed.pruned[0].laneId, 'math-stale');
+    assert.equal(existsSync(laneDir), false);
+    assert.equal(existsSync(keyPath), false);
+    const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
+    const pruneEntry = entries.find((entry) => entry.event === 'lane_prune');
+    assert.ok(pruneEntry, 'expected lane_prune audit entry');
+    assert.equal(pruneEntry.status, 'success');
   });
 });
 

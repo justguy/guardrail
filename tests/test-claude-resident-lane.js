@@ -25,6 +25,8 @@ import {
   getResidentLaneResult,
   getResidentLaneStatus,
   launchResidentLane,
+  listResidentLanes,
+  pruneResidentLanes,
   signLaneRequest,
   stopResidentLane,
   trackLaneRequestId,
@@ -114,6 +116,7 @@ describe('Claude resident lane', () => {
     assert.equal(paths.requestFifo, '/tmp/example-lane/requests.fifo');
     assert.equal(paths.responseFifo, '/tmp/example-lane/responses.fifo');
     assert.equal(paths.statePath, '/tmp/example-lane/state.json');
+    assert.equal(paths.identityPath, '/tmp/example-lane/identity.json');
   });
 
   it('uses lifecycle start for the first request and continue after success', async () => {
@@ -181,6 +184,129 @@ describe('Claude resident lane', () => {
     assert.equal(summary.pid, process.pid);
     assert.equal(summary.requestFifo, paths.requestFifo);
     assert.equal(summary.responseFifo, paths.responseFifo);
+  });
+
+  it('fails closed when another live lane with the same lane id already exists in the repo registry', async () => {
+    const dir = tmpLaneDir();
+    const existingLaneDir = join(dir, '.guardrail', 'lanes', 'math-a');
+    mkdirSync(existingLaneDir, { recursive: true });
+    const existingPaths = lanePaths(existingLaneDir);
+    mkfifo(existingPaths.requestFifo);
+    mkfifo(existingPaths.responseFifo);
+    writeFileSync(existingPaths.identityPath, JSON.stringify({
+      laneId: 'math-live',
+      laneDir: existingLaneDir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-a',
+      keyPath: join(dir, 'lane-a.key'),
+    }), 'utf8');
+    writeFileSync(existingPaths.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      identityNonce: 'nonce-a',
+      bootNonce: 'boot-a',
+      requestFifo: existingPaths.requestFifo,
+      responseFifo: existingPaths.responseFifo,
+    }), 'utf8');
+
+    await assert.rejects(() => launchResidentLane({
+      laneDir: join(dir, '.guardrail', 'lanes', 'math-b'),
+      guardrailRepo: dir,
+      workingDir: dir,
+      laneId: 'math-live',
+      sessionName: 'math-live',
+    }), /Duplicate live resident lane/);
+  });
+
+  it('lists resident lanes from the project lane registry', () => {
+    const dir = tmpLaneDir();
+    const readyLaneDir = join(dir, '.guardrail', 'lanes', 'math-ready');
+    const staleLaneDir = join(dir, '.guardrail', 'lanes', 'math-stale');
+    mkdirSync(readyLaneDir, { recursive: true });
+    mkdirSync(staleLaneDir, { recursive: true });
+    const readyPaths = lanePaths(readyLaneDir);
+    const stalePaths = lanePaths(staleLaneDir);
+    mkfifo(readyPaths.requestFifo);
+    mkfifo(readyPaths.responseFifo);
+    writeFileSync(readyPaths.identityPath, JSON.stringify({
+      laneId: 'math-ready',
+      laneDir: readyLaneDir,
+      guardrailRepo: dir,
+      keyPath: join(dir, 'ready.key'),
+      identityNonce: 'nonce-ready',
+    }), 'utf8');
+    writeFileSync(stalePaths.identityPath, JSON.stringify({
+      laneId: 'math-stale',
+      laneDir: staleLaneDir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-stale',
+    }), 'utf8');
+    writeFileSync(readyPaths.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-ready',
+      sessionName: 'math-ready',
+      keyPath: join(dir, 'ready.key'),
+      identityNonce: 'nonce-ready',
+      bootNonce: 'boot-ready',
+      requestFifo: readyPaths.requestFifo,
+      responseFifo: readyPaths.responseFifo,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const listing = listResidentLanes({ guardrailRepo: dir });
+    assert.equal(listing.lanes.length, 2);
+    assert.equal(listing.counts.ready, 1);
+    assert.equal(listing.counts.stale, 1);
+    assert.equal(listing.lanes.find((lane) => lane.laneId === 'math-ready')?.identityNonce, 'nonce-ready');
+  });
+
+  it('prunes stale and stopped lanes while leaving failed lanes unless explicitly included', () => {
+    const dir = tmpLaneDir();
+    const staleLaneDir = join(dir, '.guardrail', 'lanes', 'math-stale');
+    const failedLaneDir = join(dir, '.guardrail', 'lanes', 'math-failed');
+    mkdirSync(staleLaneDir, { recursive: true });
+    mkdirSync(failedLaneDir, { recursive: true });
+    const stalePaths = lanePaths(staleLaneDir);
+    const failedPaths = lanePaths(failedLaneDir);
+    writeFileSync(stalePaths.identityPath, JSON.stringify({
+      laneId: 'math-stale',
+      laneDir: staleLaneDir,
+      guardrailRepo: dir,
+      keyPath: join(dir, 'stale.key'),
+      identityNonce: 'nonce-stale',
+    }), 'utf8');
+    writeFileSync(failedPaths.identityPath, JSON.stringify({
+      laneId: 'math-failed',
+      laneDir: failedLaneDir,
+      guardrailRepo: dir,
+      keyPath: join(dir, 'failed.key'),
+      identityNonce: 'nonce-failed',
+    }), 'utf8');
+    writeFileSync(stalePaths.statePath, JSON.stringify({
+      pid: 12345,
+      status: 'stale',
+      laneId: 'math-stale',
+      sessionName: 'math-stale',
+    }), 'utf8');
+    writeFileSync(failedPaths.statePath, JSON.stringify({
+      pid: 12345,
+      status: 'failed',
+      laneId: 'math-failed',
+      sessionName: 'math-failed',
+      failureReason: 'boom',
+      failureStage: 'runtime',
+    }), 'utf8');
+    writeFileSync(join(dir, 'stale.key'), 'secret\n', 'utf8');
+    writeFileSync(join(dir, 'failed.key'), 'secret\n', 'utf8');
+
+    const result = pruneResidentLanes({ guardrailRepo: dir });
+    assert.equal(result.pruned.length, 1);
+    assert.equal(result.pruned[0].laneId, 'math-stale');
+    assert.equal(existsSync(staleLaneDir), false);
+    assert.equal(existsSync(failedLaneDir), true);
   });
 
   it('treats EPERM pid probes as alive when checking resident lane status', () => {

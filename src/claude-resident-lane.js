@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readSync,
   readFileSync,
   rmSync,
@@ -14,7 +15,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
@@ -68,6 +69,8 @@ export function parseResidentLaneArgs(argv) {
     inputFiles: '',
     laneId: '',
     keyPath: '',
+    identityNonce: '',
+    bootNonce: '',
     sessionName: '',
     sessionId: '',
     noSessionPersistence: '',
@@ -138,6 +141,14 @@ export function parseResidentLaneArgs(argv) {
         options.keyPath = value;
         i += 1;
         break;
+      case '--identity-nonce':
+        options.identityNonce = value;
+        i += 1;
+        break;
+      case '--boot-nonce':
+        options.bootNonce = value;
+        i += 1;
+        break;
       case '--session-name':
         options.sessionName = value;
         i += 1;
@@ -203,6 +214,8 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     inputFiles: splitCsv(rawOptions.inputFiles),
     laneId: rawOptions.laneId || '',
     keyPath: rawOptions.keyPath ? resolve(baseCwd, rawOptions.keyPath) : '',
+    identityNonce: rawOptions.identityNonce || '',
+    bootNonce: rawOptions.bootNonce || '',
     sessionName: rawOptions.sessionName,
     sessionId: rawOptions.sessionId || '',
     noSessionPersistence: shellTruthy(rawOptions.noSessionPersistence),
@@ -219,6 +232,7 @@ export function lanePaths(laneDir) {
     requestFifo: join(laneDir, 'requests.fifo'),
     responseFifo: join(laneDir, 'responses.fifo'),
     statePath: join(laneDir, 'state.json'),
+    identityPath: join(laneDir, 'identity.json'),
     launchPath: join(laneDir, 'launch.json'),
     logPath: join(laneDir, 'logs', 'lane.log'),
     resultsDir: join(laneDir, 'results'),
@@ -269,6 +283,57 @@ function writeJson(path, data) {
   writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
 }
 
+function stableRepoOwnerId(guardrailRepo) {
+  return createHash('sha256')
+    .update(resolve(guardrailRepo))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+function buildLaneIdentity(options, existing = null) {
+  const now = new Date().toISOString();
+  return {
+    schemaVersion: 1,
+    laneId: options.laneId || existing?.laneId || null,
+    laneDir: options.laneDir,
+    guardrailRepo: options.guardrailRepo,
+    workingDir: options.workingDir,
+    keyPath: options.keyPath || existing?.keyPath || null,
+    sessionName: options.sessionName,
+    sessionId: options.sessionId || null,
+    ownerRepoId: stableRepoOwnerId(options.guardrailRepo),
+    identityNonce: existing?.identityNonce || options.identityNonce || randomBytes(12).toString('hex'),
+    bootNonce: options.bootNonce || existing?.bootNonce || null,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+}
+
+function validateLaneIdentity(identity, options) {
+  if (!identity) return;
+  if (identity.laneDir && resolve(identity.laneDir) !== options.laneDir) {
+    throw createLaneBootError('Resident lane identity does not match the requested lane directory.', {
+      failureStage: 'bootstrap',
+    });
+  }
+  if (identity.guardrailRepo && resolve(identity.guardrailRepo) !== options.guardrailRepo) {
+    throw createLaneBootError('Resident lane identity belongs to a different Guardrail repo.', {
+      failureStage: 'bootstrap',
+    });
+  }
+  if (identity.laneId && options.laneId && identity.laneId !== options.laneId) {
+    throw createLaneBootError('Resident lane identity belongs to a different lane id.', {
+      failureStage: 'bootstrap',
+    });
+  }
+}
+
+function writeLaneIdentity(options, existing = null) {
+  const identity = buildLaneIdentity(options, existing);
+  writeJson(lanePaths(options.laneDir).identityPath, identity);
+  return identity;
+}
+
 function readLogTail(path, maxLines = 10) {
   try {
     const text = readFileSync(path, 'utf8').trim();
@@ -296,12 +361,16 @@ function buildState(options, pid, startedConversation = false, extra = {}) {
     laneDir: options.laneDir,
     requestFifo: paths.requestFifo,
     responseFifo: paths.responseFifo,
+    identityPath: paths.identityPath,
     guardrailRepo: options.guardrailRepo,
     workingDir: options.workingDir,
     laneId: options.laneId || null,
     keyPath: options.keyPath || null,
     sessionName: options.sessionName,
     sessionId: options.sessionId || null,
+    identityNonce: options.identityNonce || null,
+    bootNonce: options.bootNonce || null,
+    ownerRepoId: stableRepoOwnerId(options.guardrailRepo),
     noSessionPersistence: options.noSessionPersistence,
     authMode: options.authFd ? 'hmac_fd' : 'none',
     logPath: paths.logPath,
@@ -663,11 +732,11 @@ function isFifo(path) {
   }
 }
 
-function classifyLaneStatus(state, keyPresent, requestFifoPresent, responseFifoPresent) {
+function classifyLaneStatus(state, identityPresent, keyPresent, requestFifoPresent, responseFifoPresent) {
   const alive = !!(state?.pid && isPidAlive(state.pid) && state.status !== 'expired' && state.status !== 'stopped' && state.status !== 'failed');
   const allArtifactsPresent = keyPresent && requestFifoPresent && responseFifoPresent;
 
-  if (!state && !keyPresent && !requestFifoPresent && !responseFifoPresent) {
+  if (!state && !identityPresent && !keyPresent && !requestFifoPresent && !responseFifoPresent) {
     return { status: 'missing', alive: false, recommendedAction: 'start' };
   }
   if (state?.status === 'expired' || state?.status === 'stopped') {
@@ -682,7 +751,7 @@ function classifyLaneStatus(state, keyPresent, requestFifoPresent, responseFifoP
     }
     return { status: state?.status || 'ready', alive: true, recommendedAction: 'send' };
   }
-  if (state || keyPresent || requestFifoPresent || responseFifoPresent) {
+  if (state || identityPresent || keyPresent || requestFifoPresent || responseFifoPresent) {
     return { status: 'stale', alive: false, recommendedAction: allArtifactsPresent ? 'cleanup' : 'start' };
   }
   return { status: 'missing', alive: false, recommendedAction: 'start' };
@@ -714,10 +783,12 @@ export function getResidentLaneStatus(rawOptions) {
   const keyPath = rawOptions.keyPath ? resolve(process.cwd(), rawOptions.keyPath) : '';
   const paths = lanePaths(laneDir);
   const state = readJson(paths.statePath, null);
-  const keyPresent = !!(keyPath && existsSync(keyPath));
+  const identity = readJson(paths.identityPath, null);
+  const effectiveKeyPath = keyPath || identity?.keyPath || state?.keyPath || '';
+  const keyPresent = !!(effectiveKeyPath && existsSync(effectiveKeyPath));
   const requestFifoPresent = isFifo(paths.requestFifo);
   const responseFifoPresent = isFifo(paths.responseFifo);
-  const classified = classifyLaneStatus(state, keyPresent, requestFifoPresent, responseFifoPresent);
+  const classified = classifyLaneStatus(state, !!identity, keyPresent, requestFifoPresent, responseFifoPresent);
   const implicitFailure = inferImplicitFailure(classified, state);
   const derived = implicitFailure || classified;
 
@@ -727,9 +798,13 @@ export function getResidentLaneStatus(rawOptions) {
     status: derived.status,
     alive: derived.alive,
     pid: state?.pid ?? null,
-    laneId: state?.laneId ?? rawOptions.laneId ?? null,
-    sessionName: state?.sessionName ?? rawOptions.sessionName ?? null,
-    sessionId: state?.sessionId ?? rawOptions.sessionId ?? null,
+    laneId: state?.laneId ?? identity?.laneId ?? rawOptions.laneId ?? null,
+    sessionName: state?.sessionName ?? identity?.sessionName ?? rawOptions.sessionName ?? null,
+    sessionId: state?.sessionId ?? identity?.sessionId ?? rawOptions.sessionId ?? null,
+    identityPath: paths.identityPath,
+    identityNonce: state?.identityNonce ?? identity?.identityNonce ?? null,
+    bootNonce: state?.bootNonce ?? identity?.bootNonce ?? null,
+    ownerRepoId: state?.ownerRepoId ?? identity?.ownerRepoId ?? null,
     lastRequestId: state?.lastRequestId ?? null,
     currentRequestId: state?.currentRequestId ?? null,
     currentRequestStartedAt: state?.currentRequestStartedAt ?? null,
@@ -742,7 +817,7 @@ export function getResidentLaneStatus(rawOptions) {
     pollIntervalMs: state?.pollIntervalMs ?? null,
     idleTimeoutMs: state?.idleTimeoutMs ?? null,
     logPath: state?.logPath ?? paths.logPath,
-    keyPath: keyPath || state?.keyPath || null,
+    keyPath: effectiveKeyPath || null,
     keyPresent,
     requestFifoPresent,
     responseFifoPresent,
@@ -751,6 +826,89 @@ export function getResidentLaneStatus(rawOptions) {
     failureReason: state?.failureReason ?? derived.failureReason ?? null,
     failureStage: state?.failureStage ?? derived.failureStage ?? null,
     recommendedAction: derived.recommendedAction,
+  };
+}
+
+export function listResidentLanes(rawOptions = {}) {
+  const guardrailRepo = rawOptions.guardrailRepo
+    ? resolve(process.cwd(), rawOptions.guardrailRepo)
+    : process.cwd();
+  const registryDir = rawOptions.lanesDir
+    ? resolve(guardrailRepo, rawOptions.lanesDir)
+    : join(guardrailRepo, '.guardrail', 'lanes');
+
+  const entries = [];
+  if (existsSync(registryDir)) {
+    for (const entry of readdirSync(registryDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const laneDir = join(registryDir, entry.name);
+      const status = getResidentLaneStatus({ guardrailRepo, laneDir });
+      entries.push(status);
+    }
+  }
+
+  entries.sort((a, b) => {
+    const byCreated = String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+    if (byCreated !== 0) return byCreated;
+    return String(a.laneId || a.sessionName || a.laneDir).localeCompare(String(b.laneId || b.sessionName || b.laneDir));
+  });
+
+  const counts = entries.reduce((acc, entry) => {
+    acc.total += 1;
+    acc[entry.status] = (acc[entry.status] || 0) + 1;
+    return acc;
+  }, { total: 0 });
+
+  return {
+    registryDir,
+    counts,
+    lanes: entries,
+  };
+}
+
+function removeLaneDirectory(laneDir) {
+  try {
+    rmSync(laneDir, { recursive: true, force: true });
+  } catch {
+    // Best effort.
+  }
+}
+
+export function pruneResidentLanes(rawOptions = {}) {
+  const includeFailed = rawOptions.includeFailed === true || rawOptions.includeFailed === 'true';
+  const listing = listResidentLanes(rawOptions);
+  const prunableStates = new Set(includeFailed ? ['stale', 'expired', 'stopped', 'failed'] : ['stale', 'expired', 'stopped']);
+  const pruned = [];
+  const skipped = [];
+
+  for (const lane of listing.lanes) {
+    if (lane.alive || !prunableStates.has(lane.status)) {
+      skipped.push({
+        laneDir: lane.laneDir,
+        laneId: lane.laneId,
+        status: lane.status,
+        reason: lane.alive ? 'lane_alive' : 'not_prunable',
+      });
+      continue;
+    }
+
+    if (lane.keyPath) {
+      removeIfExists(lane.keyPath);
+    }
+    removeLaneDirectory(lane.laneDir);
+    pruned.push({
+      laneDir: lane.laneDir,
+      laneId: lane.laneId,
+      status: lane.status,
+      keyPath: lane.keyPath || null,
+    });
+  }
+
+  return {
+    registryDir: listing.registryDir,
+    includeFailed,
+    pruned,
+    skipped,
   };
 }
 
@@ -1021,11 +1179,41 @@ export async function launchResidentLane(rawOptions, deps = {}) {
   const options = normalizeResidentLaneOptions(rawOptions);
   ensureLaneLayout(options.laneDir);
   const paths = lanePaths(options.laneDir);
+  const existingIdentity = readJson(paths.identityPath, null);
+  validateLaneIdentity(existingIdentity, options);
+
+  const seededOptions = {
+    ...options,
+    identityNonce: existingIdentity?.identityNonce || randomBytes(12).toString('hex'),
+    bootNonce: randomBytes(12).toString('hex'),
+  };
+  const identity = buildLaneIdentity(seededOptions, existingIdentity);
+  const optionsWithIdentity = {
+    ...seededOptions,
+    identityNonce: identity.identityNonce,
+    bootNonce: seededOptions.bootNonce,
+  };
 
   const existing = readJson(paths.statePath, null);
+  const duplicates = optionsWithIdentity.laneId
+    ? listResidentLanes({ guardrailRepo: optionsWithIdentity.guardrailRepo }).lanes.filter((lane) => (
+      lane.laneId === optionsWithIdentity.laneId
+      && lane.laneDir !== optionsWithIdentity.laneDir
+      && lane.alive
+    ))
+    : [];
+  if (duplicates.length > 0) {
+    throw createLaneBootError(`Duplicate live resident lane detected for lane id "${optionsWithIdentity.laneId}".`, {
+      failureStage: 'bootstrap',
+      conflictingLaneDir: duplicates[0].laneDir,
+      conflictingPid: duplicates[0].pid,
+    });
+  }
+  writeJson(paths.identityPath, identity);
+
   if (existing?.status && existing.status !== 'expired' && isPidAlive(existing.pid)) {
     return {
-      laneDir: options.laneDir,
+      laneDir: optionsWithIdentity.laneDir,
       requestFifo: existing.requestFifo ?? paths.requestFifo,
       responseFifo: existing.responseFifo ?? paths.responseFifo,
       pid: existing.pid,
@@ -1035,47 +1223,52 @@ export async function launchResidentLane(rawOptions, deps = {}) {
       statePath: paths.statePath,
       reused: true,
       authMode: existing.authMode ?? 'none',
-      keyPath: existing.keyPath ?? options.keyPath ?? null,
+      keyPath: existing.keyPath ?? optionsWithIdentity.keyPath ?? null,
+      identityPath: paths.identityPath,
+      identityNonce: existing.identityNonce ?? identity.identityNonce ?? null,
+      bootNonce: existing.bootNonce ?? identity.bootNonce ?? null,
     };
   }
 
   const selfPath = fileURLToPath(import.meta.url);
-  const helperAuthFd = options.authFd ? 3 : null;
+  const helperAuthFd = optionsWithIdentity.authFd ? 3 : null;
   const helperArgs = [
     selfPath,
     '--launch-daemon-helper',
-    '--lane-dir', options.laneDir,
-    '--guardrail-repo', options.guardrailRepo,
-    '--working-dir', options.workingDir,
-    '--lane-id', options.laneId || '',
-    '--key-path', options.keyPath || '',
-    '--session-name', options.sessionName,
-    '--session-id', options.sessionId || '',
-    '--no-session-persistence', String(options.noSessionPersistence),
-    '--poll-interval-ms', String(options.pollIntervalMs),
-    '--idle-timeout-ms', String(options.idleTimeoutMs),
-    '--model', options.model,
-    '--effort', options.effort,
-    '--permission-mode', options.permissionMode,
-    '--output-format', options.outputFormat,
-    '--max-budget-usd', options.maxBudgetUsd,
-    '--allowed-tools', options.allowedTools,
-    '--system-prompt', options.systemPrompt,
-    '--add-dirs', options.addDirs.join(','),
-    '--input-files', options.inputFiles.join(','),
+    '--lane-dir', optionsWithIdentity.laneDir,
+    '--guardrail-repo', optionsWithIdentity.guardrailRepo,
+    '--working-dir', optionsWithIdentity.workingDir,
+    '--lane-id', optionsWithIdentity.laneId || '',
+    '--key-path', optionsWithIdentity.keyPath || '',
+    '--session-name', optionsWithIdentity.sessionName,
+    '--session-id', optionsWithIdentity.sessionId || '',
+    '--no-session-persistence', String(optionsWithIdentity.noSessionPersistence),
+    '--poll-interval-ms', String(optionsWithIdentity.pollIntervalMs),
+    '--idle-timeout-ms', String(optionsWithIdentity.idleTimeoutMs),
+    '--model', optionsWithIdentity.model,
+    '--effort', optionsWithIdentity.effort,
+    '--permission-mode', optionsWithIdentity.permissionMode,
+    '--output-format', optionsWithIdentity.outputFormat,
+    '--max-budget-usd', optionsWithIdentity.maxBudgetUsd,
+    '--allowed-tools', optionsWithIdentity.allowedTools,
+    '--system-prompt', optionsWithIdentity.systemPrompt,
+    '--add-dirs', optionsWithIdentity.addDirs.join(','),
+    '--input-files', optionsWithIdentity.inputFiles.join(','),
+    '--identity-nonce', optionsWithIdentity.identityNonce,
+    '--boot-nonce', optionsWithIdentity.bootNonce,
   ];
   if (helperAuthFd !== null) {
     helperArgs.push('--auth-fd', String(helperAuthFd));
   }
 
   const helperStdio = ['ignore', 'pipe', 'pipe'];
-  if (options.authFd) {
-    helperStdio.push(options.authFd);
+  if (optionsWithIdentity.authFd) {
+    helperStdio.push(optionsWithIdentity.authFd);
   }
 
   const spawnProcess = deps.spawnProcess || spawn;
   const child = spawnProcess(process.execPath, helperArgs, {
-    cwd: options.guardrailRepo,
+    cwd: optionsWithIdentity.guardrailRepo,
     detached: false,
     stdio: helperStdio,
     env: process.env,
@@ -1120,26 +1313,30 @@ export async function launchResidentLane(rawOptions, deps = {}) {
   }
 
   const launchSummary = {
-    laneDir: options.laneDir,
+    laneDir: optionsWithIdentity.laneDir,
     requestFifo: paths.requestFifo,
     responseFifo: paths.responseFifo,
     pid: daemonPid,
-    sessionName: options.sessionName,
-    sessionId: options.sessionId || null,
-    workingDir: options.workingDir,
+    sessionName: optionsWithIdentity.sessionName,
+    sessionId: optionsWithIdentity.sessionId || null,
+    workingDir: optionsWithIdentity.workingDir,
     statePath: paths.statePath,
-    authMode: options.authFd ? 'hmac_fd' : 'none',
-    laneId: options.laneId || null,
-    keyPath: options.keyPath || null,
+    authMode: optionsWithIdentity.authFd ? 'hmac_fd' : 'none',
+    laneId: optionsWithIdentity.laneId || null,
+    keyPath: optionsWithIdentity.keyPath || null,
     logPath: paths.logPath,
+    identityPath: paths.identityPath,
+    identityNonce: optionsWithIdentity.identityNonce,
+    bootNonce: optionsWithIdentity.bootNonce,
   };
   writeJson(paths.launchPath, launchSummary);
+  writeLaneIdentity(optionsWithIdentity, identity);
 
   try {
     const waitForBootstrap = deps.waitForBootstrap || waitForResidentLaneBootstrap;
-    await waitForBootstrap(options, { pid: daemonPid }, deps.waitForBootstrapDeps || {});
+    await waitForBootstrap(optionsWithIdentity, { pid: daemonPid }, deps.waitForBootstrapDeps || {});
   } catch (err) {
-    persistLaneFailureState(options, err, err?.details?.failureStage || 'bootstrap');
+    persistLaneFailureState(optionsWithIdentity, err, err?.details?.failureStage || 'bootstrap');
     throw err;
   }
   return launchSummary;
@@ -1175,6 +1372,8 @@ function launchResidentLaneDaemonHelper(rawOptions) {
     '--system-prompt', options.systemPrompt,
     '--add-dirs', options.addDirs.join(','),
     '--input-files', options.inputFiles.join(','),
+    '--identity-nonce', options.identityNonce || '',
+    '--boot-nonce', options.bootNonce || '',
   ];
   if (daemonAuthFd !== null) {
     daemonArgs.push('--auth-fd', String(daemonAuthFd));

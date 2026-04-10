@@ -144,6 +144,8 @@ Commands:
   lane result [flags]                   Read the latest or named resident lane result
   lane status [flags]                   Show resident lane status and recovery hints
   lane stop [flags]                     Stop a resident interactive lane
+  lane list [flags]                     List resident lanes in this Guardrail repo
+  lane prune [flags]                    Remove dead resident-lane artifacts
   repo status [--path <repo>]          Show tracked and untracked repo changes
   workflow run [flags]                  Run a workflow definition under Guardrail
   workflow lint --definition <path>     Lint a workflow definition for issues
@@ -209,6 +211,8 @@ Examples:
   guardrail lane result --id claude-live
   guardrail lane result --id claude-live --request-id req-123
   guardrail lane stop --id claude-live
+  guardrail lane list --json
+  guardrail lane prune --json
   guardrail repo status --path .
   guardrail template lint --template ./templates/npm-publish.json
   guardrail template create --from-manifest .guardrail/approved.json --name npm-publish
@@ -648,7 +652,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'result', 'status', 'stop'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'result', 'status', 'stop', 'list', 'prune'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -678,6 +682,8 @@ export function parseArgs(argv) {
       '--request-id': 'requestId',
       '--prompt': 'prompt',
       '--timeout-ms': 'timeoutMs',
+      '--lanes-dir': 'lanesDir',
+      '--include-failed': 'includeFailed',
     });
     return error || result;
   }
@@ -1343,6 +1349,62 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     } else {
       console.log(`Lane stopped: ${laneOpts.laneId || laneOpts.laneDir}`);
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-list') {
+    const { listResidentLanes } = await import('./claude-resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    const listing = listResidentLanes(laneOpts);
+    if (parsed.json) {
+      console.log(JSON.stringify(listing, null, 2));
+    } else {
+      console.log(`Lane registry: ${listing.registryDir}`);
+      console.log(`  Total:   ${listing.counts.total || 0}`);
+      for (const [status, count] of Object.entries(listing.counts)) {
+        if (status === 'total') continue;
+        console.log(`  ${status}:`.padEnd(11) + ` ${count}`);
+      }
+      if (listing.lanes.length > 0) {
+        console.log('');
+        for (const lane of listing.lanes) {
+          const name = lane.laneId || lane.sessionName || lane.laneDir;
+          console.log(`${name}: ${lane.status}${lane.alive ? ' (alive)' : ''}`);
+          console.log(`  Lane dir:      ${lane.laneDir}`);
+          console.log(`  Session:       ${lane.sessionName ?? 'n/a'}`);
+          console.log(`  Request:       ${lane.currentRequestId ?? lane.lastRequestId ?? 'n/a'}`);
+          console.log(`  Last result:   ${lane.lastResultPath ?? 'n/a'}`);
+          console.log(`  Action:        ${lane.recommendedAction}`);
+        }
+      }
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-prune') {
+    const { pruneResidentLanes } = await import('./claude-resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    const result = pruneResidentLanes(laneOpts);
+    for (const lane of result.pruned) {
+      await appendLaneAuditEntry({
+        ...laneOpts,
+        laneId: lane.laneId || null,
+        laneDir: lane.laneDir,
+      }, 'lane_prune', {
+        status: 'success',
+        pruned_status: lane.status,
+      });
+    }
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`Lane registry: ${result.registryDir}`);
+      console.log(`  Pruned: ${result.pruned.length}`);
+      console.log(`  Skipped: ${result.skipped.length}`);
+      for (const lane of result.pruned) {
+        console.log(`  - ${lane.laneId || lane.laneDir} (${lane.status})`);
+      }
     }
     process.exit(0);
   }
