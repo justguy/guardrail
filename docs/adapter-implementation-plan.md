@@ -508,9 +508,16 @@ Phase 1 public install uses full SHA-pinned GitHub URLs:
 
 ```bash
 guardrail adapter profile install github://guardrail-dev/adapter-profiles/openclaw.json@<sha>
+guardrail adapter profile index verify ./adapter-profiles.index.json --index-key ./adapter-profiles.index.pub.pem
 ```
 
 Bare-name install is deferred until a signed index exists, exactly like recipe distribution.
+
+Current A1 groundwork:
+
+- Guardrail can now validate a signed adapter-profile index file locally with `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`
+- index entries are constrained to SHA-pinned `github://...@<40-char-sha>` sources plus declared `protocol`, `version`, and `content_hash`
+- this is local/team verification groundwork only; public bare-name install remains intentionally blocked until trusted-index verification exists
 
 ### Trust Model
 
@@ -756,6 +763,7 @@ guardrail adapter run --tool openclaw -- npm test
 guardrail adapter run --profile ./my-tool.json -- npm test
 guardrail adapter run --profile ./my-tool.json --env-allow ANTHROPIC_API_KEY -- npm test
 guardrail adapter probe --tool cline
+guardrail adapter profile index verify ./adapter-profiles.index.json --index-key ./adapter-profiles.index.pub.pem
 guardrail adapter shim --tool aider --commands npm,git,python
 guardrail adapter shim --list
 guardrail adapter shim --remove npm

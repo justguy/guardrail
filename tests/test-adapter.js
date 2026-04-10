@@ -623,6 +623,12 @@ describe('parseAdapterArgs', async () => {
     assert.equal(r.subcommand, 'adapter-profile-list');
   });
 
+  it('parses adapter profile index verify ./index.json', () => {
+    const r = parseAdapterArgs(['profile', 'index', 'verify', './index.json']);
+    assert.equal(r.subcommand, 'adapter-profile-index-verify');
+    assert.equal(r.indexPath, './index.json');
+  });
+
   it('parses adapter profile show openclaw', () => {
     const r = parseAdapterArgs(['profile', 'show', 'openclaw']);
     assert.equal(r.subcommand, 'adapter-profile-show');

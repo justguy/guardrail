@@ -9,6 +9,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign as signBytes } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, realpathSync, mkdirSync, openSync, closeSync, writeSync, readSync, constants as fsConstants } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
@@ -20,6 +21,7 @@ import { signRecipe } from '../src/recipe-channel.js';
 import { saveManifest } from '../src/manifest.js';
 import { runAdapter } from '../src/adapter-engine.js';
 import { queryAuditLog } from '../src/audit.js';
+import { serializeStable } from '../src/contract.js';
 
 const CLI = `node ${join(process.cwd(), 'src', 'cli.js')}`;
 
@@ -841,6 +843,42 @@ describe('README Feature: Adapter System', () => {
     assert.match(result.adapterResult.guardrail.reason, /missing_auth_prerequisite/);
     assert.match(result.adapterResult.guardrail.reason, /Not logged in|Claude CLI is not logged in/);
     assert.equal(result.exitCode, 16);
+  });
+
+  it('guardrail adapter profile index verify validates a signed index file', () => {
+    const dir = tmpDir();
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+    const unsigned = {
+      version: 1,
+      generated_at: '2026-04-10T00:00:00.000Z',
+      profiles: {
+        openclaw: {
+          owner: 'guardrail-dev',
+          repo: 'adapter-profiles',
+          path: 'openclaw.json',
+          sha: 'a'.repeat(40),
+          version: '1.0.0',
+          content_hash: 'b'.repeat(64),
+        },
+      },
+    };
+    const indexPath = join(dir, 'adapter-profiles.index.json');
+    const indexKeyPath = join(dir, 'adapter-profiles.index.pub.pem');
+    const signature = signBytes(null, Buffer.from(serializeStable(unsigned), 'utf8'), privateKey).toString('base64');
+    writeFileSync(indexPath, JSON.stringify({
+      ...unsigned,
+      signature: {
+        algorithm: 'ed25519',
+        key_id: 'test-key',
+        sig: `base64:${signature}`,
+      },
+    }, null, 2));
+    writeFileSync(indexKeyPath, publicKey.export({ type: 'spki', format: 'pem' }));
+
+    const r = run(`${CLI} adapter profile index verify ${indexPath} --index-key ${indexKeyPath}`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.ok(r.stdout.includes('Adapter profile index verified'));
+    assert.ok(r.stdout.includes('openclaw'));
   });
 });
 

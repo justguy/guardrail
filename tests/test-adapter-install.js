@@ -1,5 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign as signBytes } from 'node:crypto';
 import {
   mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, mkdirSync,
 } from 'node:fs';
@@ -11,6 +12,12 @@ import {
   installFromPath, installFromUrl, installFromGitHub, installAdapterProfile,
 } from '../src/adapter-profile-install.js';
 import { hashProfile } from '../src/adapter-profile.js';
+import {
+  verifyAdapterProfileIndex,
+  resolveAdapterProfileFromSignedIndex,
+  loadAdapterProfileIndex,
+} from '../src/adapter-profile-index.js';
+import { serializeStable } from '../src/contract.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BUNDLED_DIR = resolve(__dirname, '..', 'src', 'adapter-profiles');
@@ -53,6 +60,27 @@ function makeConfig(dir, trustedSources) {
   const path = join(dir, 'config.json');
   writeFileSync(path, JSON.stringify({ trusted_sources: trustedSources }));
   return path;
+}
+
+function makeSignedAdapterIndex(profiles, keyPair = generateKeyPairSync('ed25519')) {
+  const unsigned = {
+    version: 1,
+    generated_at: '2026-04-10T00:00:00.000Z',
+    profiles,
+  };
+  const payload = Buffer.from(serializeStable(unsigned), 'utf8');
+  const signature = signBytes(null, payload, keyPair.privateKey).toString('base64');
+  return {
+    index: {
+      ...unsigned,
+      signature: {
+        algorithm: 'ed25519',
+        key_id: 'test-key',
+        sig: `base64:${signature}`,
+      },
+    },
+    publicKeyPem: keyPair.publicKey.export({ type: 'spki', format: 'pem' }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +279,111 @@ describe('adapter installFromUrl — trust enforcement', () => {
         fetchJson: async () => makeProfile({ schema_target: 'other/v9' }),
       }),
       /Adapter profile validation failed:/
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2b. Signed index groundwork
+// ---------------------------------------------------------------------------
+
+describe('adapter profile signed index groundwork', () => {
+  let work;
+  beforeEach(() => { work = tmpDir(); });
+  afterEach(() => { rmSync(work, { recursive: true, force: true }); });
+
+  it('verifies a signed adapter profile index and resolves an entry by tool', () => {
+    const { index, publicKeyPem } = makeSignedAdapterIndex({
+      openclaw: {
+        owner: 'guardrail-dev',
+        repo: 'adapter-profiles',
+        path: 'openclaw.json',
+        sha: 'a'.repeat(40),
+        version: '1.0.0',
+        content_hash: 'b'.repeat(64),
+      },
+      cline: {
+        owner: 'guardrail-dev',
+        repo: 'adapter-profiles',
+        path: 'cline.json',
+        sha: 'c'.repeat(40),
+        version: '1.0.0',
+        content_hash: 'd'.repeat(64),
+      },
+    });
+
+    const verify = verifyAdapterProfileIndex(index, publicKeyPem);
+    assert.equal(verify.valid, true, verify.errors.join('; '));
+
+    const indexPath = join(work, 'adapter-index.json');
+    const keyPath = join(work, 'adapter-index.pub.pem');
+    writeFileSync(indexPath, JSON.stringify(index, null, 2));
+    writeFileSync(keyPath, publicKeyPem);
+
+    const resolved = resolveAdapterProfileFromSignedIndex('cline', {
+      indexPath,
+      indexKeyPath: keyPath,
+    });
+    assert.equal(resolved.entry.path, 'cline.json');
+    assert.equal(resolved.source, `github://guardrail-dev/adapter-profiles/cline.json@${'c'.repeat(40)}`);
+  });
+
+  it('fails closed when the signature is missing or invalid', () => {
+    const { index, publicKeyPem } = makeSignedAdapterIndex({
+      openclaw: {
+        owner: 'guardrail-dev',
+        repo: 'adapter-profiles',
+        path: 'openclaw.json',
+        sha: 'a'.repeat(40),
+        version: '1.0.0',
+        content_hash: 'b'.repeat(64),
+      },
+    });
+    const missing = verifyAdapterProfileIndex({
+      version: index.version,
+      generated_at: index.generated_at,
+      profiles: index.profiles,
+    }, publicKeyPem);
+    assert.equal(missing.valid, false);
+    assert.ok(missing.reason.includes('validation failed') || missing.reason.includes('signature'));
+
+    const tampered = {
+      ...index,
+      signature: {
+        ...index.signature,
+        sig: `base64:${'A'.repeat(88)}`,
+      },
+    };
+    const invalid = verifyAdapterProfileIndex(tampered, publicKeyPem);
+    assert.equal(invalid.valid, false);
+    assert.ok(invalid.reason.includes('verification failed'));
+  });
+
+  it('loadAdapterProfileIndex rejects invalid entry sources', () => {
+    const path = join(work, 'adapter-index.json');
+    writeFileSync(path, JSON.stringify({
+      version: 1,
+      generated_at: '2026-04-10T00:00:00.000Z',
+      profiles: {
+        openclaw: {
+          owner: 'guardrail-dev',
+          repo: 'adapter-profiles',
+          path: '',
+          sha: 'a'.repeat(40),
+          version: '1.0.0',
+          content_hash: 'b'.repeat(64),
+        },
+      },
+      signature: {
+        algorithm: 'ed25519',
+        key_id: 'test-key',
+        sig: `base64:${'A'.repeat(88)}`,
+      },
+    }, null, 2));
+
+    assert.throws(
+      () => loadAdapterProfileIndex(path),
+      /validation failed/i,
     );
   });
 });

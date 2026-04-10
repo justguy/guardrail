@@ -672,6 +672,7 @@ guardrail adapter run --tool openclaw -- npm test
 guardrail adapter run --profile ./my-tool.json --env-allow ANTHROPIC_API_KEY -- npm test
 guardrail adapter probe --tool cline
 guardrail adapter run --tool cline -- echo "blocked in v0.2"
+guardrail adapter profile index verify ./adapter-profiles.index.json --index-key ./adapter-profiles.index.pub.pem
 guardrail adapter profile install github://guardrail-dev/adapter-profiles/openclaw.json@<sha>
 ```
 
@@ -688,6 +689,7 @@ Adapter caveats:
 - `requires_auth` is preflight-only and does not perform interactive login. If a tool reports `missing_auth_prerequisite`, authenticate the runtime first (for example `claude auth login` or `gh auth login`) and retry.
 - Adapter `run` also enforces approval reuse: first approval is interactive and binds an adapter manifest; without one, `adapter run` returns a blocked result with `No approved manifest found`.
 - `adapter probe` is discovery only. It does not run user commands through MCP profiles, and it does not make `adapter run` live for MCP tools. Use it to confirm that the declared stdio transport can initialize and expose tools under Guardrail.
+- Signed adapter-profile index groundwork is now shipped via `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`. It validates the index schema and signature so teams can test index publishing locally, but bare-name install is still intentionally blocked until Guardrail has real trusted-index verification for public distribution.
 - MCP profiles are blocked at CLI level in v0.2 with a hard error. If you need IDE-style protocol execution now, use the env-shim path instead.
 - `--env-allow` is bounded and explicit. It only controls what environment keys are handed to the adapter process for that run.
 - `claude-exec` and `codex-exec` are approval-bounded wrappers, not outer sandboxes. If you run them outside your host sandbox/container boundary, the underlying AI CLI runs with host privileges subject to its own permission model. Guardrail now calls this out as a yellow-to-red risk reason in approval UX.

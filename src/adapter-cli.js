@@ -69,6 +69,7 @@ function parseRunArgs(argv, startIndex, result) {
  *   adapter probe --tool <name> [--profile <path>] [--env-allow <VAR>] [--timeout-ms <ms>]
  *   adapter shim --tool <name> --commands <cmd1,cmd2> [--list] [--remove <cmd>] [--install-path [--write]]
  *   adapter profile install <path|url|github://>
+ *   adapter profile index verify <path> [--index-key <pubkey.pem>]
  *   adapter profile list
  *   adapter profile show <tool>
  */
@@ -147,6 +148,17 @@ export function parseAdapterArgs(argv) {
       return { subcommand: 'adapter-profile-list' };
     }
 
+    if (profileAction === 'index') {
+      if (argv[2] !== 'verify' || argv.length < 4) return { error: 'usage' };
+      return parseFlags(argv, 4, {
+        subcommand: 'adapter-profile-index-verify',
+        indexPath: argv[3],
+        indexKeyPath: null,
+      }, {
+        '--index-key': valueFlag('indexKeyPath'),
+      });
+    }
+
     if (profileAction === 'show' && argv.length >= 3) {
       return { subcommand: 'adapter-profile-show', tool: argv[2] };
     }
@@ -187,6 +199,22 @@ function formatProbeResult(result, jsonOutput) {
   return lines.join('\n');
 }
 
+function formatAdapterProfileIndexVerify(result, jsonOutput) {
+  if (jsonOutput) {
+    return JSON.stringify(result, null, 2);
+  }
+
+  if (!result.valid) {
+    return `Adapter profile index verification failed: ${(result.errors || []).join('; ') || result.reason || 'unknown error'}`;
+  }
+
+  return [
+    `Adapter profile index verified: ${result.path}`,
+    `  Entries: ${result.entryCount}`,
+    `  Tools:   ${result.tools.join(', ')}`,
+  ].join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Adapter CLI dispatcher
 // ---------------------------------------------------------------------------
@@ -204,6 +232,7 @@ export async function runAdapterCli(adapterArgv, options = {}) {
     console.error('  adapter shim --remove <command>');
     console.error('  adapter shim --install-path [--write]');
     console.error('  adapter profile install <path|url|github://>');
+    console.error('  adapter profile index verify <path> --index-key <pubkey.pem>');
     console.error('  adapter profile list');
     console.error('  adapter profile show <tool>');
     process.exit(1);
@@ -365,6 +394,46 @@ export async function runAdapterCli(adapterArgv, options = {}) {
       console.log(`  Path: ${result.path}`);
       console.log(`  Hash: ${result.hash}`);
       process.exit(0);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (parsed.subcommand === 'adapter-profile-index-verify') {
+    const { loadAdapterProfileIndex, verifyAdapterProfileIndex } = await import('./adapter-profile-index.js');
+    const { existsSync, readFileSync } = await import('node:fs');
+    try {
+      if (!parsed.indexKeyPath) {
+        console.error('Error: --index-key <pubkey.pem> is required for adapter profile index verification.');
+        process.exit(1);
+        return;
+      }
+      if (!existsSync(parsed.indexKeyPath)) {
+        console.error(`Adapter profile index public key not found: ${parsed.indexKeyPath}`);
+        process.exit(1);
+        return;
+      }
+      const index = loadAdapterProfileIndex(parsed.indexPath);
+      const publicKeyPem = readFileSync(parsed.indexKeyPath, 'utf8');
+      const verify = verifyAdapterProfileIndex(index, publicKeyPem);
+      const payload = {
+        valid: verify.valid,
+        path: parsed.indexPath,
+        entryCount: Object.keys(index.profiles || {}).length,
+        tools: Object.keys(index.profiles || {}),
+        errors: verify.errors || [],
+        ...(verify.reason ? { reason: verify.reason } : {}),
+      };
+      const output = formatAdapterProfileIndexVerify(payload, !!options.jsonOutput);
+      if (payload.valid) {
+        console.log(output);
+        process.exit(0);
+      } else {
+        console.error(output);
+        process.exit(1);
+      }
     } catch (err) {
       console.error(err.message);
       process.exit(1);

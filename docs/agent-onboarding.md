@@ -421,6 +421,7 @@ Useful adapter subcommands:
 - `guardrail adapter run --tool <name> -- <command> [args...]`
 - `guardrail adapter run --profile <profile-path> -- <command> [args...]`
 - `guardrail adapter probe --tool <name>`
+- `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`
 - `guardrail adapter profile install github://owner/repo/path.json@<sha>`
 - `guardrail adapter profile list`
 - `guardrail adapter profile show <tool>`
@@ -434,6 +435,7 @@ Bounded auth preflight behavior:
 - Explicit env mapping may still be insufficient for CLIs whose login state lives in OS-managed secure stores or other process-identity-gated locations. In those cases the practical fix is to run Guardrail from the same working launcher/runtime, or to redo login from the exact shell/runtime that will later launch Guardrail.
 - This adapter auth-preflight section explains the shipped `requires_env` / `requires_auth` behavior. Standalone recipe mode does not yet run the same preflight automatically, so recipe-mode agents must rely on the selected recipe's auth/runtime notes plus direct tool checks in the Guardrail runtime.
 - MCP protocol profiles are intentionally blocked for `adapter run` in v0.2. Use `adapter probe` only for bounded discovery, or use a supported non-MCP profile shape for actual execution.
+- Bare-name adapter-profile install is still intentionally blocked. The only shipped A1 groundwork is signed-index verification through `adapter profile index verify <path> --index-key <pubkey.pem>`, which is for local/team validation of index publishing rather than public-name discovery.
 
 Host runtime decision rule:
 

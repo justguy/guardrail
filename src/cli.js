@@ -118,6 +118,7 @@ Commands:
   adapter probe --tool <name>           Probe an MCP stdio profile for discovery only
   adapter shim --tool <n> --commands <c>  Create PATH shims for adapter interception
   adapter profile install <source>      Install an adapter profile
+  adapter profile index verify <path> --index-key <pubkey.pem>  Verify a signed adapter profile index file
   adapter profile list                  List adapter profiles
   adapter profile show <tool>           Show adapter profile details
   create --name <n> --category <c>      Generate a recipe skeleton
