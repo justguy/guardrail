@@ -196,7 +196,7 @@
       "run": {
         "command": "node",
         "args": [
-          "{{inputs.guardrail_repo}}/src/cmux-claude-recipe-wrapper.js",
+          "{{bundled_wrapper.cmux_claude}}",
           "--socket-path", "{{inputs.socket_path}}",
           "--workspace-name", "{{inputs.workspace_name}}",
           "--launch-cwd", "{{inputs.launch_cwd}}",

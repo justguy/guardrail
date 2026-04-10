@@ -5,6 +5,7 @@ import { validateResult } from './validator.js';
 import { createAuditLog } from './audit.js';
 import { enforceChannel } from './recipe-channel.js';
 import { generateRunId } from './logger.js';
+import { resolveBundledWrapperPath } from './bundled-wrapper-path.js';
 
 // ---------------------------------------------------------------------------
 // Dangerous command patterns (blocked at runtime)
@@ -391,14 +392,30 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
 
 function interpolateRecipeArgs(argsTemplate, values) {
   if (!Array.isArray(argsTemplate)) return [];
+  const cache = new Map();
+
+  function resolveBundledToken(name) {
+    if (cache.has(name)) return cache.get(name);
+    const resolved = resolveBundledWrapperPath(name, values);
+    cache.set(name, resolved.wrapperPath);
+    return resolved.wrapperPath;
+  }
+
   return argsTemplate.flatMap((arg) => {
-    const exact = /^\{\{inputs\.([a-zA-Z_][a-zA-Z0-9_]*)\}\}$/.exec(arg);
-    if (exact) {
-      const value = values[exact[1]];
+    const exactInput = /^\{\{inputs\.([a-zA-Z_][a-zA-Z0-9_]*)\}\}$/.exec(arg);
+    const exactBundled = /^\{\{bundled_wrapper\.([a-zA-Z_][a-zA-Z0-9_-]*)\}\}$/.exec(arg);
+
+    if (exactBundled) {
+      return [resolveBundledToken(exactBundled[1])];
+    }
+
+    if (exactInput) {
+      const value = values[exactInput[1]];
       if (Array.isArray(value)) {
         return value.map((entry) => String(entry));
       }
     }
+
     return [
       arg.replace(/\{\{inputs\.([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g, (_, key) => {
         const v = values[key];

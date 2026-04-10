@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { inferApprovalMode } from './input-validator.js';
+import { extractBundledWrapperRefs, resolveBundledWrapperProvenance } from './bundled-wrapper-path.js';
 
 function toArray(value) {
   if (value === undefined || value === null || value === '') return [];
@@ -21,6 +22,28 @@ function hashFileAtPath(path) {
   const contents = readFileSync(realPath);
   const sha256 = createHash('sha256').update(contents).digest('hex');
   return { realPath, sha256 };
+}
+
+function collectBundledWrapperBindingHashes(recipe, resolvedInputs = {}, options = {}) {
+  const candidateTemplateValues = [];
+  const stepDefs = Array.isArray(recipe.steps) ? recipe.steps : [];
+  for (const step of stepDefs) {
+    const command = step?.run?.command;
+    const args = step?.run?.args;
+    if (typeof command === 'string') candidateTemplateValues.push(command);
+    if (Array.isArray(args)) candidateTemplateValues.push(...args);
+  }
+
+  const refs = extractBundledWrapperRefs(candidateTemplateValues);
+  if (refs.length === 0) return {};
+
+  const bindings = {};
+  for (const ref of refs) {
+    const record = resolveBundledWrapperProvenance(ref, resolvedInputs);
+    bindings[`_bundled_wrapper.${ref}`] = record;
+  }
+
+  return bindings;
 }
 
 export function buildPromptPayload({
@@ -78,6 +101,9 @@ export function collectRecipeInputContentHashes(recipe, resolvedInputs, options 
     }
   }
 
+  const bundledBindings = collectBundledWrapperBindingHashes(recipe, resolvedInputs, options);
+  Object.assign(bindings, bundledBindings);
+
   return bindings;
 }
 
@@ -87,15 +113,21 @@ export function verifyRecipeInputContentHashes(inputContentHashes = {}) {
   for (const [key, binding] of Object.entries(inputContentHashes)) {
     const entries = Array.isArray(binding) ? binding : [binding];
     for (const entry of entries) {
+      const pathLike = entry.realPath || entry.path;
+      if (!pathLike || typeof pathLike !== 'string') {
+        errors.push(`Input "${key}" missing path metadata for hash verification.`);
+        continue;
+      }
+
       try {
-        const { sha256 } = hashFileAtPath(entry.realPath);
+        const { sha256 } = hashFileAtPath(pathLike);
         if (sha256 !== entry.sha256) {
           errors.push(
-            `Input "${key}" file content changed: ${entry.path} (${entry.sha256} -> ${sha256})`
+            `Input "${key}" file content changed: ${entry.path || pathLike} (${entry.sha256} -> ${sha256})`
           );
         }
       } catch (err) {
-        errors.push(`Input "${key}" file check failed for ${entry.path}: ${err.message}`);
+        errors.push(`Input "${key}" file check failed for ${entry.path || entry.wrapperPath || pathLike}: ${err.message}`);
       }
     }
   }

@@ -193,7 +193,7 @@
       "run": {
         "command": "node",
         "args": [
-          "{{inputs.guardrail_repo}}/src/codex-exec-wrapper.js",
+          "{{bundled_wrapper.codex}}",
           "--prompt", "{{inputs.prompt}}",
           "--input-files", "{{inputs.input_files}}",
           "--model", "{{inputs.model}}",

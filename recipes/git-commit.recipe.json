@@ -65,7 +65,7 @@
       "run": {
         "command": "node",
         "args": [
-          "{{inputs.guardrail_repo}}/src/git-commit-wrapper.js",
+          "{{bundled_wrapper.git_commit}}",
           "--repo-path", "{{inputs.repo_path}}",
           "--paths", "{{inputs.paths}}",
           "--message-file", "{{inputs.message_file}}"
