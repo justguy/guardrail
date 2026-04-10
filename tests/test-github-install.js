@@ -590,6 +590,10 @@ describe('CLI bare recipe name detection', () => {
       'lane', 'start',
       '--id', 'claude-live',
       '--tool', 'codex',
+      '--scope-type', 'paths',
+      '--scope-mode', 'block',
+      '--scope-path', 'docs',
+      '--scope-path', 'tests',
       '--profile', 'dev',
       '--system-prompt', 'Answer briefly.',
       '--json',
@@ -597,6 +601,9 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.subcommand, 'lane-start');
     assert.equal(result.laneOpts.id, 'claude-live');
     assert.equal(result.laneOpts.tool, 'codex');
+    assert.equal(result.laneOpts.scopeType, 'paths');
+    assert.equal(result.laneOpts.scopeMode, 'block');
+    assert.deepEqual(result.laneOpts.scopePaths, ['docs', 'tests']);
     assert.equal(result.laneOpts.profile, 'dev');
     assert.equal(result.laneOpts.systemPrompt, 'Answer briefly.');
     assert.equal(result.json, true);
@@ -636,6 +643,23 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.subcommand, 'lane-list');
     assert.equal(result.laneOpts.guardrailRepo, '/tmp/repo');
     assert.equal(result.laneOpts.lanesDir, '.guardrail/lanes');
+    assert.equal(result.json, true);
+  });
+
+  it('parses lane scope flags', () => {
+    const result = parseArgs([
+      'lane', 'start',
+      '--id', 'claude-live',
+      '--scope-type', 'paths',
+      '--scope-mode', 'block',
+      '--scope-path', 'src',
+      '--scope-path', 'tests',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-start');
+    assert.equal(result.laneOpts.scopeType, 'paths');
+    assert.equal(result.laneOpts.scopeMode, 'block');
+    assert.deepEqual(result.laneOpts.scopePaths, ['src', 'tests']);
     assert.equal(result.json, true);
   });
 

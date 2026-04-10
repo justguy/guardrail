@@ -11,6 +11,7 @@ import {
   launchResidentLaneDaemonHelper as launchResidentLaneDaemonHelperWithAdapter,
   launchResidentLaneWithAdapter,
   listResidentLanes,
+  normalizeResidentLaneScope,
   parseInteger,
   persistLaneFailureState,
   pruneResidentLanes,
@@ -60,6 +61,9 @@ export function parseResidentLaneArgs(argv) {
     sessionName: '',
     sessionId: '',
     noSessionPersistence: '',
+    scopeType: '',
+    scopeMode: '',
+    scopePaths: '',
     authFd: '',
     pollIntervalMs: '',
     idleTimeoutMs: '',
@@ -187,6 +191,19 @@ export function parseResidentLaneArgs(argv) {
         options.noSessionPersistence = value;
         i += 1;
         break;
+      case '--scope-type':
+        options.scopeType = value;
+        i += 1;
+        break;
+      case '--scope-mode':
+        options.scopeMode = value;
+        i += 1;
+        break;
+      case '--scope-path':
+      case '--scope-paths':
+        options.scopePaths = options.scopePaths ? `${options.scopePaths},${value}` : value;
+        i += 1;
+        break;
       case '--auth-fd':
         options.authFd = value;
         i += 1;
@@ -224,6 +241,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
   const workingDir = rawOptions.workingDir
     ? resolve(guardrailRepo, rawOptions.workingDir)
     : guardrailRepo;
+  const scope = normalizeResidentLaneScope(rawOptions, guardrailRepo, workingDir);
 
   return {
     adapterId: rawOptions.tool || 'claude',
@@ -250,6 +268,9 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     ephemeral: shellTruthy(rawOptions.ephemeral),
     fullAuto: shellTruthy(rawOptions.fullAuto),
     laneId: rawOptions.laneId || '',
+    scopeType: scope.scopeType,
+    scopeMode: scope.scopeMode,
+    scopePaths: scope.scopePaths,
     keyPath: rawOptions.keyPath ? resolve(baseCwd, rawOptions.keyPath) : '',
     identityNonce: rawOptions.identityNonce || '',
     bootNonce: rawOptions.bootNonce || '',
@@ -336,6 +357,9 @@ const CLAUDE_LANE_ADAPTER = {
       '--working-dir', options.workingDir,
       '--tool', options.tool || 'claude',
       '--lane-id', options.laneId || '',
+      '--scope-type', options.scopeType || 'none',
+      '--scope-mode', options.scopeMode || 'warn',
+      '--scope-paths', (options.scopePaths || []).join(','),
       '--key-path', options.keyPath || '',
       '--session-name', options.sessionName,
       '--session-id', options.sessionId || '',
@@ -377,6 +401,9 @@ const CLAUDE_LANE_ADAPTER = {
       '--working-dir', options.workingDir,
       '--tool', options.tool || 'claude',
       '--lane-id', options.laneId || '',
+      '--scope-type', options.scopeType || 'none',
+      '--scope-mode', options.scopeMode || 'warn',
+      '--scope-paths', (options.scopePaths || []).join(','),
       '--key-path', options.keyPath || '',
       '--session-name', options.sessionName,
       '--session-id', options.sessionId || '',

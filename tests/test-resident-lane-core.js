@@ -76,4 +76,70 @@ describe('Resident lane core', () => {
     assert.equal(listing.lanes.length, 1);
     assert.equal(listing.lanes[0].adapterId, 'echo');
   });
+
+  it('surfaces overlapping scope conflicts in lane status and list output', () => {
+    const dir = tmpLaneDir();
+    const lanesDir = join(dir, '.guardrail', 'lanes');
+    const laneADir = join(lanesDir, 'lane-a');
+    const laneBDir = join(lanesDir, 'lane-b');
+    mkdirSync(laneADir, { recursive: true });
+    mkdirSync(laneBDir, { recursive: true });
+    const pathsA = lanePaths(laneADir);
+    const pathsB = lanePaths(laneBDir);
+
+    writeFileSync(pathsA.identityPath, JSON.stringify({
+      adapterId: 'claude',
+      laneId: 'lane-a',
+      laneDir: laneADir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-a',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['src'],
+    }), 'utf8');
+    writeFileSync(pathsB.identityPath, JSON.stringify({
+      adapterId: 'codex',
+      laneId: 'lane-b',
+      laneDir: laneBDir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-b',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: ['src/utils'],
+    }), 'utf8');
+    writeFileSync(pathsA.statePath, JSON.stringify({
+      adapterId: 'claude',
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'lane-a',
+      sessionName: 'lane-a',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['src'],
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+    writeFileSync(pathsB.statePath, JSON.stringify({
+      adapterId: 'codex',
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'lane-b',
+      sessionName: 'lane-b',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: ['src/utils'],
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const status = getResidentLaneStatus({ guardrailRepo: dir, laneDir: laneADir });
+    const listing = listResidentLanes({ guardrailRepo: dir });
+
+    assert.equal(status.scopeType, 'paths');
+    assert.deepEqual(status.scopePaths, ['src']);
+    assert.equal(status.scopeConflicts.length, 1);
+    assert.equal(status.scopeConflicts[0].laneId, 'lane-b');
+    assert.equal(status.scopeConflicts[0].enforcement, 'block');
+    assert.equal(listing.lanes.length, 2);
+    assert.equal(listing.lanes[0].scopeConflicts.length, 1);
+    assert.equal(listing.lanes[1].scopeConflicts.length, 1);
+  });
 });

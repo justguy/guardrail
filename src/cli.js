@@ -43,7 +43,18 @@ function normalizeLaneCliOptions(raw = {}) {
     sessionName: raw.sessionName || laneId || '',
     guardrailRepo: raw.guardrailRepo || '.',
     workingDir: raw.workingDir || '.',
+    scopeType: raw.scopeType || 'none',
+    scopeMode: raw.scopeMode || 'warn',
+    scopePaths: raw.scopePaths || [],
   };
+}
+
+function formatLaneScope(status = {}) {
+  const scopeType = status.scopeType || 'none';
+  if (scopeType === 'none') return 'none';
+  const paths = Array.isArray(status.scopePaths) ? status.scopePaths : [];
+  const details = paths.length > 0 ? ` ${paths.join(', ')}` : '';
+  return `${scopeType}/${status.scopeMode || 'warn'}${details}`;
 }
 
 function ensureLaneKeyFile(keyPath) {
@@ -107,6 +118,7 @@ function buildLaneStartFailureResponse(err) {
     statePath: details.statePath || null,
     logPath: details.logPath || null,
     pid: details.pid ?? null,
+    scopeConflicts: Array.isArray(details.scopeConflicts) ? details.scopeConflicts : [],
   };
 }
 
@@ -286,7 +298,14 @@ export function parseArgs(argv) {
       if (!key) return { error: 'usage' };
       i++;
       if (i >= argv.length) return { error: 'usage' };
-      target[key] = argv[i++];
+      const value = argv[i++];
+      if (!(key in target)) {
+        target[key] = value;
+      } else if (Array.isArray(target[key])) {
+        target[key].push(value);
+      } else {
+        target[key] = [target[key], value];
+      }
     }
     return null;
   };
@@ -688,6 +707,10 @@ export function parseArgs(argv) {
       '--full-auto': 'fullAuto',
       '--session-name': 'sessionName',
       '--session-id': 'sessionId',
+      '--scope-type': 'scopeType',
+      '--scope-mode': 'scopeMode',
+      '--scope-path': 'scopePaths',
+      '--scope-paths': 'scopePaths',
       '--no-session-persistence': 'noSessionPersistence',
       '--auth-fd': 'authFd',
       '--poll-interval-ms': 'pollIntervalMs',
@@ -695,6 +718,9 @@ export function parseArgs(argv) {
       '--request-id': 'requestId',
       '--prompt': 'prompt',
       '--timeout-ms': 'timeoutMs',
+      '--scope-type': 'scopeType',
+      '--scope-mode': 'scopeMode',
+      '--scope-path': 'scopePaths',
       '--lanes-dir': 'lanesDir',
       '--include-failed': 'includeFailed',
     });
@@ -1174,6 +1200,12 @@ async function main() {
           if (failure.failureStage) console.error(`Failure stage: ${failure.failureStage}`);
           if (failure.logPath) console.error(`Log path: ${failure.logPath}`);
           if (failure.statePath) console.error(`State path: ${failure.statePath}`);
+          if (failure.scopeConflicts.length > 0) {
+            console.error('Scope conflicts:');
+            for (const conflict of failure.scopeConflicts) {
+              console.error(`  ${conflict.laneId || conflict.laneDir} (${conflict.enforcement})`);
+            }
+          }
         }
         process.exit(1);
       }
@@ -1184,6 +1216,9 @@ async function main() {
       reused: !!summary.reused,
       pid: summary.pid ?? null,
       auth_mode: summary.authMode ?? 'none',
+      scope_type: summary.scopeType ?? 'none',
+      scope_mode: summary.scopeMode ?? 'warn',
+      scope_conflict_count: Array.isArray(summary.scopeConflicts) ? summary.scopeConflicts.length : 0,
       status: 'success',
     });
     if (parsed.json) {
@@ -1192,6 +1227,7 @@ async function main() {
       console.log(`Lane started: ${summary.sessionName}`);
       if (laneOpts.laneId) console.log(`  Lane id:       ${laneOpts.laneId}`);
       console.log(`  Tool:          ${summary.tool || summary.adapterId || laneOpts.tool || 'claude'}`);
+      console.log(`  Scope:         ${formatLaneScope(summary)}`);
       console.log(`  Lane dir:      ${summary.laneDir}`);
       if (summary.keyPath) console.log(`  Key path:      ${summary.keyPath}`);
       console.log(`  Request FIFO:  ${summary.requestFifo}`);
@@ -1201,6 +1237,12 @@ async function main() {
       if (summary.logPath) console.log(`  Log path:      ${summary.logPath}`);
       if (summary.reused) {
         console.log('  Reused:        yes');
+      }
+      if (Array.isArray(summary.scopeConflicts) && summary.scopeConflicts.length > 0) {
+        console.log('  Scope conflicts:');
+        for (const conflict of summary.scopeConflicts) {
+          console.log(`    ${conflict.laneId || conflict.laneDir} (${conflict.enforcement})`);
+        }
       }
     }
     process.exit(0);
@@ -1386,11 +1428,15 @@ async function main() {
           const name = lane.laneId || lane.sessionName || lane.laneDir;
           console.log(`${name}: ${lane.status}${lane.alive ? ' (alive)' : ''}`);
           console.log(`  Tool:          ${lane.tool ?? lane.adapterId ?? 'claude'}`);
+          console.log(`  Scope:         ${formatLaneScope(lane)}`);
           console.log(`  Lane dir:      ${lane.laneDir}`);
           console.log(`  Session:       ${lane.sessionName ?? 'n/a'}`);
           console.log(`  Request:       ${lane.currentRequestId ?? lane.lastRequestId ?? 'n/a'}`);
           console.log(`  Last result:   ${lane.lastResultPath ?? 'n/a'}`);
           console.log(`  Action:        ${lane.recommendedAction}`);
+          if (Array.isArray(lane.scopeConflicts) && lane.scopeConflicts.length > 0) {
+            console.log(`  Conflicts:     ${lane.scopeConflicts.length}`);
+          }
         }
       }
     }
@@ -1437,6 +1483,7 @@ async function main() {
     } else {
       console.log(`Lane status: ${status.status}`);
       console.log(`  Tool:               ${status.tool ?? status.adapterId ?? 'claude'}`);
+      console.log(`  Scope:              ${formatLaneScope(status)}`);
       if (laneOpts.laneId) console.log(`  Lane id:            ${laneOpts.laneId}`);
       console.log(`  Lane dir:           ${status.laneDir}`);
       if (status.sessionName) console.log(`  Session name:       ${status.sessionName}`);
@@ -1457,6 +1504,12 @@ async function main() {
       console.log(`  Request FIFO:       ${status.requestFifoPresent ? 'present' : 'missing'}`);
       console.log(`  Response FIFO:      ${status.responseFifoPresent ? 'present' : 'missing'}`);
       console.log(`  Recommended action: ${status.recommendedAction}`);
+      if (Array.isArray(status.scopeConflicts) && status.scopeConflicts.length > 0) {
+        console.log('  Scope conflicts:');
+        for (const conflict of status.scopeConflicts) {
+          console.log(`    ${conflict.laneId || conflict.laneDir} (${conflict.enforcement})`);
+        }
+      }
     }
     process.exit(0);
   }

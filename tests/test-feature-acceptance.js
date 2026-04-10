@@ -460,6 +460,9 @@ describe('README Feature: Resident Lane Mode', () => {
         laneId: 'math-live',
         tool: 'codex',
         sessionName: 'math-live',
+        scopeType: 'worktree',
+        scopeMode: 'warn',
+        scopePaths: ['.'],
         keyPath,
         lastActivityAt: new Date().toISOString(),
       }), 'utf8');
@@ -470,6 +473,8 @@ describe('README Feature: Resident Lane Mode', () => {
       assert.equal(parsed.status, 'ready');
       assert.equal(parsed.alive, true);
       assert.equal(parsed.tool, 'codex');
+      assert.equal(parsed.scopeType, 'worktree');
+      assert.deepEqual(parsed.scopePaths, ['.']);
       assert.equal(parsed.recommendedAction, 'send');
     } finally {
       sleeper.kill('SIGTERM');
@@ -497,6 +502,9 @@ describe('README Feature: Resident Lane Mode', () => {
       guardrailRepo: repoDir,
       keyPath,
       identityNonce: 'nonce-ready',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['docs'],
     }), 'utf8');
     writeFileSync(join(staleLaneDir, 'identity.json'), JSON.stringify({
       laneId: 'math-stale',
@@ -504,6 +512,9 @@ describe('README Feature: Resident Lane Mode', () => {
       laneDir: staleLaneDir,
       guardrailRepo: repoDir,
       identityNonce: 'nonce-stale',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: ['docs/api'],
     }), 'utf8');
     writeFileSync(join(readyLaneDir, 'state.json'), JSON.stringify({
       pid: process.pid,
@@ -514,6 +525,9 @@ describe('README Feature: Resident Lane Mode', () => {
       keyPath,
       identityNonce: 'nonce-ready',
       bootNonce: 'boot-ready',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['docs'],
       requestFifo: readyRequestFifo,
       responseFifo: readyResponseFifo,
       lastActivityAt: new Date().toISOString(),
@@ -527,6 +541,74 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.lanes.length, 2);
     assert.equal(parsed.lanes[0].tool, 'codex');
     assert.equal(parsed.lanes[1].tool, 'claude');
+    assert.deepEqual(parsed.lanes[0].scopePaths, ['docs']);
+    assert.equal(parsed.lanes[0].scopeConflicts.length, 0);
+    assert.equal(parsed.lanes[1].scopeConflicts.length, 0);
+  });
+
+  it('guardrail lane list reports live overlapping scope conflicts', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const lanesDir = join(repoDir, '.guardrail', 'lanes');
+    const laneADir = join(lanesDir, 'lane-a');
+    const laneBDir = join(lanesDir, 'lane-b');
+    mkdirSync(laneADir, { recursive: true });
+    mkdirSync(laneBDir, { recursive: true });
+    const keyPath = join(dir, 'lane-a.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(join(laneADir, 'identity.json'), JSON.stringify({
+      laneId: 'lane-a',
+      tool: 'claude',
+      laneDir: laneADir,
+      guardrailRepo: repoDir,
+      keyPath,
+      identityNonce: 'nonce-a',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['docs'],
+    }), 'utf8');
+    writeFileSync(join(laneBDir, 'identity.json'), JSON.stringify({
+      laneId: 'lane-b',
+      tool: 'codex',
+      laneDir: laneBDir,
+      guardrailRepo: repoDir,
+      identityNonce: 'nonce-b',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: ['docs/api'],
+    }), 'utf8');
+    writeFileSync(join(laneADir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'lane-a',
+      tool: 'claude',
+      sessionName: 'lane-a',
+      keyPath,
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['docs'],
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+    writeFileSync(join(laneBDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'lane-b',
+      tool: 'codex',
+      sessionName: 'lane-b',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: ['docs/api'],
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane list --guardrail-repo ${repoDir} --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    const laneA = parsed.lanes.find((lane) => lane.laneId === 'lane-a');
+    const laneB = parsed.lanes.find((lane) => lane.laneId === 'lane-b');
+    assert.equal(laneA.scopeConflicts.length, 1);
+    assert.equal(laneA.scopeConflicts[0].enforcement, 'block');
+    assert.equal(laneB.scopeConflicts.length, 1);
   });
 
   it('guardrail lane send writes one prompt through a resident lane FIFO', async () => {

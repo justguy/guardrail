@@ -17,7 +17,7 @@ import {
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -30,6 +30,71 @@ const MAX_REQUEST_BYTES = 50_000;
 const MAX_PROMPT_CHARS = 32_000;
 const MAX_REQUEST_ID_CHARS = 128;
 const PARTIAL_REQUEST_TIMEOUT_MS = 5_000;
+
+function withinPathScope(candidate, root) {
+  return candidate === root || candidate.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
+}
+
+function normalizeRelativeRepoPath(maybePath, guardrailRepo, label = 'scope path') {
+  const raw = String(maybePath || '').trim();
+  if (!raw) throw new Error(`${label} cannot be empty`);
+  const repoRoot = resolve(guardrailRepo);
+  const resolved = resolve(repoRoot, raw);
+  if (!withinPathScope(resolved, repoRoot)) {
+    throw new Error(`${label} must stay within the Guardrail repo`);
+  }
+  const rel = relative(repoRoot, resolved);
+  return rel || '.';
+}
+
+export function normalizeResidentLaneScope(rawOptions, guardrailRepo, workingDir) {
+  const scopeType = rawOptions.scopeType || rawOptions.writeScopeType || 'none';
+  const scopeMode = rawOptions.scopeMode || 'warn';
+
+  if (!['none', 'repo', 'worktree', 'paths'].includes(scopeType)) {
+    throw new Error('scope_type must be one of: none, repo, worktree, paths');
+  }
+  if (!['warn', 'block'].includes(scopeMode)) {
+    throw new Error('scope_mode must be one of: warn, block');
+  }
+
+  if (scopeType === 'none') {
+    return {
+      scopeType,
+      scopeMode,
+      scopePaths: [],
+    };
+  }
+
+  if (scopeType === 'repo') {
+    return {
+      scopeType,
+      scopeMode: 'block',
+      scopePaths: ['.'],
+    };
+  }
+
+  if (scopeType === 'worktree') {
+    const rel = normalizeRelativeRepoPath(workingDir, guardrailRepo, 'working_dir');
+    return {
+      scopeType,
+      scopeMode,
+      scopePaths: [rel],
+    };
+  }
+
+  const rawScopePaths = Array.isArray(rawOptions.scopePaths)
+    ? rawOptions.scopePaths.flatMap((entry) => splitCsv(entry))
+    : splitCsv(rawOptions.scopePaths || rawOptions.scopePath || '');
+  if (rawScopePaths.length === 0) {
+    throw new Error('scope_type=paths requires at least one --scope-path');
+  }
+  return {
+    scopeType,
+    scopeMode,
+    scopePaths: rawScopePaths.map((entry) => normalizeRelativeRepoPath(entry, guardrailRepo)),
+  };
+}
 
 export function shellTruthy(value) {
   return value === true || value === 'true' || value === '1';
@@ -121,6 +186,11 @@ function buildLaneIdentity(options, existing = null) {
     schemaVersion: 1,
     adapterId: options.adapterId || existing?.adapterId || 'unknown',
     tool: options.tool || existing?.tool || options.adapterId || existing?.adapterId || 'unknown',
+    scopeType: options.scopeType || existing?.scopeType || 'none',
+    scopeMode: options.scopeMode || existing?.scopeMode || 'warn',
+    scopePaths: Array.isArray(options.scopePaths)
+      ? options.scopePaths
+      : (existing?.scopePaths || []),
     laneId: options.laneId || existing?.laneId || null,
     laneDir: options.laneDir,
     guardrailRepo: options.guardrailRepo,
@@ -187,6 +257,9 @@ function buildState(options, pid, startedConversation = false, extra = {}) {
   return {
     adapterId: options.adapterId || 'unknown',
     tool: options.tool || options.adapterId || 'unknown',
+    scopeType: options.scopeType || 'none',
+    scopeMode: options.scopeMode || 'warn',
+    scopePaths: Array.isArray(options.scopePaths) ? options.scopePaths : [],
     laneDir: options.laneDir,
     requestFifo: paths.requestFifo,
     responseFifo: paths.responseFifo,
@@ -546,7 +619,90 @@ function inferImplicitFailure(status, state) {
   };
 }
 
-export function getResidentLaneStatus(rawOptions) {
+function scopeRootsForLane(entry) {
+  const repoRoot = resolve(entry.guardrailRepo || process.cwd());
+  const scopeType = entry.scopeType || 'none';
+  const scopePaths = Array.isArray(entry.scopePaths) ? entry.scopePaths : [];
+  if (scopeType === 'none' || scopePaths.length === 0) return [];
+  return scopePaths.map((scopePath) => resolve(repoRoot, scopePath));
+}
+
+function laneScopesOverlap(a, b) {
+  const aRoots = scopeRootsForLane(a);
+  const bRoots = scopeRootsForLane(b);
+  if (aRoots.length === 0 || bRoots.length === 0) return false;
+  for (const aRoot of aRoots) {
+    for (const bRoot of bRoots) {
+      if (withinPathScope(aRoot, bRoot) || withinPathScope(bRoot, aRoot)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function buildScopeConflict(entry, other) {
+  const enforcement = (
+    entry.scopeType === 'repo'
+    || entry.scopeMode === 'block'
+    || other.scopeType === 'repo'
+    || other.scopeMode === 'block'
+  ) ? 'block' : 'warn';
+  return {
+    laneId: other.laneId || null,
+    laneDir: other.laneDir,
+    tool: other.tool || other.adapterId || null,
+    scopeType: other.scopeType || 'none',
+    scopeMode: other.scopeMode || 'warn',
+    scopePaths: Array.isArray(other.scopePaths) ? other.scopePaths : [],
+    enforcement,
+  };
+}
+
+function annotateScopeConflicts(entries) {
+  return entries.map((entry) => {
+    const scopeConflicts = entries
+      .filter((other) => (
+        other.laneDir !== entry.laneDir
+        && other.alive
+        && entry.alive
+        && laneScopesOverlap(entry, other)
+      ))
+      .map((other) => buildScopeConflict(entry, other));
+    return {
+      ...entry,
+      scopeConflicts,
+    };
+  });
+}
+
+function registryDirFor(rawOptions = {}) {
+  const guardrailRepo = rawOptions.guardrailRepo
+    ? resolve(process.cwd(), rawOptions.guardrailRepo)
+    : process.cwd();
+  const registryDir = rawOptions.lanesDir
+    ? resolve(guardrailRepo, rawOptions.lanesDir)
+    : join(guardrailRepo, '.guardrail', 'lanes');
+  return { guardrailRepo, registryDir };
+}
+
+function collectResidentLaneRegistryEntries(rawOptions = {}) {
+  const { registryDir } = registryDirFor(rawOptions);
+  const entries = [];
+  if (!existsSync(registryDir)) {
+    return { registryDir, entries: [] };
+  }
+
+  for (const entry of readdirSync(registryDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const laneDir = join(registryDir, entry.name);
+    entries.push(collectResidentLaneStatusBase({ ...rawOptions, laneDir }));
+  }
+
+  return { registryDir, entries };
+}
+
+function collectResidentLaneStatusBase(rawOptions) {
   if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
   const guardrailRepo = rawOptions.guardrailRepo
     ? resolve(process.cwd(), rawOptions.guardrailRepo)
@@ -567,6 +723,9 @@ export function getResidentLaneStatus(rawOptions) {
   return {
     adapterId: state?.adapterId ?? identity?.adapterId ?? rawOptions.adapterId ?? rawOptions.tool ?? null,
     tool: state?.tool ?? identity?.tool ?? rawOptions.tool ?? state?.adapterId ?? identity?.adapterId ?? rawOptions.adapterId ?? null,
+    scopeType: state?.scopeType ?? identity?.scopeType ?? rawOptions.scopeType ?? 'none',
+    scopeMode: state?.scopeMode ?? identity?.scopeMode ?? rawOptions.scopeMode ?? 'warn',
+    scopePaths: state?.scopePaths ?? identity?.scopePaths ?? rawOptions.scopePaths ?? [],
     laneDir,
     statePath: paths.statePath,
     status: derived.status,
@@ -579,6 +738,8 @@ export function getResidentLaneStatus(rawOptions) {
     identityNonce: state?.identityNonce ?? identity?.identityNonce ?? null,
     bootNonce: state?.bootNonce ?? identity?.bootNonce ?? null,
     ownerRepoId: state?.ownerRepoId ?? identity?.ownerRepoId ?? null,
+    guardrailRepo: state?.guardrailRepo ?? identity?.guardrailRepo ?? guardrailRepo,
+    workingDir: state?.workingDir ?? identity?.workingDir ?? rawOptions.workingDir ?? guardrailRepo,
     lastRequestId: state?.lastRequestId ?? null,
     currentRequestId: state?.currentRequestId ?? null,
     currentRequestStartedAt: state?.currentRequestStartedAt ?? null,
@@ -603,23 +764,18 @@ export function getResidentLaneStatus(rawOptions) {
   };
 }
 
-export function listResidentLanes(rawOptions = {}) {
-  const guardrailRepo = rawOptions.guardrailRepo
-    ? resolve(process.cwd(), rawOptions.guardrailRepo)
-    : process.cwd();
-  const registryDir = rawOptions.lanesDir
-    ? resolve(guardrailRepo, rawOptions.lanesDir)
-    : join(guardrailRepo, '.guardrail', 'lanes');
+export function getResidentLaneStatus(rawOptions) {
+  const base = collectResidentLaneStatusBase(rawOptions);
+  const { entries } = collectResidentLaneRegistryEntries({ ...rawOptions, guardrailRepo: base.guardrailRepo });
+  const combined = entries.some((entry) => entry.laneDir === base.laneDir)
+    ? entries
+    : [...entries, base];
+  return annotateScopeConflicts(combined).find((entry) => entry.laneDir === base.laneDir) || base;
+}
 
-  const entries = [];
-  if (existsSync(registryDir)) {
-    for (const entry of readdirSync(registryDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const laneDir = join(registryDir, entry.name);
-      const status = getResidentLaneStatus({ guardrailRepo, laneDir });
-      entries.push(status);
-    }
-  }
+export function listResidentLanes(rawOptions = {}) {
+  const { registryDir, entries: baseEntries } = collectResidentLaneRegistryEntries(rawOptions);
+  const entries = annotateScopeConflicts(baseEntries);
 
   entries.sort((a, b) => {
     const byCreated = String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
@@ -982,12 +1138,31 @@ export async function launchResidentLaneWithAdapter(options, adapter, deps = {})
       conflictingPid: duplicates[0].pid,
     });
   }
+  const scopeConflicts = optionsWithIdentity.scopeType && optionsWithIdentity.scopeType !== 'none'
+    ? listResidentLanes({ guardrailRepo: optionsWithIdentity.guardrailRepo }).lanes
+      .filter((lane) => (
+        lane.laneDir !== optionsWithIdentity.laneDir
+        && lane.alive
+        && laneScopesOverlap(optionsWithIdentity, lane)
+      ))
+      .map((lane) => buildScopeConflict(optionsWithIdentity, lane))
+    : [];
+  if (scopeConflicts.some((conflict) => conflict.enforcement === 'block')) {
+    throw createLaneBootError('Resident lane scope conflicts with another live lane in this Guardrail repo.', {
+      failureStage: 'bootstrap',
+      scopeConflicts,
+    });
+  }
   writeJson(paths.identityPath, identity);
 
   if (existing?.status && existing.status !== 'expired' && isPidAlive(existing.pid)) {
     return {
       adapterId: existing.adapterId ?? optionsWithIdentity.adapterId ?? adapter.adapterId ?? null,
       tool: existing.tool ?? optionsWithIdentity.tool ?? existing.adapterId ?? optionsWithIdentity.adapterId ?? adapter.adapterId ?? null,
+      scopeType: existing.scopeType ?? optionsWithIdentity.scopeType ?? 'none',
+      scopeMode: existing.scopeMode ?? optionsWithIdentity.scopeMode ?? 'warn',
+      scopePaths: existing.scopePaths ?? optionsWithIdentity.scopePaths ?? [],
+      scopeConflicts,
       laneDir: optionsWithIdentity.laneDir,
       requestFifo: existing.requestFifo ?? paths.requestFifo,
       responseFifo: existing.responseFifo ?? paths.responseFifo,
@@ -1065,6 +1240,10 @@ export async function launchResidentLaneWithAdapter(options, adapter, deps = {})
   const launchSummary = {
     adapterId: optionsWithIdentity.adapterId || adapter.adapterId || null,
     tool: optionsWithIdentity.tool || optionsWithIdentity.adapterId || adapter.adapterId || null,
+    scopeType: optionsWithIdentity.scopeType || 'none',
+    scopeMode: optionsWithIdentity.scopeMode || 'warn',
+    scopePaths: optionsWithIdentity.scopePaths || [],
+    scopeConflicts,
     laneDir: optionsWithIdentity.laneDir,
     requestFifo: paths.requestFifo,
     responseFifo: paths.responseFifo,

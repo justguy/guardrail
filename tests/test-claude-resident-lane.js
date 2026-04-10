@@ -124,6 +124,22 @@ describe('Claude resident lane', () => {
     assert.deepEqual(options.inputFiles, ['a.txt', 'b.txt']);
   });
 
+  it('normalizes resident lane write scopes', () => {
+    const dir = tmpLaneDir();
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: 'packages/app',
+      sessionName: 'math-live-session',
+      scopeType: 'worktree',
+      scopeMode: 'warn',
+    }, dir);
+
+    assert.equal(options.scopeType, 'worktree');
+    assert.equal(options.scopeMode, 'warn');
+    assert.deepEqual(options.scopePaths, ['packages/app']);
+  });
+
   it('derives FIFO paths from the lane dir', () => {
     const paths = lanePaths('/tmp/example-lane');
     assert.equal(paths.requestFifo, '/tmp/example-lane/requests.fifo');
@@ -274,6 +290,117 @@ describe('Claude resident lane', () => {
       laneId: 'math-live',
       sessionName: 'math-live',
     }), /Duplicate live resident lane/);
+  });
+
+  it('blocks lane startup when the requested write scope overlaps a live block-owned lane', async () => {
+    const dir = tmpLaneDir();
+    const existingLaneDir = join(dir, '.guardrail', 'lanes', 'math-a');
+    mkdirSync(existingLaneDir, { recursive: true });
+    const existingPaths = lanePaths(existingLaneDir);
+    mkfifo(existingPaths.requestFifo);
+    mkfifo(existingPaths.responseFifo);
+    writeFileSync(existingPaths.identityPath, JSON.stringify({
+      laneId: 'math-a',
+      laneDir: existingLaneDir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-a',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: ['src'],
+    }), 'utf8');
+    writeFileSync(existingPaths.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-a',
+      sessionName: 'math-a',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: ['src'],
+      requestFifo: existingPaths.requestFifo,
+      responseFifo: existingPaths.responseFifo,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    await assert.rejects(
+      launchResidentLane({
+        laneDir: join(dir, '.guardrail', 'lanes', 'math-b'),
+        guardrailRepo: dir,
+        workingDir: dir,
+        sessionName: 'math-b',
+        scopeType: 'paths',
+        scopeMode: 'warn',
+        scopePaths: ['src/utils'],
+      }, {
+        spawnProcess: () => {
+          throw new Error('spawn should not be reached for blocked scope conflicts');
+        },
+      }),
+      (err) => err?.code === 'LANE_BOOT_FAILED' && err?.details?.scopeConflicts?.length === 1,
+    );
+  });
+
+  it('returns scope conflict warnings in the launch summary when overlapping lanes are warn-only', async () => {
+    const dir = tmpLaneDir();
+    const existingLaneDir = join(dir, '.guardrail', 'lanes', 'math-a');
+    mkdirSync(existingLaneDir, { recursive: true });
+    const existingPaths = lanePaths(existingLaneDir);
+    mkfifo(existingPaths.requestFifo);
+    mkfifo(existingPaths.responseFifo);
+    writeFileSync(existingPaths.identityPath, JSON.stringify({
+      laneId: 'math-a',
+      laneDir: existingLaneDir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-a',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['docs'],
+    }), 'utf8');
+    writeFileSync(existingPaths.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-a',
+      sessionName: 'math-a',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['docs'],
+      requestFifo: existingPaths.requestFifo,
+      responseFifo: existingPaths.responseFifo,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const fakeChild = makeFakeLaunchHelper(515151);
+    const summary = await launchResidentLane({
+      laneDir: join(dir, '.guardrail', 'lanes', 'math-b'),
+      guardrailRepo: dir,
+      workingDir: dir,
+      sessionName: 'math-b',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['docs/api'],
+    }, {
+      spawnProcess: () => fakeChild,
+      waitForBootstrap: waitForResidentLaneBootstrap,
+      waitForBootstrapDeps: {
+        timeoutMs: 500,
+        postStartGraceMs: 50,
+        isAlive: () => true,
+        readState: () => ({
+          pid: 515151,
+          status: 'ready',
+          sessionName: 'math-b',
+          scopeType: 'paths',
+          scopeMode: 'warn',
+          scopePaths: ['docs/api'],
+          lastActivityAt: new Date().toISOString(),
+        }),
+      },
+    });
+
+    assert.equal(summary.scopeType, 'paths');
+    assert.deepEqual(summary.scopePaths, ['docs/api']);
+    assert.equal(summary.scopeConflicts.length, 1);
+    assert.equal(summary.scopeConflicts[0].laneId, 'math-a');
+    assert.equal(summary.scopeConflicts[0].enforcement, 'warn');
   });
 
   it('lists resident lanes from the project lane registry', () => {
