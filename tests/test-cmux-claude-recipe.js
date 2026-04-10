@@ -23,6 +23,16 @@ function makeTmpDir() {
   return mkdtempSync(join(tmpdir(), 'gr-cmux-recipe-'));
 }
 
+function exactSearchDirs(basePath, dirs) {
+  return {
+    explicitSearchDirs: dirs,
+    basePath,
+    includeDefaults: false,
+    repoConfigPath: false,
+    userConfigPath: false,
+  };
+}
+
 function seedPromptFixture(dir) {
   const promptDir = join(dir, '.guardrail', 'prompts');
   mkdirSync(promptDir, { recursive: true });
@@ -46,6 +56,9 @@ describe('CMUX Claude recipe', () => {
     assert.equal(recipe.inputs.prompt.approval_mode, 'interactive_message');
     assert.ok(
       recipe.guardrails?.constraints?.some((line) => line.includes('same Guardrail approval unit')),
+    );
+    assert.ok(
+      recipe.guardrails?.constraints?.some((line) => line.includes('bounded auth preflight inside the hosted runtime')),
     );
   });
 
@@ -80,11 +93,15 @@ describe('CMUX Claude recipe', () => {
         allow: ['HOME', 'PATH'],
         inject: {},
       },
+      authPreflight: {
+        requirements: [{ type: 'claude_login' }],
+      },
     }));
 
     assert.equal(contract.command, 'node');
     assert.deepEqual(contract.args, ['./src/claude-exec-wrapper.js', '--prompt', 'Solve it']);
     assert.equal(contract.cwd, '/tmp/work');
+    assert.deepEqual(contract.authPreflight, { requirements: [{ type: 'claude_login' }] });
   });
 
   it('renders the hosted exec command with env isolation and exit sentinel', () => {
@@ -106,6 +123,7 @@ describe('CMUX Claude recipe', () => {
     assert.equal(parseWorkspaceRef('OK workspace:12\n'), 'workspace:12');
     assert.equal(parseSurfaceRef('* surface:17 terminal [focused]\n'), 'surface:17');
     assert.equal(extractExecExitCode('done\n[guardrail-exec-exit:0]\n'), 0);
+    assert.equal(extractExecExitCode('done\n[guardrail-exec-exit:auth-0:0]\n', 'auth-0'), 0);
     assert.equal(extractExecExitCode('still running\n'), null);
   });
 
@@ -132,7 +150,7 @@ describe('CMUX Claude recipe', () => {
       const result = await runRecipeSupervisor({
         specifier: 'cmux-claude-exec',
         cwd: dir,
-        searchDirs: [join(process.cwd(), 'recipes')],
+        searchDirs: exactSearchDirs(dir, [join(process.cwd(), 'recipes')]),
         allowUnverified: true,
         envAllow: ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'TERM_PROGRAM', 'LANG', 'TMPDIR', 'PWD', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR'],
         inputs: {
@@ -191,7 +209,7 @@ describe('CMUX Claude recipe', () => {
       result = await runRecipeSupervisor({
         specifier: 'cmux-claude-exec',
         cwd: dir,
-        searchDirs: [join(process.cwd(), 'recipes')],
+        searchDirs: exactSearchDirs(dir, [join(process.cwd(), 'recipes')]),
         allowUnverified: true,
         envAllow: ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'TERM_PROGRAM', 'LANG', 'TMPDIR', 'PWD', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR'],
         inputs: {
@@ -251,7 +269,7 @@ describe('CMUX Claude recipe', () => {
       if (args[0] === 'new-workspace') return { stdout: 'OK workspace:9\n', stderr: '' };
       if (args[0] === 'list-panels') return { stdout: '* surface:4 terminal [focused]\n', stderr: '' };
       if (args[0] === 'send') return { stdout: '', stderr: '' };
-      if (args[0] === 'capture-pane') return { stdout: '6\n[guardrail-exec-exit:0]\n', stderr: '' };
+      if (args[0] === 'capture-pane') return { stdout: '6\n[guardrail-exec-exit:main:0]\n', stderr: '' };
       throw new Error(`unexpected cmux call: ${args[0]}`);
     };
 
@@ -269,13 +287,14 @@ describe('CMUX Claude recipe', () => {
       {
         runner,
         wait: async () => {},
+        emitStdout: false,
       },
     );
 
     assert.equal(result.workspace, 'workspace:9');
     assert.equal(result.surface, 'surface:4');
     assert.equal(result.execExitCode, 0);
-    assert.match(result.capture, /\[guardrail-exec-exit:0\]/);
+    assert.match(result.capture, /\[guardrail-exec-exit:main:0\]/);
     assert.equal(calls[0].args[0], 'new-workspace');
     assert.equal(calls[1].args[0], 'list-panels');
     assert.equal(calls[2].args[0], 'send');
@@ -283,4 +302,5 @@ describe('CMUX Claude recipe', () => {
     assert.equal(calls[0].options.socketPath, '/tmp/cmux.sock');
     assert.ok(calls[2].args.at(-1).includes('[guardrail-exec-exit:'));
   });
+
 });

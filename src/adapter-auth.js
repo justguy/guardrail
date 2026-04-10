@@ -60,7 +60,7 @@ export function checkEnvMappings(requiredEnv = [], envAllow = [], options = {}) 
   };
 }
 
-function getAuthCheckDefinition(requirement) {
+export function resolveAuthCheckDefinition(requirement) {
   switch (requirement.type) {
     case 'claude_login':
       return {
@@ -85,7 +85,7 @@ export async function checkAuthPrerequisites(requirements = [], options = {}) {
   const checkRunner = options.checkRunner || executeSubprocess;
 
   for (const requirement of requirements) {
-    const definition = getAuthCheckDefinition(requirement);
+    const definition = resolveAuthCheckDefinition(requirement);
     if (!definition) {
       return {
         ok: false,

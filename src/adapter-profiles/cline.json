@@ -3,7 +3,7 @@
   "protocol": "mcp",
   "schema_target": "adapter-result/v1",
   "version": "1.0.0",
-  "description": "Cline adapter profile — MCP protocol for future IDE integration (blocked in v0.2)",
+  "description": "Cline adapter profile — MCP stdio transport for bounded discovery/tool-call integration; general adapter run remains blocked in v0.2",
   "mcp_transport": {
     "type": "stdio",
     "command": "cline",

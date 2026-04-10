@@ -233,6 +233,7 @@ describe('Integration: Command Supervisor Runtime Policy', () => {
       nonInteractive: true,
       jsonOutput: true,
       trustClass: 'reviewed_internal',
+      authCheckFn: async () => ({ success: true, stdout: 'logged in' }),
     });
 
     assert.equal(result.status, 'success');
@@ -1441,6 +1442,7 @@ describe('Integration: Recipe Supervisor Runtime Policy', () => {
       nonInteractive: true,
       jsonOutput: true,
       trustClass: 'reviewed_internal',
+      authCheckFn: async () => ({ success: true, stdout: 'logged in' }),
     });
 
     assert.equal(result.status, 'approval_required');
@@ -1477,6 +1479,57 @@ describe('Integration: Recipe Supervisor Runtime Policy', () => {
     assert.equal(result.status, 'policy_violation');
     assert.match(result.reason || '', /explicit --env-allow/);
     assert.match(result.reason || '', /BOUND_TOKEN/);
+  });
+
+  it('fails early when recipe auth preflight is missing required runtime env mapping', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+
+    const recipe = makeRecipe({
+      requires_auth: [{ type: 'claude_login', env: ['HOME'] }],
+    });
+    writeRecipeFile(recipesDir, recipe);
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { target: 'hello' },
+      cwd: dir,
+      searchDirs: exactSearchDirs(dir, [recipesDir]),
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'policy_violation');
+    assert.match(result.reason || '', /missing_auth_mapping/);
+    assert.match(result.reason || '', /HOME/);
+  });
+
+  it('fails early when recipe auth prerequisite is missing', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+
+    const recipe = makeRecipe({
+      requires_auth: [{ type: 'claude_login', env: ['HOME'], message: 'Claude login required for this runtime.' }],
+    });
+    writeRecipeFile(recipesDir, recipe);
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { target: 'hello' },
+      cwd: dir,
+      searchDirs: exactSearchDirs(dir, [recipesDir]),
+      envAllow: ['HOME'],
+      nonInteractive: true,
+      jsonOutput: true,
+      authCheckFn: async () => ({ success: false, stderr: 'Not logged in' }),
+    });
+
+    assert.equal(result.status, 'policy_violation');
+    assert.match(result.reason || '', /missing_auth_prerequisite/);
+    assert.match(result.reason || '', /Claude login required for this runtime/);
+    assert.match(result.reason || '', /Not logged in/);
   });
 
   it('passes explicitly allowed env vars through recipe execution', async () => {

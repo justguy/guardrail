@@ -241,8 +241,39 @@ Resident lanes are for direct interactive use when the executable boundary shoul
 - expires after idle timeout, removes its key/FIFOs, and records lane state under `.guardrail/lanes/<name>/state.json`
 - appends `lane_start`, `lane_send`, and `lane_stop` lifecycle entries to `.guardrail/audit.jsonl` so later ops review can distinguish lane creation, message traffic, expiry, and explicit teardown
 
-Lane startup still has to happen in a runtime where the downstream CLI auth already works. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again.
+Lane startup still has to happen in a runtime where the downstream CLI auth already works. Direct AI recipes can now declare bounded `requires_auth` checks too, so Guardrail fails before launch with `missing_auth_prerequisite` instead of letting the underlying CLI die late. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again.
 Use `lane status` when you need to tell the difference between an alive lane, an expired lane, and stale leftover artifacts before deciding whether to send, restart, or clean up.
+If a direct recipe run and a composed host-runtime recipe both fail with the same downstream tool-auth error such as `Not logged in`, treat that as missing auth in the target host runtime, not as Guardrail drift. Direct recipes now preflight in the current runtime; composed host-runtime recipes re-run the same bounded auth check inside the hosted surface before the downstream CLI starts. Fix login in that exact runtime, then rerun the same approved Guardrail contract. For repeated interaction or monitoring after startup, prefer the resident FIFO lane over repeated raw host-surface inspection commands so you do not trigger another approval-bearing transport hop every turn.
+
+Communication matrix:
+- `prompt`: one user message for the current turn
+- `input_files`: stable prompt-bearing context set approved up front
+- `system_prompt`: fixed executable-boundary instruction layer
+- `lifecycle=start`: create a fresh bounded session
+- `lifecycle=continue` / `attach`: later turns in the same session
+- `session_name` / `session_id`: session identity keys
+- `lane start`: one-time host-runtime startup
+- `lane send`: later message traffic through the resident lane
+- `lane status`: inspect alive/expired/stale/stopped lane state
+- `lane stop`: explicit teardown
+
+Recommended multi-doc review loop:
+- approve the full planned doc set up front in repeated `input_files`
+- keep `system_prompt` fixed for the whole loop
+- start one persistent Claude session in the correct runtime
+- ask for only the first slice/report
+- review the result with the user
+- continue with later prompts through the same session or resident lane
+- do not add or swap prompt files mid-loop unless you want reapproval
+- do not use workflow chaining for this exact pause-and-review loop unless the workflow truly can run unattended between review points
+
+Read “one approval” narrowly here: one Guardrail approval can cover the approved doc set plus session boundary. An outer host-runtime or sandbox approval may still be needed to start that session in the correct authenticated runtime.
+
+Practical agent rule:
+- direct exec recipe if the current runtime already passes the downstream CLI subprocess test
+- transport/orchestration recipe if the tool only works in a different authenticated host runtime
+- resident lane if the workflow needs repeated messages or repeated monitoring after startup
+- raw host-surface inspection only after Guardrail-managed status/audit paths are exhausted
 
 ---
 
@@ -652,7 +683,8 @@ MCP status:
 - `stdin-json` and `env-shim` are the runnable adapter transports today
 - MCP profiles are recognized and may declare a validated `mcp_transport` contract, but runtime support is still intentionally blocked
 - blocked MCP runs now tell you which transport contract was recognized so users can distinguish “profile is malformed” from “transport exists on paper but is not live yet”
-- `guardrail adapter probe --tool <name>` is now the bounded MCP discovery exception: it runs an approval-bearing stdio probe that only performs `initialize` plus `tools/list` for MCP profiles with declared `stdio` transport, without enabling full MCP command execution
+- `guardrail adapter probe --tool <name>` is the bounded MCP discovery path: it runs an approval-bearing stdio probe that only performs `initialize` plus `tools/list` for MCP profiles with declared `stdio` transport
+- `guardrail adapter mcp call --tool <name> --mcp-tool <tool> --params-json <json>` is the first bounded MCP runtime path: it performs exactly one `tools/call` over the declared `stdio` transport under Guardrail approval, without turning general `adapter run` into an ambient MCP execution surface
 
 Current architecture:
 
@@ -671,7 +703,8 @@ Example:
 guardrail adapter run --tool openclaw -- npm test
 guardrail adapter run --profile ./my-tool.json --env-allow ANTHROPIC_API_KEY -- npm test
 guardrail adapter probe --tool cline
-guardrail adapter run --tool cline -- echo "blocked in v0.2"
+guardrail adapter mcp call --tool cline --mcp-tool echo --params-json '{"text":"hi"}'
+guardrail adapter run --tool cline -- echo "still blocked in v0.2"
 guardrail adapter profile index verify ./adapter-profiles.index.json --index-key ./adapter-profiles.index.pub.pem
 guardrail adapter profile install github://guardrail-dev/adapter-profiles/openclaw.json@<sha>
 ```
@@ -689,8 +722,9 @@ Adapter caveats:
 - `requires_auth` is preflight-only and does not perform interactive login. If a tool reports `missing_auth_prerequisite`, authenticate the runtime first (for example `claude auth login` or `gh auth login`) and retry.
 - Adapter `run` also enforces approval reuse: first approval is interactive and binds an adapter manifest; without one, `adapter run` returns a blocked result with `No approved manifest found`.
 - `adapter probe` is discovery only. It does not run user commands through MCP profiles, and it does not make `adapter run` live for MCP tools. Use it to confirm that the declared stdio transport can initialize and expose tools under Guardrail.
+- `adapter mcp call` is the first bounded MCP execution slice. It still requires explicit MCP tool selection plus JSON params, and it does not reinterpret arbitrary shell commands as MCP calls.
 - Signed adapter-profile index groundwork is now shipped via `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`. It validates the index schema and signature so teams can test index publishing locally, but bare-name install is still intentionally blocked until Guardrail has real trusted-index verification for public distribution.
-- MCP profiles are blocked at CLI level in v0.2 with a hard error. If you need IDE-style protocol execution now, use the env-shim path instead.
+- `adapter run` for MCP profiles is still blocked at CLI level in v0.2. If you need bounded MCP execution now, use `adapter mcp call`; if you need general IDE-style protocol execution, use the env-shim path until broader MCP runtime semantics ship.
 - `--env-allow` is bounded and explicit. It only controls what environment keys are handed to the adapter process for that run.
 - `claude-exec` and `codex-exec` are approval-bounded wrappers, not outer sandboxes. If you run them outside your host sandbox/container boundary, the underlying AI CLI runs with host privileges subject to its own permission model. Guardrail now calls this out as a yellow-to-red risk reason in approval UX.
 

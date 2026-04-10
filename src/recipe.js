@@ -15,6 +15,8 @@ const VALID_RISK_LEVELS = new Set(['low', 'medium', 'high']);
 const VALID_INPUT_TYPES = new Set(['string', 'integer', 'boolean']);
 export const VALID_CATEGORIES = new Set(['git', 'github', 'infra', 'packages', 'openclaw', 'custom']);
 export const VALID_CHANNELS = new Set(['verified', 'community']);
+const VALID_AUTH_TYPES = new Set(['claude_login', 'gh_auth']);
+const ENV_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
 const RECIPE_SCHEMA_VERSION = 1;
 const RECIPE_MANIFEST_VERSION = 1;
 const HIGH_RISK_ENV_PATTERNS = /secret|token|password|api[_-]?key|credential|auth|private[_-]?key/i;
@@ -97,6 +99,43 @@ function validateRequiresEnv(recipe) {
     }
   }
   return [];
+}
+
+function validateRequiresAuth(recipe) {
+  if (recipe.requires_auth === undefined) return [];
+  if (!Array.isArray(recipe.requires_auth) || recipe.requires_auth.length === 0) {
+    return ['requires_auth must be a non-empty array when present'];
+  }
+
+  const errors = [];
+  for (const requirement of recipe.requires_auth) {
+    if (!requirement || typeof requirement !== 'object' || Array.isArray(requirement)) {
+      errors.push('requires_auth entries must be objects');
+      continue;
+    }
+    if (!VALID_AUTH_TYPES.has(requirement.type)) {
+      errors.push(`requires_auth.type must be one of: ${[...VALID_AUTH_TYPES].join(', ')}`);
+    }
+    if (requirement.check !== undefined && typeof requirement.check !== 'string') {
+      errors.push('requires_auth.check must be a string when present');
+    }
+    if (requirement.message !== undefined && typeof requirement.message !== 'string') {
+      errors.push('requires_auth.message must be a string when present');
+    }
+    if (requirement.env !== undefined) {
+      if (!Array.isArray(requirement.env) || requirement.env.length === 0) {
+        errors.push('requires_auth.env must be a non-empty array when present');
+      } else {
+        for (const name of requirement.env) {
+          if (typeof name !== 'string' || !ENV_NAME_RE.test(name)) {
+            errors.push(`requires_auth.env entries must match ${ENV_NAME_RE}: ${String(name)}`);
+          }
+        }
+      }
+    }
+  }
+
+  return errors;
 }
 
 function validateInputs(inputs) {
@@ -358,6 +397,7 @@ export function validateRecipe(recipe) {
   const errors = [
     ...validateTopLevel(recipe),
     ...validateRequiresEnv(recipe),
+    ...validateRequiresAuth(recipe),
     ...validateInputs(recipe.inputs),
     ...validateSteps(recipe.steps),
     ...validateGuardrails(recipe.guardrails),
@@ -509,6 +549,9 @@ export function hashRecipe(recipe) {
   };
   if (recipe.requires_env !== undefined) {
     hashable.requires_env = recipe.requires_env;
+  }
+  if (recipe.requires_auth !== undefined) {
+    hashable.requires_auth = recipe.requires_auth;
   }
   return createHash('sha256').update(serializeStable(hashable)).digest('hex');
 }

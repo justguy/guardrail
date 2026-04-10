@@ -61,12 +61,25 @@ function parseRunArgs(argv, startIndex, result) {
   return result;
 }
 
+function parseMcpCallArgs(argv, startIndex, result) {
+  return parseFlags(argv, startIndex, result, {
+    '--tool': valueFlag('tool'),
+    '--profile': valueFlag('profilePath'),
+    '--mcp-tool': valueFlag('mcpTool'),
+    '--params-json': valueFlag('paramsJson'),
+    '--env-allow': repeatedValueFlag('envAllow'),
+    '--timeout-ms': valueFlag('timeoutMs'),
+    '--json': (parsed, _argv, index) => { parsed.json = true; return { nextIndex: index + 1 }; },
+  });
+}
+
 /**
  * Parse adapter subcommand arguments.
  *
  * Supported commands:
  *   adapter run --tool <name> [--profile <path>] [--env-allow <VAR>] -- <command> [args...]
  *   adapter probe --tool <name> [--profile <path>] [--env-allow <VAR>] [--timeout-ms <ms>]
+ *   adapter mcp call --tool <name> --mcp-tool <tool> [--params-json <json>] [--env-allow <VAR>] [--timeout-ms <ms>]
  *   adapter shim --tool <name> --commands <cmd1,cmd2> [--list] [--remove <cmd>] [--install-path [--write]]
  *   adapter profile install <path|url|github://>
  *   adapter profile index verify <path> [--index-key <pubkey.pem>]
@@ -104,6 +117,20 @@ export function parseAdapterArgs(argv) {
       '--env-allow': repeatedValueFlag('envAllow'),
       '--timeout-ms': valueFlag('timeoutMs'),
       '--json': (parsed, _argv, index) => { parsed.json = true; return { nextIndex: index + 1 }; },
+    });
+  }
+
+  if (action === 'mcp') {
+    if (argv.length < 2 || argv[1] !== 'call') return { error: 'usage' };
+    return parseMcpCallArgs(argv, 2, {
+      subcommand: 'adapter-mcp-call',
+      tool: null,
+      profilePath: null,
+      mcpTool: null,
+      paramsJson: '{}',
+      envAllow: [],
+      timeoutMs: null,
+      json: false,
     });
   }
 
@@ -215,6 +242,26 @@ function formatAdapterProfileIndexVerify(result, jsonOutput) {
   ].join('\n');
 }
 
+function formatMcpCallResult(result, jsonOutput) {
+  if (jsonOutput) {
+    return JSON.stringify(result, null, 2);
+  }
+
+  if (!result.ok) {
+    return result.adapterResult?.guardrail?.reason || result.call?.reason || 'MCP tool call failed.';
+  }
+
+  const call = result.call || {};
+  const rendered = typeof call.result === 'string'
+    ? call.result
+    : JSON.stringify(call.result, null, 2);
+
+  return [
+    `MCP tool call succeeded for ${call.tool}`,
+    rendered,
+  ].join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Adapter CLI dispatcher
 // ---------------------------------------------------------------------------
@@ -227,6 +274,7 @@ export async function runAdapterCli(adapterArgv, options = {}) {
     console.error('');
     console.error('  adapter run --tool <name> [--env-allow VAR] -- <command> [args...]');
     console.error('  adapter probe --tool <name> [--env-allow VAR] [--timeout-ms MS]');
+    console.error('  adapter mcp call --tool <name> --mcp-tool <tool> [--params-json JSON] [--env-allow VAR] [--timeout-ms MS]');
     console.error('  adapter shim --tool <name> --commands <cmd1,cmd2>');
     console.error('  adapter shim --list');
     console.error('  adapter shim --remove <command>');
@@ -321,6 +369,60 @@ export async function runAdapterCli(adapterArgv, options = {}) {
 
     console.log(formatProbeResult(result, jsonOutput));
     process.exit(0);
+    return;
+  }
+
+  if (parsed.subcommand === 'adapter-mcp-call') {
+    if (!parsed.tool && !parsed.profilePath) {
+      console.error('Error: No tool specified. Use --tool <name> or --profile <path>.');
+      console.error('Available tools: guardrail adapter profile list');
+      process.exit(1);
+      return;
+    }
+    if (!parsed.mcpTool) {
+      console.error('Error: --mcp-tool <name> is required.');
+      process.exit(1);
+      return;
+    }
+
+    let params = {};
+    try {
+      params = JSON.parse(parsed.paramsJson || '{}');
+    } catch (err) {
+      console.error(`Error: --params-json must be valid JSON: ${err.message}`);
+      process.exit(1);
+      return;
+    }
+    if (params == null || typeof params !== 'object' || Array.isArray(params)) {
+      console.error('Error: --params-json must decode to a JSON object.');
+      process.exit(1);
+      return;
+    }
+
+    const { callAdapterMcpTool } = await import('./adapter-engine.js');
+    const jsonOutput = !!parsed.json || !!options.jsonOutput;
+    const result = await callAdapterMcpTool({
+      tool: parsed.tool,
+      profilePath: parsed.profilePath,
+      mcpTool: parsed.mcpTool,
+      params,
+      envAllow: parsed.envAllow || [],
+      timeoutMs: parsed.timeoutMs || 5000,
+    });
+
+    const output = formatMcpCallResult(result, jsonOutput);
+    if (!result.ok) {
+      if (jsonOutput) {
+        console.log(output);
+      } else {
+        console.error(output);
+      }
+      process.exit(result.exitCode || 1);
+      return;
+    }
+
+    console.log(output);
+    process.exit(result.exitCode || 0);
     return;
   }
 

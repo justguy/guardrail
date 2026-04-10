@@ -209,6 +209,11 @@ cd /Users/adilevinshtein/Documents/dev/Guardian
 node src/cli.js recipe versions <recipe-id>
 ```
 
+- Duplicate-source collision is a separate failure mode from “recipe not found.” If the same recipe id/version is visible from more than one root at the same precedence point, Guardrail fails closed instead of silently choosing one.
+- The common concrete case is running from the Guardrail repo while the same bundled recipe is also installed in `~/.guardrail/recipes` or `node_modules/.guardrail/recipes`.
+- If that happens, do not guess which source Guardrail “meant.” Fix it by changing `cwd` so only the intended root is visible, or by removing the duplicate installed/local copy.
+- For example, if `claude-exec` is bundled in the Guardrail checkout and also installed globally, launching `run --recipe claude-exec` from a target workflow repo is the correct fix; launching it from the Guardrail checkout is what creates the ambiguity.
+
 - Bundled recipes in the local `recipes/` directory are already runnable by id. They do not need a separate `recipe install` step just because `recipe versions` reports no installed versions.
 - `recipe versions <recipe-id>` reports registry-installed versions, not every bundled flat recipe file under local `recipes/`. Use `list` and normal recipe resolution for bundled recipes.
 - To find the bundled Claude recipe specifically, look for `claude-exec` in `node src/cli.js list` output. `node src/cli.js recipe versions claude-exec` may still say `No installed versions` even when the bundled local recipe file exists.
@@ -248,19 +253,40 @@ node src/cli.js recipe install recipes/<recipe-id>.recipe.json
   - path-policy rejection for `..` or absolute paths: choose a cwd where every required path input can be expressed as an allowed relative path
 - Recipe availability is separate from approval reuse. If the recipe resolves but `.guardrail/recipes/<recipe-id>.approved.json` does not exist for the current repo, stop and run an interactive Guardrail approval instead of searching for another install path.
 - Workflow manifests under `.guardrail/workflows/*.approved.json` do not satisfy standalone recipe mode. For `run --recipe`, only the matching recipe manifest under `.guardrail/recipes/` counts.
-- Standalone `run --recipe` can now declare `requires_env`. When a recipe does, pass the matching vars with repeated `--env-allow` flags and treat that env contract as part of approval drift.
-- `requires_auth` preflight still lives in Adapter Mode. Do not go hunting for adapter-only auth flags when a recipe run fails after approval.
+- Standalone `run --recipe` can now declare `requires_env` and bounded `requires_auth`. When a recipe does, pass the matching vars with repeated `--env-allow` flags and treat that env contract as part of approval drift.
+- Recipe-mode `requires_auth` now fails before launch with `missing_auth_prerequisite` instead of letting the downstream tool die late. Do not go hunting for adapter-only auth flags when a recipe run blocks on that reason; fix auth in the selected runtime and rerun the same approved recipe.
 
 AI execution recipes:
 
 - Use recipe mode when an agent needs a bounded wrapper around an external AI CLI instead of calling that tool directly.
+- Communication matrix:
+  - `prompt`: one user message for the current turn. In interactive recipes this is usually `interactive_message`, so later text may change without reapproval only inside the same persistent named session.
+  - `input_files`: stable prompt-bearing context set. Approve the full planned file set up front and keep it stable through the review loop.
+  - `system_prompt`: executable-boundary instruction layer. Keep it fixed for the whole session; changing it triggers reapproval.
+  - `lifecycle=start`: create a fresh bounded session.
+  - `lifecycle=continue` / `attach`: send later turns into the same bounded session identity.
+  - `session_name` / `session_id`: session identity keys. Changing them changes the session boundary.
+  - `lane start`: one-time host-runtime startup for a resident interactive lane.
+  - `lane send`: later turn/message traffic through an existing resident lane.
+  - `lane status`: inspect whether the lane is alive, expired, stale, or stopped before sending again.
+  - `lane stop`: explicit teardown of the resident lane.
+- Fast decision sequence for AI runtimes:
+  - resolve the intended recipe source first; if Guardrail reports a duplicate-source collision, fix `cwd` or remove the duplicate source before doing anything else
+  - prove whether the current shell/runtime can run the downstream CLI directly with the subprocess test
+  - if the current runtime already works, use the direct exec recipe
+  - if the tool only works in a different already-authenticated host runtime, use the transport/orchestration recipe for that runtime
+  - if the workflow needs repeated interaction or repeated monitoring after startup, prefer the resident FIFO lane instead of repeating transport launches
+  - if direct exec and the composed host-runtime path both fail with the same downstream auth error, stop retrying Guardrail shapes and fix tool auth in the target host runtime
+  - if a guarded lane or hosted recipe later fails, check Guardrail-managed status/audit first and use raw host-surface inspection only as a last resort
 - Treat the selected local recipe file (`recipes/<id>.recipe.json`) as the source of truth for required inputs, defaults, enums, and path rules. Do not infer the live shape from old logs, plan docs, or another recipe.
-- Read the recipe description and guardrails for tool-specific auth/runtime notes. Bundled AI recipes may require a pre-authenticated CLI runtime even though recipe mode itself does not perform auth preflight.
+- Read the recipe description and guardrails for tool-specific auth/runtime notes. Bundled AI recipes may require a pre-authenticated CLI runtime, and recipes that declare `requires_auth` now fail before launch with the same bounded `missing_auth_prerequisite` semantics adapter mode uses.
 - Bundled Guardrail recipes now resolve shipped wrapper helpers through internal bundled-wrapper aliases. Do not assume `guardrail_repo` is required just because older examples passed it; keep it only when a specific recipe still declares it as an optional override or compatibility input.
 - If the recipe declares `requires_env`, pass the matching vars with repeated `--env-allow` flags. The approved recipe manifest binds to the resolved env intersection, so widening that list later triggers re-approval.
 - If the recipe declares `input_files`, those files are prompt-bearing context owned by Guardrail. In current bundled wrappers they are read by the wrapper and injected into the initial prompt payload directly, so do not add a second instruction telling the downstream tool to open them just to provide the same context.
 - Keep stable prompt material in `input_files` when the recipe supports it. Inline prompt-bearing inputs marked `review_each_time` require fresh approval every run, even if unchanged.
 - Some AI recipes and templates now distinguish between automation prompts and direct user messages. `approval_mode: "interactive_message"` means later prompt text may change without reapproval only when the run is continuing or attaching to the same persistent named session and the executable boundary is otherwise unchanged. It does not bypass approval for new sessions, changed session identity, changed runtime/tool/model/env/cwd budget, or any `review_each_time` companion input such as `system_prompt`.
+- For a human-in-the-loop multi-doc review loop, approve the full planned document set up front in `input_files`, keep `system_prompt` fixed, and then advance slice by slice with later `interactive_message` follow-ups in the same persistent named session. Do not add or swap prompt files mid-loop unless you intend to trigger fresh approval.
+- For that multi-doc loop, read “one approval” narrowly: one Guardrail approval can cover the approved doc set and session boundary, but an outer host-runtime or sandbox approval may still be needed to start the session in the correct runtime.
 - Bounded reuse now supports list-shaped inputs too, when the recipe or template declares an explicit `approval_mode: "list"` plus a bounded `item_validator` and `max_items`. This is the right shape for approved test-file lists or similar fixed-command multi-file runs.
 - `content_hash` and `review_each_time` are still stronger than bounded list reuse. If a file-bearing input is content-hash bound, changing the file set or file contents still causes drift/reapproval even when the input itself is a list.
 - Some AI recipes include other required prompt-bearing inputs, which can make the recipe effectively approval-per-run. Check the recipe file before assuming unattended reuse is possible.
@@ -273,6 +299,24 @@ AI execution recipes:
 - `lane send` is the per-message step. It reads the host-side key through the Guardrail CLI, signs the request, writes the strict JSON payload into the lane FIFO, and reads the matching response back without reopening the outer transport/runtime hop.
 - `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
 - `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is alive, expired, stale, or stopped and tells you the safest next action (`send`, `start`, or `cleanup`).
+- The practical review-loop shape is:
+  - start one approved Claude session with the full planned doc set in `input_files`
+  - keep `system_prompt` fixed for the entire loop
+  - ask for only the first slice/report
+  - review the output with the user
+  - send the next prompt through the same session or resident lane
+  - repeat until the pre-approved doc set is exhausted
+- Treat that as one Guardrail approval for the doc-set/session contract, not as a promise that no outer host-runtime approval will be needed to reach the authenticated runtime in the first place.
+- Workflow chaining is usually the wrong tool for that specific review loop because it is optimized for bounded multi-step execution, not for pause-and-review interaction between each doc slice.
+- If a guarded lane, transport recipe, or composed host-runtime recipe already exists, debug it through Guardrail-managed signals first:
+  - `lane status`
+  - the current repo audit/log entries for the active trace/session
+  - recipe/lane-managed status outputs
+- Do not jump straight to raw host-surface inspection commands just because a hosted run exited nonzero. Listing host surfaces, selecting runtimes, or capturing host-side output directly are escalation-only fallbacks and can trigger additional user approvals one command at a time.
+- The rule is: bounded surface first, raw surface second. Only fall back to direct host-surface commands when Guardrail does not already expose the needed state.
+- Treat host-runtime selection as an expected routing decision, not as a surprising late-stage workaround. If a tool is authenticated or functional only in a different launcher, terminal surface, remote shell, container, or similar runtime, choose that runtime early and explain it plainly as “this tool must run in the already-working host runtime,” not as a mysterious new failure after several retries.
+- When switching runtimes, name the reason in one sentence: same tool contract, different host runtime. Example: “the guarded Claude wrapper is unchanged; only the host runtime changes because the authenticated terminal surface is where Claude CLI login is currently valid.”
+- Do not present a runtime switch as if Guardrail has changed its approval model or as if the user must infer hidden state. The agent should make the boundary explicit: exec contract stays the same, host runtime changes, and the switch is to avoid repeating known-failing paths in an unauthenticated shell.
 - Resident lane CLI actions also append lifecycle entries to the repo audit log: `lane_start`, `lane_send`, and `lane_stop`. Use `.guardrail/audit.jsonl` when you need to reconstruct whether a lane was started, reused, expired, or explicitly torn down.
 - The resident FIFO bridge is intentionally narrow:
   - request schema is exactly `{ "id": "...", "prompt": "..." }`
@@ -288,8 +332,19 @@ AI execution recipes:
 - Transport/orchestration is a separate boundary. `claude-exec` does not include “launch this in another host runtime” behavior. If the tool must run through a different launcher, terminal surface, remote shell, container, or other host-runtime hop, use a separate transport/orchestration recipe instead of treating that outer hop as part of the exec recipe itself.
 - A transport/orchestration recipe should make the extra hop explicit: create or select the target surface, execute a bounded composed exec contract there or, if composition is not available yet, send a bounded inner `guardrail run --recipe <exec-recipe> ...` command, and capture resulting state. It does not bypass the inner exec recipe approval semantics, `review_each_time`, or auth/runtime requirements.
 - Today, if a transport/orchestration recipe launches an inner `guardrail run`, the outer transport layer and inner exec layer are separate approval units with separate manifests. Do not assume nested runs collapse into one approval automatically.
+- If that transport/orchestration path later fails, do not immediately switch to ad hoc host-surface commands for investigation. Check the bounded Guardrail status path first, because raw host-surface inspection is itself another approval-bearing boundary.
 - Bundled `cmux-claude-exec` now uses the composed single-approval path instead of a nested inner Guardrail run. Use it when Claude must run inside that terminal surface and you want one approval that still binds the composed `claude-exec` trust/env/input/session semantics honestly.
+- Diagnosis rule for host-runtime auth failures:
+  - if direct exec in the current shell fails with a tool-auth error such as `Not logged in`
+  - and the composed host-runtime recipe for the same tool fails with the same tool-auth error
+  - stop treating it as Guardrail approval drift or recipe failure
+  - conclude that the target host runtime is missing tool auth
+  - next step: repair login in that exact host runtime, then rerun the same approved Guardrail contract
+- Wording rule for those cases:
+  - say `blocked by tool auth in the host runtime`
+  - do not just say `blocked` without naming whether the block is Guardrail policy or downstream tool auth
 - Repeated reuse of the same host-runtime lane is still a separate problem. Current composition gives one approval per composed run, not "approve the lane once and trigger it forever." If the workflow needs that shape, treat it as a not-yet-shipped resident transport/session feature rather than assuming the composed recipe already covers it.
+- For repeated interaction or repeated monitoring in the same authenticated host runtime, prefer the resident FIFO lane over repeated transport recipe launches or repeated raw host-surface inspection. The FIFO lane exists specifically to avoid paying another approval-bearing host-surface hop for every send/capture/debug turn.
 - Path-bearing inputs like `guardrail_repo`, `working_dir`, `input_files`, `add_dirs`, or output-file paths usually use relative-path policy and often block `..`. If Guardrail lives in one repo and the target run lives in a sibling repo, choose a current working directory where both can be named without `..` segments.
 - Omit optional tool-capability knobs unless the caller actually needs them. Extra inputs widen the approval surface and create more drift opportunities.
 - When a structured command needs multiple files, use an exact `{{inputs.some_list}}` placeholder in the args array so the validated list expands into multiple structured argv entries. Do not fall back to a freeform string of space-separated paths.
@@ -414,13 +469,15 @@ Adapter mode operator rules:
 - `adapter run` builds on the selected profile and the underlying supervisor contract. If the profile/runtime does not support the interactive approval path you need, stop and report that instead of guessing hidden flags.
 - MCP profiles are still blocked at runtime, but they may now declare an explicit `mcp_transport` contract. Treat that as design-gate metadata only until Guardrail ships actual MCP transport support.
 - If a blocked MCP run mentions a declared transport, that means the profile shape was recognized; it does not mean the MCP runtime is live.
-- The one shipped MCP exception is `adapter probe --tool <name>`. It is an explicit discovery-only path for MCP `stdio` profiles: Guardrail approves and launches the declared transport, performs `initialize` plus `tools/list`, and reports the discovered tool inventory. It does not enable general MCP execution or make `adapter run` live for MCP profiles.
+- The shipped MCP exceptions are additive and explicit, not ambient. `adapter probe --tool <name>` is the discovery-only path for MCP `stdio` profiles: Guardrail approves and launches the declared transport, performs `initialize` plus `tools/list`, and reports the discovered tool inventory. `adapter mcp call --tool <name> --mcp-tool <tool> --params-json <json>` is the first bounded runtime path: it performs exactly one `tools/call` over the declared transport with explicit tool name and JSON params.
+- Neither of those exceptions makes `adapter run` live for MCP profiles. `adapter run` still blocks on MCP profiles, so do not describe the MCP runtime as “generally supported” yet.
 
 Useful adapter subcommands:
 
 - `guardrail adapter run --tool <name> -- <command> [args...]`
 - `guardrail adapter run --profile <profile-path> -- <command> [args...]`
 - `guardrail adapter probe --tool <name>`
+- `guardrail adapter mcp call --tool <name> --mcp-tool <tool> --params-json <json>`
 - `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`
 - `guardrail adapter profile install github://owner/repo/path.json@<sha>`
 - `guardrail adapter profile list`
@@ -433,8 +490,8 @@ Bounded auth preflight behavior:
 - The same env/auth preflight applies to `adapter probe` before the MCP stdio transport is launched. If the probe blocks on `missing_auth_mapping` or `missing_auth_prerequisite`, fix the runtime and rerun the probe; do not assume the probe can bypass adapter auth requirements.
 - Auth preflight returns blocked status and stops. It does not log the agent in for you; authentication must already exist in the same runtime (`claude auth login` / `gh auth status/login`).
 - Explicit env mapping may still be insufficient for CLIs whose login state lives in OS-managed secure stores or other process-identity-gated locations. In those cases the practical fix is to run Guardrail from the same working launcher/runtime, or to redo login from the exact shell/runtime that will later launch Guardrail.
-- This adapter auth-preflight section explains the shipped `requires_env` / `requires_auth` behavior. Standalone recipe mode does not yet run the same preflight automatically, so recipe-mode agents must rely on the selected recipe's auth/runtime notes plus direct tool checks in the Guardrail runtime.
-- MCP protocol profiles are intentionally blocked for `adapter run` in v0.2. Use `adapter probe` only for bounded discovery, or use a supported non-MCP profile shape for actual execution.
+- The same bounded `requires_env` / `requires_auth` preflight now applies to standalone recipe mode too. For composed host-runtime recipes, env mapping is checked before launch and the child tool-auth preflight runs again inside the selected host runtime before the downstream CLI starts.
+- MCP protocol profiles are intentionally blocked for `adapter run` in v0.2. Use `adapter probe` for bounded discovery or `adapter mcp call` for one explicit `tools/call`; do not reinterpret arbitrary shell commands as MCP requests.
 - Bare-name adapter-profile install is still intentionally blocked. The only shipped A1 groundwork is signed-index verification through `adapter profile index verify <path> --index-key <pubkey.pem>`, which is for local/team validation of index publishing rather than public-name discovery.
 
 Host runtime decision rule:

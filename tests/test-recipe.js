@@ -129,6 +129,20 @@ describe('Recipe: Schema Validation', () => {
     );
   });
 
+  it('validates requires_auth as a bounded auth requirement array', () => {
+    assert.doesNotThrow(() => validateRecipe(makeRecipe({
+      requires_auth: [{ type: 'claude_login', env: ['HOME'], message: 'Login required' }],
+    })));
+    assert.throws(
+      () => validateRecipe(makeRecipe({ requires_auth: [{ type: 'bogus' }] })),
+      (err) => err.errors.some(e => e.includes('requires_auth.type')),
+    );
+    assert.throws(
+      () => validateRecipe(makeRecipe({ requires_auth: [{ type: 'claude_login', env: ['bad-var'] }] })),
+      (err) => err.errors.some(e => e.includes('requires_auth.env')),
+    );
+  });
+
   it('risk_level must be low, medium, or high', () => {
     assert.throws(
       () => validateRecipe(makeRecipe({ risk_level: 'critical' })),
@@ -334,6 +348,12 @@ describe('Recipe: Content Hashing', () => {
     const r2 = makeRecipe({
       steps: [{ id: 'other', description: 'other', run: { command: 'ls' } }],
     });
+    assert.notEqual(hashRecipe(r1), hashRecipe(r2));
+  });
+
+  it('different requires_auth declarations produce different hash', () => {
+    const r1 = makeRecipe();
+    const r2 = makeRecipe({ requires_auth: [{ type: 'claude_login', env: ['HOME'] }] });
     assert.notEqual(hashRecipe(r1), hashRecipe(r2));
   });
 

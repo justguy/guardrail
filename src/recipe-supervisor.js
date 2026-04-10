@@ -37,6 +37,7 @@ import {
   prepareSessionEnforcement,
   persistSessionContractAfterSuccess,
 } from './agent-session-enforce.js';
+import { checkEnvMappings, checkAuthPrerequisites, deriveAuthEnvRequirements } from './adapter-auth.js';
 
 function buildResult(runId, status, opts = {}) {
   return {
@@ -317,6 +318,77 @@ function formatComposedReviewEachTimeReason(stepId, record) {
   return `Fresh approval required for composed exec inputs: step "${stepId}" -> ${record.recipe.id}: ${keys.join(', ')}`;
 }
 
+async function preflightRecipeAuthRuntime({
+  recipe,
+  envAllow,
+  cwd,
+  authCheckFn,
+  currentEnv = process.env,
+  runAuthCheck = true,
+}) {
+  const requiredEnv = recipe.requires_env || [];
+  const authRequirements = recipe.requires_auth || [];
+  const combinedRequiredEnv = [
+    ...new Set([
+      ...requiredEnv,
+      ...deriveAuthEnvRequirements(authRequirements, currentEnv),
+    ]),
+  ];
+
+  if (requiredEnv.length > 0 && envAllow.length === 0) {
+    return {
+      ok: false,
+      code: 'missing_auth_mapping',
+      reason: [
+        'Recipe requires explicit --env-allow for environment access.',
+        `Required variables: ${requiredEnv.join(', ')}`,
+      ].join('\n'),
+    };
+  }
+
+  const envCheck = checkEnvMappings(requiredEnv, envAllow, {
+    authRequirements,
+    currentEnv,
+  });
+  if (!envCheck.ok) {
+    return {
+      ok: false,
+      code: envCheck.code,
+      reason: `${envCheck.code}: ${envCheck.message}`,
+      missing: envCheck.missing || [],
+    };
+  }
+
+  if (!runAuthCheck || authRequirements.length === 0) {
+    return {
+      ok: true,
+      code: null,
+      reason: null,
+      envIntersection: computeRecipeEnvIntersection(combinedRequiredEnv, envAllow),
+    };
+  }
+
+  const authCheck = await checkAuthPrerequisites(authRequirements, {
+    cwd,
+    checkRunner: authCheckFn,
+  });
+  if (!authCheck.ok) {
+    const detail = authCheck.detail ? ` Detail: ${authCheck.detail}` : '';
+    return {
+      ok: false,
+      code: authCheck.code,
+      reason: `${authCheck.code}: ${authCheck.message}${detail}`,
+    };
+  }
+
+  return {
+    ok: true,
+    code: null,
+    reason: null,
+    envIntersection: computeRecipeEnvIntersection(combinedRequiredEnv, envAllow),
+  };
+}
+
 function buildComposedManifestRecord(stepId, recipe, recipeHash, riskAssessment, resolvedInputs, options = {}) {
   const manifest = createRecipeManifest(recipe, recipeHash, riskAssessment, resolvedInputs, options);
   return {
@@ -353,7 +425,7 @@ function printComposedRecipeSummary(records = []) {
   }
 }
 
-function prepareComposedRecipeBindings({
+async function prepareComposedRecipeBindings({
   recipe,
   resolvedInputs,
   resolvedCwd,
@@ -362,6 +434,7 @@ function prepareComposedRecipeBindings({
   envAllow,
   trustClass,
   stateDir,
+  authCheckFn,
 }) {
   const records = [];
   const byStepId = {};
@@ -386,22 +459,16 @@ function prepareComposedRecipeBindings({
       cwd: resolvedCwd,
     });
 
-    const childRequiredEnv = childRecipe.requires_env || [];
-    if (childRequiredEnv.length > 0 && envAllow.length === 0) {
+    const childPreflight = await preflightRecipeAuthRuntime({
+      recipe: childRecipe,
+      envAllow,
+      cwd: resolvedCwd,
+      authCheckFn,
+      runAuthCheck: false,
+    });
+    if (!childPreflight.ok) {
       throw new Error(
-        [
-          `Composed exec recipe "${childRecipe.id}" requires explicit --env-allow for environment access.`,
-          `Required variables: ${childRequiredEnv.join(', ')}`,
-        ].join('\n'),
-      );
-    }
-
-    const childEnvResult = computeRecipeEnvIntersection(childRequiredEnv, envAllow);
-    if (childEnvResult.denied.length > 0) {
-      throw new Error(
-        childEnvResult.denied.map((name) =>
-          `Composed exec recipe "${childRecipe.id}" requires ${name} but your env allow list does not include it.`,
-        ).join('\n'),
+        `Composed exec recipe "${childRecipe.id}" failed preflight: ${childPreflight.reason}`,
       );
     }
 
@@ -438,7 +505,7 @@ function prepareComposedRecipeBindings({
       resolvedInputs: childResolvedInputs,
       flaggedInputs: childFlaggedInputs,
       inputContentHashes: childInputContentHashes,
-      envIntersection: childEnvResult.intersection,
+      envIntersection: childPreflight.envIntersection?.intersection || [],
       riskAssessment: childRiskAssessment,
       sessionEnforcement: childSessionEnforcement,
       manifestRecord: buildComposedManifestRecord(
@@ -453,7 +520,7 @@ function prepareComposedRecipeBindings({
           sourcePath: childSourcePath,
           requestedVersion: childRequestedVersion,
           allowUnverified,
-          envIntersection: childEnvResult.intersection,
+          envIntersection: childPreflight.envIntersection?.intersection || [],
           inputContentHashes: childInputContentHashes,
         },
       ),
@@ -509,6 +576,7 @@ export async function runRecipeSupervisor(options) {
     progressSink = null,
     executorFn = executeRecipe,
     promptApprovalFn = promptApproval,
+    authCheckFn = null,
   } = options;
 
   const runId = generateRunId();
@@ -582,31 +650,25 @@ export async function runRecipeSupervisor(options) {
       return emitFinalResult('validation_failed', { ...resultOpts, reason: err.message });
     }
 
-    const requiredEnv = recipe.requires_env || [];
-    if (requiredEnv.length > 0 && envAllow.length === 0) {
-      const reason = [
-        'Recipe requires explicit --env-allow for environment access.',
-        `Required variables: ${requiredEnv.join(', ')}`,
-      ].join('\n');
-      logger.error('recipe_env_handshake_missing_allow', { recipeId: recipe.id, required: requiredEnv });
+    const preflight = await preflightRecipeAuthRuntime({
+      recipe,
+      envAllow,
+      cwd: resolvedCwd,
+      authCheckFn,
+    });
+    if (!preflight.ok) {
+      logger.error('recipe_auth_preflight_failed', {
+        recipeId: recipe.id,
+        code: preflight.code,
+        reason: preflight.reason,
+      });
       if (!jsonOutput) {
-        printResult({ success: false, exitCode: 1, message: reason });
+        printResult({ success: false, exitCode: 1, message: preflight.reason });
       }
-      return emitFinalResult('policy_violation', { ...resultOpts, reason });
+      return emitFinalResult('policy_violation', { ...resultOpts, reason: preflight.reason });
     }
 
-    const envResult = computeRecipeEnvIntersection(requiredEnv, envAllow);
-    if (envResult.denied.length > 0) {
-      const reason = envResult.denied.map((name) =>
-        `Recipe requires ${name} but your env allow list does not include it.`,
-      ).join('\n');
-      logger.error('recipe_env_handshake_denied', { recipeId: recipe.id, denied: envResult.denied });
-      if (!jsonOutput) {
-        printResult({ success: false, exitCode: 1, message: reason });
-      }
-      return emitFinalResult('policy_violation', { ...resultOpts, reason });
-    }
-
+    const envResult = preflight.envIntersection;
     for (const warning of envResult.warnings) {
       logger.warn('recipe_env_warning', { recipeId: recipe.id, warning });
     }
@@ -659,7 +721,7 @@ export async function runRecipeSupervisor(options) {
     }
 
     try {
-      composedBindings = prepareComposedRecipeBindings({
+      composedBindings = await prepareComposedRecipeBindings({
         recipe,
         resolvedInputs,
         resolvedCwd,
@@ -668,6 +730,7 @@ export async function runRecipeSupervisor(options) {
         envAllow,
         trustClass,
         stateDir,
+        authCheckFn,
       });
     } catch (err) {
       const reason = err.message || String(err);

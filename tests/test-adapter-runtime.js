@@ -23,6 +23,7 @@ import {
   runAdapter,
   renderResponse,
   probeAdapterMcpStdio,
+  callAdapterMcpTool,
 } from '../src/adapter-engine.js';
 import {
   createShim,
@@ -86,6 +87,32 @@ function writeFakeMcpServer(dir, mode = 'success') {
       }
       if (message.method === 'tools/list') {
         send({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'echo' }, { name: 'sum' }] } });
+        return;
+      }
+      if (message.method === 'tools/call') {
+        if (${JSON.stringify(mode)} === 'mcp-call-mismatched-id') {
+          send({ jsonrpc: '2.0', id: 'wrong-call-id', result: { content: [{ type: 'text', text: 'bad-id' }] } });
+          return;
+        }
+        if (message.params?.name === 'echo') {
+          send({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: {
+              content: [{ type: 'text', text: String(message.params?.arguments?.text || '') }],
+              isError: false,
+            },
+          });
+          return;
+        }
+        send({
+          jsonrpc: '2.0',
+          id: message.id,
+          result: {
+            content: [{ type: 'text', text: 'unknown tool' }],
+            isError: true,
+          },
+        });
       }
     }
     process.stdin.on('data', (chunk) => {
@@ -461,6 +488,96 @@ describe('MCP stdio discovery probe', () => {
 
     const result = await probeAdapterMcpStdio({
       profilePath,
+      supervisorFn: runProbeHelperSupervisor,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.adapterResult.guardrail.code, 'PROTOCOL_ERROR');
+    assert.ok(result.adapterResult.guardrail.reason.includes('mismatched request_id'));
+  });
+});
+
+describe('MCP stdio bounded tool call', () => {
+  it('executes one tools/call against the bounded fake stdio server', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeMcpServer(dir, 'success');
+    const profile = {
+      version: '1.0.0',
+      tool: 'test-mcp-call',
+      description: 'generic mcp profile under test',
+      schema_target: 'adapter-result/v1',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: process.execPath,
+        args: [serverPath],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+      intercept: {
+        command: '$.command',
+        args: '$.args',
+        cwd: '$.cwd',
+      },
+      response: {
+        format: 'json',
+        blocked: { status: 'blocked', reason: '$.guardrail.reason' },
+      },
+      exit_codes: { success: 0, blocked: 12, failed: 1 },
+      defaults: { non_interactive: true, json_output: true },
+    };
+    const profilePath = join(dir, 'test-mcp-call.json');
+    writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+
+    const result = await callAdapterMcpTool({
+      profilePath,
+      mcpTool: 'echo',
+      params: { text: 'hi' },
+      supervisorFn: runProbeHelperSupervisor,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.call.tool, 'echo');
+    assert.equal(result.call.result.content[0].text, 'hi');
+  });
+
+  it('fails closed when tool-call request correlation does not match', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeMcpServer(dir, 'mcp-call-mismatched-id');
+    const profile = {
+      version: '1.0.0',
+      tool: 'test-mcp-call',
+      description: 'generic mcp profile under test',
+      schema_target: 'adapter-result/v1',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: process.execPath,
+        args: [serverPath],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+      intercept: {
+        command: '$.command',
+        args: '$.args',
+        cwd: '$.cwd',
+      },
+      response: {
+        format: 'json',
+        blocked: { status: 'blocked', reason: '$.guardrail.reason' },
+      },
+      exit_codes: { success: 0, blocked: 12, failed: 1 },
+      defaults: { non_interactive: true, json_output: true },
+    };
+    const profilePath = join(dir, 'test-mcp-call.json');
+    writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+
+    const result = await callAdapterMcpTool({
+      profilePath,
+      mcpTool: 'echo',
+      params: { text: 'hi' },
       supervisorFn: runProbeHelperSupervisor,
     });
 

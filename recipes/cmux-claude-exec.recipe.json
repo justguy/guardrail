@@ -1,7 +1,7 @@
 {
   "id": "cmux-claude-exec",
   "name": "CMUX Claude Exec",
-  "description": "Launch a fresh cmux workspace, execute the bundled claude-exec recipe directly inside that terminal runtime under one composed Guardrail approval, and capture the resulting pane state. This recipe keeps the cmux host-runtime hop explicit while binding the inner Claude exec schema, trust, env, content-hash, and review_each_time semantics into the same approval unit.",
+  "description": "Launch a fresh cmux workspace, execute the bundled claude-exec recipe directly inside that terminal runtime under one composed Guardrail approval, and capture the resulting pane state. This recipe keeps the host-runtime hop explicit while binding the inner Claude exec schema, trust, env, content-hash, review_each_time semantics, and hosted Claude auth preflight into the same approval unit. If the hosted Claude run fails with the same auth error as direct claude-exec, the fix is login in that target host runtime, not more Guardrail workaround hunting.",
   "version": "1.0.0",
   "author": {
     "name": "Guardrail Team",
@@ -62,7 +62,7 @@
     },
     "input_files": {
       "type": "string",
-      "description": "One or more relative file paths resolved from working_dir for the composed claude-exec layer. Repeat --input input_files=... to pass multiple files.",
+      "description": "One or more relative file paths resolved from working_dir for the composed claude-exec layer. Repeat --input input_files=... to pass multiple files. For a multi-doc human review loop, approve the full planned file set up front and keep that set stable while later prompts iterate in the same persistent session.",
       "approval_mode": "list",
       "content_hash": true,
       "base_dir_input": "working_dir",
@@ -237,9 +237,12 @@
     "constraints": [
       "This recipe keeps the cmux host-runtime hop explicit, but composes the bundled claude-exec recipe into the same Guardrail approval unit instead of launching a nested inner guardrail run",
       "The wrapper creates a fresh workspace, executes a bounded composed contract, waits for a hosted exit sentinel, and captures pane output without shell-mode recipe steps",
-      "The composed claude-exec layer still owns its trust boundary, session contract behavior, env handshake, and Claude CLI auth/runtime requirements. `prompt` is interactive_message/session-bound; `system_prompt` remains review_each_time",
+      "The composed claude-exec layer still owns its trust boundary, session contract behavior, env handshake, and Claude CLI auth/runtime requirements. The cmux wrapper runs the child recipe's bounded auth preflight inside the hosted runtime before launching Claude. `prompt` is interactive_message/session-bound; `system_prompt` remains review_each_time",
+      "For a human-reviewed multi-doc loop, approve the full doc set up front in input_files, keep system_prompt fixed, use this recipe only to reach the authenticated host runtime, and prefer the resident lane for later review/continue turns",
+      "If the hosted run fails with the same downstream auth error as direct claude-exec, diagnose that as missing tool auth in the target host runtime rather than Guardrail drift",
       "socket_path is exact-match approved because it addresses a specific terminal control socket",
-      "One approval manifest covers both the explicit transport layer and the composed claude-exec layer; drift in either layer blocks reuse"
+      "One approval manifest covers both the explicit transport layer and the composed claude-exec layer; drift in either layer blocks reuse",
+      "For repeated interaction or repeated monitoring after startup, prefer the resident FIFO lane instead of repeated transport launches or repeated raw host-surface inspection commands"
     ],
     "invariants": [
       "mode: structured",

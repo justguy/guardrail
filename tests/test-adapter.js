@@ -10,6 +10,7 @@ import {
   renderResponse,
   runAdapter,
   probeAdapterMcpStdio,
+  callAdapterMcpTool,
 } from '../src/adapter-engine.js';
 import { runStdinAdapter } from '../src/adapter-stdin.js';
 
@@ -586,6 +587,24 @@ describe('parseAdapterArgs', async () => {
     assert.deepEqual(r.envAllow, ['HOME', 'XDG_CONFIG_HOME']);
   });
 
+  it('parses adapter mcp call with tool, params, and repeated --env-allow flags', () => {
+    const r = parseAdapterArgs([
+      'mcp', 'call',
+      '--tool', 'cline',
+      '--mcp-tool', 'echo',
+      '--params-json', '{"text":"hi"}',
+      '--env-allow', 'HOME',
+      '--env-allow', 'XDG_CONFIG_HOME',
+      '--timeout-ms', '2500',
+    ]);
+    assert.equal(r.subcommand, 'adapter-mcp-call');
+    assert.equal(r.tool, 'cline');
+    assert.equal(r.mcpTool, 'echo');
+    assert.equal(r.paramsJson, '{"text":"hi"}');
+    assert.equal(r.timeoutMs, '2500');
+    assert.deepEqual(r.envAllow, ['HOME', 'XDG_CONFIG_HOME']);
+  });
+
   it('parses adapter shim --tool aider --commands npm,git', () => {
     const r = parseAdapterArgs(['shim', '--tool', 'aider', '--commands', 'npm,git']);
     assert.equal(r.subcommand, 'adapter-shim');
@@ -740,6 +759,128 @@ describe('probeAdapterMcpStdio', () => {
       profilePath,
       supervisorFn: async () => ({
         runId: 'gr-probe',
+        status: 'success',
+        reason: 'ok',
+        exitCode: 0,
+        worker: { launched: true, stdout: '{not-json', stderr: '' },
+        telemetry: { durationMs: 3 },
+      }),
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.adapterResult.guardrail.code, 'PROTOCOL_ERROR');
+  });
+});
+
+describe('callAdapterMcpTool', () => {
+  it('rejects non-mcp profiles', async () => {
+    const dir = makeTempDir();
+    const profilePath = writeProfile(dir, makeJsonProfile());
+
+    const result = await callAdapterMcpTool({ profilePath, mcpTool: 'echo', params: {} });
+    assert.equal(result.ok, false);
+    assert.equal(result.adapterResult.guardrail.code, 'UNSUPPORTED');
+  });
+
+  it('enforces env/auth preflight before launching the helper', async () => {
+    const dir = makeTempDir();
+    const profilePath = writeProfile(dir, makeJsonProfile({
+      tool: 'call-mcp',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: 'node',
+        args: ['server.js'],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+      requires_env: ['HOME'],
+    }));
+
+    let supervisorCalled = false;
+    const result = await callAdapterMcpTool({
+      profilePath,
+      mcpTool: 'echo',
+      params: {},
+      supervisorFn: async () => {
+        supervisorCalled = true;
+        return {};
+      },
+    });
+
+    assert.equal(supervisorCalled, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.adapterResult.guardrail.code, 'MISSING_AUTH_MAPPING');
+  });
+
+  it('returns parsed MCP tool call payload on success', async () => {
+    const dir = makeTempDir();
+    const profilePath = writeProfile(dir, makeJsonProfile({
+      tool: 'call-mcp',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: 'node',
+        args: ['server.js'],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+    }));
+
+    const result = await callAdapterMcpTool({
+      profilePath,
+      mcpTool: 'echo',
+      params: { text: 'hi' },
+      supervisorFn: async () => ({
+        runId: 'gr-mcp-call',
+        status: 'success',
+        reason: 'ok',
+        exitCode: 0,
+        worker: {
+          launched: true,
+          stdout: JSON.stringify({
+            ok: true,
+            call: {
+              tool: 'echo',
+              transport: { type: 'stdio', command: 'node', args: ['server.js'], cwd: null },
+              result: { content: [{ type: 'text', text: 'hi' }] },
+              isError: false,
+            },
+          }),
+          stderr: '',
+        },
+        telemetry: { durationMs: 3 },
+      }),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.call.tool, 'echo');
+    assert.deepEqual(result.call.result, { content: [{ type: 'text', text: 'hi' }] });
+  });
+
+  it('fails closed when helper output is malformed', async () => {
+    const dir = makeTempDir();
+    const profilePath = writeProfile(dir, makeJsonProfile({
+      tool: 'call-mcp',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: 'node',
+        args: ['server.js'],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+    }));
+
+    const result = await callAdapterMcpTool({
+      profilePath,
+      mcpTool: 'echo',
+      params: { text: 'hi' },
+      supervisorFn: async () => ({
+        runId: 'gr-mcp-call',
         status: 'success',
         reason: 'ok',
         exitCode: 0,

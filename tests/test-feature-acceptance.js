@@ -797,6 +797,14 @@ describe('README Feature: Adapter System', () => {
     assert.ok(!raw.includes('MCP protocol is not yet supported in v0.2.'), raw);
   });
 
+  it('guardrail adapter mcp call routes MCP profiles into the bounded call path instead of the hard MCP block', () => {
+    const r = run(`${CLI} adapter mcp call --tool cline --mcp-tool echo --params-json '{"text":"hi"}'`);
+    const raw = [r.stdout, r.stderr].filter(Boolean).join('\n');
+    assert.ok(r.exitCode !== 0);
+    assert.ok(raw.includes('No approved manifest found'), raw);
+    assert.ok(!raw.includes('MCP protocol is not yet supported in v0.2.'), raw);
+  });
+
   it('adapter preflight enforces requires_env before execution', async () => {
     const profilePath = writeAdapterProfile({
       requires_env: ['BOUND_TOKEN'],

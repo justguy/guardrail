@@ -6,6 +6,7 @@ import { createAuditLog } from './audit.js';
 import { enforceChannel } from './recipe-channel.js';
 import { generateRunId } from './logger.js';
 import { resolveBundledWrapperPath } from './bundled-wrapper-path.js';
+import { deriveAuthEnvRequirements } from './adapter-auth.js';
 
 // ---------------------------------------------------------------------------
 // Dangerous command patterns (blocked at runtime)
@@ -146,7 +147,10 @@ export function dryRun(recipe, resolvedInputs, opts = {}) {
 }
 
 function buildRecipeEnvPolicy(recipe, envAllow = []) {
-  const requiredEnv = recipe.requires_env || [];
+  const requiredEnv = [
+    ...(recipe.requires_env || []),
+    ...deriveAuthEnvRequirements(recipe.requires_auth || []),
+  ];
   if (requiredEnv.length === 0 && (!Array.isArray(envAllow) || envAllow.length === 0)) {
     return undefined;
   }
@@ -169,6 +173,9 @@ function buildStructuredRecipeStepContract(recipe, step, resolvedInputs, cwd, en
     cwd,
     mode: 'structured',
     envPolicy: buildRecipeEnvPolicy(recipe, envAllow),
+    authPreflight: {
+      requirements: recipe.requires_auth || [],
+    },
   });
 }
 
@@ -198,6 +205,7 @@ function buildComposedTransportContract(parentRecipe, step, resolvedInputs, prep
     args: childContract.args,
     cwd: childContract.cwd,
     envPolicy: childContract.envPolicy,
+    authPreflight: childContract.authPreflight,
   }), 'utf8').toString('base64');
 
   const transportContract = createContract({

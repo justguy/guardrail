@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { resolveAuthCheckDefinition } from './adapter-auth.js';
 
 const EXIT_SENTINEL_PREFIX = '[guardrail-exec-exit:';
 
@@ -13,6 +14,10 @@ function shellQuote(value) {
   const text = String(value ?? '');
   if (text === '') return "''";
   return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+function escapeRegex(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export function parseWrapperArgs(argv) {
@@ -107,6 +112,12 @@ export function decodeExecContract(encoded) {
   if (typeof parsed.cwd !== 'string' || parsed.cwd.trim() === '') {
     throw new Error('Exec contract requires a cwd.');
   }
+  if (parsed.authPreflight !== undefined) {
+    const requirements = parsed.authPreflight?.requirements;
+    if (!Array.isArray(requirements) || requirements.some((entry) => !entry || typeof entry !== 'object')) {
+      throw new Error('Exec contract authPreflight.requirements must be an array of objects when present.');
+    }
+  }
 
   return parsed;
 }
@@ -156,9 +167,16 @@ export function renderExecCommand(contract = {}) {
   return `cd ${shellQuote(contract.cwd)} && ${renderedCommand}`;
 }
 
-export function buildWrappedSurfaceCommand(contract = {}) {
+function buildWrappedRenderedCommand(rendered, token = null) {
+  const sentinel = token
+    ? `${EXIT_SENTINEL_PREFIX}${token}:%s]`
+    : `${EXIT_SENTINEL_PREFIX}%s]`;
+  return `${rendered}; __guardrail_status=$?; printf '\\n${sentinel}\\n' "$__guardrail_status"`;
+}
+
+export function buildWrappedSurfaceCommand(contract = {}, token = null) {
   const rendered = renderExecCommand(contract);
-  return `${rendered}; __guardrail_status=$?; printf '\\n${EXIT_SENTINEL_PREFIX}%s]\\n' "$__guardrail_status"`;
+  return buildWrappedRenderedCommand(rendered, token);
 }
 
 export function parseWorkspaceRef(text = '') {
@@ -177,10 +195,19 @@ export function parseSurfaceRef(text = '') {
   return match[0];
 }
 
-export function extractExecExitCode(text = '') {
-  const match = String(text).match(/\[guardrail-exec-exit:(\d+)\]/);
+export function extractExecExitCode(text = '', token = null) {
+  const pattern = token
+    ? new RegExp(`\\[guardrail-exec-exit:${escapeRegex(token)}:(\\d+)\\]`)
+    : /\[guardrail-exec-exit:(\d+)\]/;
+  const match = String(text).match(pattern);
   if (!match) return null;
   return Number.parseInt(match[1], 10);
+}
+
+function stripExitSentinels(text = '') {
+  return String(text)
+    .replace(/\n?\[guardrail-exec-exit:[^\]]+\]\n?/g, '\n')
+    .trim();
 }
 
 async function runCmuxCommand(args, options = {}) {
@@ -235,26 +262,9 @@ async function capturePane(runner, socketPath, workspace, surface, captureLines)
   return (captureResult.stdout || captureResult.stderr || '').trim();
 }
 
-export async function runCmuxClaudeRecipe(rawOptions, deps = {}) {
-  const options = normalizeOptions(rawOptions);
-  const runner = deps.runner || runCmuxCommand;
-  const wait = deps.wait || sleep;
-
-  const workspaceResult = await runner(
-    ['new-workspace', '--name', options.workspaceName, '--cwd', options.launchCwd],
-    { socketPath: options.socketPath },
-  );
-  const workspace = parseWorkspaceRef(workspaceResult.stdout || workspaceResult.stderr);
-
-  const panelsResult = await runner(
-    ['list-panels', '--workspace', workspace],
-    { socketPath: options.socketPath },
-  );
-  const surface = parseSurfaceRef(panelsResult.stdout || panelsResult.stderr);
-
-  const execCommand = buildWrappedSurfaceCommand(options.execContract);
+async function runHostedSurfaceCommand(runner, wait, options, workspace, surface, commandText, token) {
   await runner(
-    ['send', '--workspace', workspace, '--surface', surface, `${execCommand}\n`],
+    ['send', '--workspace', workspace, '--surface', surface, `${commandText}\n`],
     { socketPath: options.socketPath, captureOutput: false },
   );
 
@@ -274,7 +284,7 @@ export async function runCmuxClaudeRecipe(rawOptions, deps = {}) {
       surface,
       options.captureLines,
     );
-    execExitCode = extractExecExitCode(capture);
+    execExitCode = extractExecExitCode(capture, token);
     if (execExitCode !== null) break;
     await wait(options.pollIntervalMs);
   }
@@ -282,6 +292,76 @@ export async function runCmuxClaudeRecipe(rawOptions, deps = {}) {
   if (execExitCode === null) {
     throw new Error(`Timed out waiting for hosted exec completion after ${options.waitTimeoutMs}ms.`);
   }
+
+  return { capture, execExitCode };
+}
+
+function buildHostedAuthCommand(contract = {}, requirement) {
+  const definition = resolveAuthCheckDefinition(requirement);
+  if (!definition) {
+    throw new Error(`Unsupported auth prerequisite type for hosted exec: ${requirement?.type ?? '<unknown>'}`);
+  }
+
+  const envPrefix = buildEnvPrefix(contract.envPolicy);
+  const renderedArgs = Array.isArray(definition.args) ? definition.args.map(shellQuote).join(' ') : '';
+  const rendered = `cd ${shellQuote(contract.cwd)} && ${envPrefix}${shellQuote(definition.command)}${renderedArgs ? ` ${renderedArgs}` : ''}`;
+  return {
+    commandText: rendered,
+    failureMessage: definition.message,
+  };
+}
+
+export async function runCmuxClaudeRecipe(rawOptions, deps = {}) {
+  const options = normalizeOptions(rawOptions);
+  const runner = deps.runner || runCmuxCommand;
+  const wait = deps.wait || sleep;
+  const emitStdout = deps.emitStdout !== false;
+
+  const workspaceResult = await runner(
+    ['new-workspace', '--name', options.workspaceName, '--cwd', options.launchCwd],
+    { socketPath: options.socketPath },
+  );
+  const workspace = parseWorkspaceRef(workspaceResult.stdout || workspaceResult.stderr);
+
+  const panelsResult = await runner(
+    ['list-panels', '--workspace', workspace],
+    { socketPath: options.socketPath },
+  );
+  const surface = parseSurfaceRef(panelsResult.stdout || panelsResult.stderr);
+
+  const requirements = options.execContract.authPreflight?.requirements || [];
+  for (let index = 0; index < requirements.length; index += 1) {
+    const requirement = requirements[index];
+    const token = `auth-${index}`;
+    const { commandText, failureMessage } = buildHostedAuthCommand(options.execContract, requirement);
+    const authResult = await runHostedSurfaceCommand(
+      runner,
+      wait,
+      options,
+      workspace,
+      surface,
+      buildWrappedRenderedCommand(commandText, token),
+      token,
+    );
+    if (authResult.execExitCode !== 0) {
+      const detail = stripExitSentinels(authResult.capture);
+      throw new Error(`missing_auth_prerequisite: ${failureMessage}${detail ? ` Detail: ${detail}` : ''}`);
+    }
+  }
+
+  const execCommand = buildWrappedSurfaceCommand(options.execContract, 'main');
+  const execResult = await runHostedSurfaceCommand(
+    runner,
+    wait,
+    options,
+    workspace,
+    surface,
+    execCommand,
+    'main',
+  );
+  const capture = execResult.capture;
+  const execExitCode = execResult.execExitCode;
+
   if (execExitCode !== 0) {
     throw new Error(`Hosted exec failed with exit code ${execExitCode}.`);
   }
@@ -295,7 +375,9 @@ export async function runCmuxClaudeRecipe(rawOptions, deps = {}) {
     capture,
   };
 
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  if (emitStdout) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  }
   return result;
 }
 

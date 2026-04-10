@@ -36,6 +36,16 @@ function tmpDir() {
   return realpathSync(mkdtempSync(join(tmpdir(), 'gr-claude-recipe-')));
 }
 
+function exactSearchDirs(basePath, dirs) {
+  return {
+    explicitSearchDirs: dirs,
+    basePath,
+    includeDefaults: false,
+    repoConfigPath: false,
+    userConfigPath: false,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Session-enforcement test helpers
 // ---------------------------------------------------------------------------
@@ -163,10 +173,14 @@ describe('Claude recipe', () => {
       recipe.requires_env,
       ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'TERM_PROGRAM', 'LANG', 'TMPDIR', 'PWD', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR'],
     );
+    assert.deepEqual(recipe.requires_auth, [{ type: 'claude_login' }]);
     assert.match(recipe.description, /OS-managed secure stores|process-identity-gated runtime state/);
     assert.match(recipe.description, /exact same shell\/runtime that will later launch Guardrail/);
     assert.ok(
       recipe.guardrails?.constraints?.some((line) => line.includes('secure-store-backed CLI auth')),
+    );
+    assert.ok(
+      recipe.guardrails?.constraints?.some((line) => line.includes('missing_auth_prerequisite')),
     );
     assert.ok(
       recipe.guardrails?.constraints?.some((line) => line.includes('--env-allow') && line.includes('requires_env')),
@@ -307,7 +321,7 @@ describe('Claude recipe', () => {
         specifier: recipe.id,
         inputs: { working_dir: '.', session_name: 'approval-test' },
         cwd: dir,
-        searchDirs: [recipesDir],
+        searchDirs: exactSearchDirs(dir, [recipesDir]),
         manifestPath,
         allowUnverified: true,
         promptApprovalFn: async () => false,
@@ -513,7 +527,7 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
         lifecycle: 'continue',
       },
       cwd: dir,
-      searchDirs: [recipesDir],
+      searchDirs: exactSearchDirs(dir, [recipesDir]),
       nonInteractive: true,
       jsonOutput: true,
       executorFn: executor.fn,
@@ -544,7 +558,7 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
       specifier: recipe.id,
       inputs: resolvedInputs,
       cwd: dir,
-      searchDirs: [recipesDir],
+      searchDirs: exactSearchDirs(dir, [recipesDir]),
       nonInteractive: true,
       jsonOutput: true,
       executorFn: executor.fn,
@@ -601,7 +615,7 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
         lifecycle: 'continue',
       },
       cwd: dir,
-      searchDirs: [recipesDir],
+      searchDirs: exactSearchDirs(dir, [recipesDir]),
       nonInteractive: true,
       jsonOutput: true,
       executorFn: executor.fn,
@@ -648,7 +662,7 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
         lifecycle: 'attach',
       },
       cwd: dir,
-      searchDirs: [recipesDir],
+      searchDirs: exactSearchDirs(dir, [recipesDir]),
       nonInteractive: true,
       jsonOutput: true,
       executorFn: executor.fn,
@@ -709,7 +723,7 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
         prompt: 'A completely different prompt',
       },
       cwd: dir,
-      searchDirs: [recipesDir],
+      searchDirs: exactSearchDirs(dir, [recipesDir]),
       nonInteractive: true,
       jsonOutput: true,
       executorFn: executor.fn,
@@ -763,7 +777,7 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
         prompt: 'A completely different prompt',
       },
       cwd: dir,
-      searchDirs: [recipesDir],
+      searchDirs: exactSearchDirs(dir, [recipesDir]),
       nonInteractive: true,
       jsonOutput: true,
       executorFn: executor.fn,

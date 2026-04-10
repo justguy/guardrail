@@ -84,6 +84,10 @@ function resolveMcpProbeHelperPath() {
   return resolve(__dirname, 'adapter-mcp-stdio-probe.js');
 }
 
+function resolveMcpCallHelperPath() {
+  return resolve(__dirname, 'adapter-mcp-stdio-call.js');
+}
+
 function buildMcpProbeSupervisorOptions(profile, envAllow = []) {
   const transport = profile.mcp_transport || {};
   const helperArgs = [
@@ -432,6 +436,132 @@ export async function probeAdapterMcpStdio(opts = {}) {
       server: parsedProbe.server,
     },
     exitCode: 0,
+  };
+}
+
+export async function callAdapterMcpTool(opts = {}) {
+  const {
+    tool, profilePath,
+    cwd: directCwd,
+    supervisorFn = runSupervisor,
+    envAllow = [],
+    authCheckFn,
+    timeoutMs = 5000,
+    mcpTool,
+    params = {},
+  } = opts;
+
+  const profileResult = loadAndValidateAdapterProfile(tool, profilePath);
+  if (profileResult.error) return { ok: false, adapterResult: profileResult.error.adapterResult, exitCode: profileResult.error.exitCode };
+  const profile = profileResult.profile;
+
+  if (profile.protocol !== 'mcp') {
+    const error = wrapBlocked(
+      ADAPTER_REASON_CODES.UNSUPPORTED,
+      'Adapter MCP call only supports profiles that declare protocol "mcp".',
+      profile,
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+  if (profile.mcp_transport?.type !== 'stdio') {
+    const error = wrapBlocked(
+      ADAPTER_REASON_CODES.UNSUPPORTED,
+      'Adapter MCP call currently supports only stdio MCP transports.',
+      profile,
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+  if (typeof mcpTool !== 'string' || mcpTool.trim() === '') {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.VALIDATION_FAILED,
+      'Adapter MCP call requires --mcp-tool <name>.',
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+  if (params == null || typeof params !== 'object' || Array.isArray(params)) {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.VALIDATION_FAILED,
+      'Adapter MCP call requires params to be a JSON object.',
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+
+  const preflightResult = await runAdapterPreflight(profile, {
+    envAllow,
+    cwd: directCwd || process.cwd(),
+    authCheckFn,
+  });
+  if (preflightResult.error) {
+    return { ok: false, adapterResult: preflightResult.error.adapterResult, exitCode: preflightResult.error.exitCode };
+  }
+
+  const transport = profile.mcp_transport;
+  const supervisorOptions = {
+    command: process.execPath,
+    args: [
+      resolveMcpCallHelperPath(),
+      '--command', transport.command,
+      ...((transport.args || []).flatMap((value) => ['--arg', value])),
+      ...(transport.cwd ? ['--cwd', transport.cwd] : []),
+      '--timeout-ms', String(timeoutMs),
+      '--mcp-tool', mcpTool,
+      '--params-json', JSON.stringify(params),
+    ],
+    nonInteractive: true,
+    jsonOutput: true,
+    envPolicy: { inherit: false, allow: ['PATH', ...envAllow], inject: {} },
+  };
+  if (directCwd) supervisorOptions.cwd = directCwd;
+
+  let supervisorResult;
+  try {
+    supervisorResult = await supervisorFn(supervisorOptions);
+  } catch (err) {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.SUPERVISOR_THREW,
+      `Supervisor execution error: ${err?.message || 'unknown'}`,
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+
+  const adapterResult = normalizeToAdapterResult(supervisorResult);
+  if (adapterResult.guardrail.category !== 'success') {
+    return {
+      ok: false,
+      adapterResult,
+      exitCode: resolveProfileExitCode(profile, adapterResult.guardrail.category, adapterResult.guardrail.exitCode),
+    };
+  }
+
+  let parsedCall;
+  try {
+    parsedCall = JSON.parse(supervisorResult?.worker?.stdout || '{}');
+  } catch (err) {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.PROTOCOL_ERROR,
+      `MCP stdio call returned invalid JSON: ${err.message}`,
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+
+  if (parsedCall?.ok !== true) {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.PROTOCOL_ERROR,
+      parsedCall?.reason || 'MCP stdio tool call did not complete successfully.',
+    );
+    return {
+      ok: false,
+      adapterResult: error.adapterResult,
+      exitCode: error.exitCode,
+      call: parsedCall,
+    };
+  }
+
+  return {
+    ok: true,
+    adapterResult,
+    call: parsedCall.call,
+    exitCode: resolveProfileExitCode(profile, 'success', adapterResult.guardrail.exitCode),
   };
 }
 
