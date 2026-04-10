@@ -1195,20 +1195,6 @@ async function main() {
       console.error('Error: --prompt <text> is required for lane send');
       process.exit(1);
     }
-    if (laneOpts.keyPath && !existsSync(laneOpts.keyPath)) {
-      const expired = buildLaneExpiredResponse();
-      await appendLaneAuditEntry(laneOpts, 'lane_send', {
-        request_id: laneOpts.requestId || null,
-        status: 'error',
-        reason: expired.reason,
-      });
-      if (parsed.json) {
-        console.log(JSON.stringify(expired, null, 2));
-      } else {
-        console.error(expired.message);
-      }
-      process.exit(1);
-    }
     const preflightStatus = getResidentLaneStatus(laneOpts);
     if (preflightStatus.status === 'failed') {
       const failed = buildLaneFailedResponse(preflightStatus);
@@ -1224,6 +1210,20 @@ async function main() {
         if (failed.failureReason) console.error(`Failure reason: ${failed.failureReason}`);
         if (failed.failureStage) console.error(`Failure stage: ${failed.failureStage}`);
         if (failed.logPath) console.error(`Log path: ${failed.logPath}`);
+      }
+      process.exit(1);
+    }
+    if (laneOpts.keyPath && !existsSync(laneOpts.keyPath)) {
+      const expired = buildLaneExpiredResponse();
+      await appendLaneAuditEntry(laneOpts, 'lane_send', {
+        request_id: laneOpts.requestId || null,
+        status: 'error',
+        reason: expired.reason,
+      });
+      if (parsed.json) {
+        console.log(JSON.stringify(expired, null, 2));
+      } else {
+        console.error(expired.message);
       }
       process.exit(1);
     }
