@@ -81,6 +81,77 @@ export function resolveAuthCheckDefinition(requirement) {
   }
 }
 
+function parseJsonObject(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function validateClaudeLoginResult(result) {
+  const stdout = String(result?.stdout || '').trim();
+  const stderr = String(result?.stderr || '').trim();
+  const combined = [stdout, stderr].filter(Boolean).join('\n').trim();
+  const parsed = parseJsonObject(stdout) || parseJsonObject(combined);
+
+  if (parsed && typeof parsed.loggedIn === 'boolean') {
+    return parsed.loggedIn
+      ? { ok: true }
+      : {
+          ok: false,
+          detail: combined || '{"loggedIn":false}',
+        };
+  }
+
+  if (/not logged in|please run\s+\/?login/i.test(combined)) {
+    return { ok: false, detail: combined };
+  }
+
+  if (/\blogged\s*in\b/i.test(combined)) {
+    return { ok: true };
+  }
+
+  return { ok: true };
+}
+
+export function evaluateAuthCheckResult(requirement, result) {
+  const definition = resolveAuthCheckDefinition(requirement);
+  if (!definition) {
+    return {
+      ok: false,
+      code: 'missing_auth_prerequisite',
+      message: `Unsupported auth prerequisite type: ${requirement?.type ?? '<unknown>'}`,
+      detail: '',
+    };
+  }
+
+  if (!result?.success) {
+    return {
+      ok: false,
+      code: definition.code,
+      message: definition.message,
+      detail: (result?.stderr || result?.stdout || '').trim(),
+    };
+  }
+
+  if (requirement?.type === 'claude_login') {
+    const validation = validateClaudeLoginResult(result);
+    if (!validation.ok) {
+      return {
+        ok: false,
+        code: definition.code,
+        message: definition.message,
+        detail: validation.detail || (result?.stdout || result?.stderr || '').trim(),
+      };
+    }
+  }
+
+  return { ok: true, code: null, message: null, detail: null };
+}
+
 export async function checkAuthPrerequisites(requirements = [], options = {}) {
   const checkRunner = options.checkRunner || executeSubprocess;
 
@@ -94,16 +165,20 @@ export async function checkAuthPrerequisites(requirements = [], options = {}) {
       };
     }
 
-    const result = await checkRunner(definition.command, definition.args, options.cwd);
-    if (result.success) {
+    const result = await checkRunner(definition.command, definition.args, options.cwd, {
+      envPolicy: options.envPolicy,
+      env: options.env,
+    });
+    const evaluated = evaluateAuthCheckResult(requirement, result);
+    if (evaluated.ok) {
       continue;
     }
 
     return {
       ok: false,
-      code: definition.code,
-      message: definition.message,
-      detail: (result.stderr || result.stdout || '').trim(),
+      code: evaluated.code,
+      message: evaluated.message,
+      detail: evaluated.detail,
     };
   }
 

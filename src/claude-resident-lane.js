@@ -74,6 +74,7 @@ export function parseResidentLaneArgs(argv) {
     authFd: '',
     pollIntervalMs: '',
     idleTimeoutMs: '',
+    launchDaemonHelper: false,
     daemon: false,
   };
 
@@ -161,6 +162,9 @@ export function parseResidentLaneArgs(argv) {
         options.idleTimeoutMs = value;
         i += 1;
         break;
+      case '--launch-daemon-helper':
+        options.launchDaemonHelper = true;
+        break;
       case '--daemon':
         options.daemon = true;
         break;
@@ -205,6 +209,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     authFd: parseInteger(rawOptions.authFd, null, 'auth_fd', 3),
     pollIntervalMs: parseInteger(rawOptions.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, 'poll_interval_ms', 50),
     idleTimeoutMs: parseInteger(rawOptions.idleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS, 'idle_timeout_ms', 1000),
+    launchDaemonHelper: rawOptions.launchDaemonHelper === true,
     daemon: rawOptions.daemon === true,
   };
 }
@@ -279,7 +284,8 @@ function isPidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err) {
+    if (err?.code === 'EPERM') return true;
     return false;
   }
 }
@@ -924,6 +930,9 @@ async function runResidentLaneDaemon(options) {
 
   process.once('SIGINT', () => shutdown('stopped'));
   process.once('SIGTERM', () => shutdown('stopped'));
+  // Resident lanes are launched as detached background processes from host
+  // runtimes; ignore SIGHUP so the lane survives when the launching shell exits.
+  process.on('SIGHUP', () => {});
   process.once('uncaughtException', (err) => shutdown('failed', err, 'runtime'));
   process.once('unhandledRejection', (err) => shutdown('failed', err instanceof Error ? err : new Error(String(err)), 'runtime'));
   process.once('exit', (code) => {
@@ -1032,6 +1041,116 @@ export async function launchResidentLane(rawOptions, deps = {}) {
   }
 
   const selfPath = fileURLToPath(import.meta.url);
+  const helperAuthFd = options.authFd ? 3 : null;
+  const helperArgs = [
+    selfPath,
+    '--launch-daemon-helper',
+    '--lane-dir', options.laneDir,
+    '--guardrail-repo', options.guardrailRepo,
+    '--working-dir', options.workingDir,
+    '--lane-id', options.laneId || '',
+    '--key-path', options.keyPath || '',
+    '--session-name', options.sessionName,
+    '--session-id', options.sessionId || '',
+    '--no-session-persistence', String(options.noSessionPersistence),
+    '--poll-interval-ms', String(options.pollIntervalMs),
+    '--idle-timeout-ms', String(options.idleTimeoutMs),
+    '--model', options.model,
+    '--effort', options.effort,
+    '--permission-mode', options.permissionMode,
+    '--output-format', options.outputFormat,
+    '--max-budget-usd', options.maxBudgetUsd,
+    '--allowed-tools', options.allowedTools,
+    '--system-prompt', options.systemPrompt,
+    '--add-dirs', options.addDirs.join(','),
+    '--input-files', options.inputFiles.join(','),
+  ];
+  if (helperAuthFd !== null) {
+    helperArgs.push('--auth-fd', String(helperAuthFd));
+  }
+
+  const helperStdio = ['ignore', 'pipe', 'pipe'];
+  if (options.authFd) {
+    helperStdio.push(options.authFd);
+  }
+
+  const spawnProcess = deps.spawnProcess || spawn;
+  const child = spawnProcess(process.execPath, helperArgs, {
+    cwd: options.guardrailRepo,
+    detached: false,
+    stdio: helperStdio,
+    env: process.env,
+  });
+
+  let helperStdout = '';
+  let helperStderr = '';
+  if (child.stdout) {
+    child.stdout.on('data', (chunk) => {
+      helperStdout += chunk.toString();
+    });
+  }
+  if (child.stderr) {
+    child.stderr.on('data', (chunk) => {
+      helperStderr += chunk.toString();
+    });
+  }
+
+  await new Promise((resolvePromise, rejectPromise) => {
+    child.on('error', rejectPromise);
+    child.on('close', (code) => {
+      if (code !== 0) {
+        rejectPromise(new Error(helperStderr.trim() || `Resident lane launch helper exited with code ${code}.`));
+        return;
+      }
+      resolvePromise();
+    });
+  });
+
+  let daemonPid = null;
+  try {
+    daemonPid = JSON.parse(helperStdout.trim()).pid ?? null;
+  } catch {
+    daemonPid = null;
+  }
+  if (!Number.isInteger(daemonPid) || daemonPid <= 0) {
+    throw createLaneBootError(helperStderr.trim() || 'Resident lane launch helper did not return a daemon pid.', {
+      statePath: paths.statePath,
+      logPath: paths.logPath,
+      failureStage: 'bootstrap',
+    });
+  }
+
+  const launchSummary = {
+    laneDir: options.laneDir,
+    requestFifo: paths.requestFifo,
+    responseFifo: paths.responseFifo,
+    pid: daemonPid,
+    sessionName: options.sessionName,
+    sessionId: options.sessionId || null,
+    workingDir: options.workingDir,
+    statePath: paths.statePath,
+    authMode: options.authFd ? 'hmac_fd' : 'none',
+    laneId: options.laneId || null,
+    keyPath: options.keyPath || null,
+    logPath: paths.logPath,
+  };
+  writeJson(paths.launchPath, launchSummary);
+
+  try {
+    const waitForBootstrap = deps.waitForBootstrap || waitForResidentLaneBootstrap;
+    await waitForBootstrap(options, { pid: daemonPid }, deps.waitForBootstrapDeps || {});
+  } catch (err) {
+    persistLaneFailureState(options, err, err?.details?.failureStage || 'bootstrap');
+    throw err;
+  }
+  return launchSummary;
+}
+
+function launchResidentLaneDaemonHelper(rawOptions) {
+  const options = normalizeResidentLaneOptions(rawOptions);
+  ensureLaneLayout(options.laneDir);
+  const paths = lanePaths(options.laneDir);
+  const selfPath = fileURLToPath(import.meta.url);
   const stdoutFd = openSync(paths.logPath, 'a');
   const stderrFd = openSync(paths.logPath, 'a');
   const daemonAuthFd = options.authFd ? 3 : null;
@@ -1062,44 +1181,19 @@ export async function launchResidentLane(rawOptions, deps = {}) {
     daemonArgs.push('--auth-fd', String(daemonAuthFd));
   }
 
-  const childStdio = ['ignore', stdoutFd, stderrFd];
+  const daemonStdio = ['ignore', stdoutFd, stderrFd];
   if (options.authFd) {
-    childStdio.push(options.authFd);
+    daemonStdio.push(options.authFd);
   }
 
-  const spawnProcess = deps.spawnProcess || spawn;
-  const child = spawnProcess(process.execPath, daemonArgs, {
+  const daemon = spawn(process.execPath, daemonArgs, {
     cwd: options.guardrailRepo,
     detached: true,
-    stdio: childStdio,
+    stdio: daemonStdio,
     env: process.env,
   });
-  child.unref();
-
-  const launchSummary = {
-    laneDir: options.laneDir,
-    requestFifo: paths.requestFifo,
-    responseFifo: paths.responseFifo,
-    pid: child.pid,
-    sessionName: options.sessionName,
-    sessionId: options.sessionId || null,
-    workingDir: options.workingDir,
-    statePath: paths.statePath,
-    authMode: options.authFd ? 'hmac_fd' : 'none',
-    laneId: options.laneId || null,
-    keyPath: options.keyPath || null,
-    logPath: paths.logPath,
-  };
-  writeJson(paths.launchPath, launchSummary);
-
-  try {
-    const waitForBootstrap = deps.waitForBootstrap || waitForResidentLaneBootstrap;
-    await waitForBootstrap(options, child, deps.waitForBootstrapDeps || {});
-  } catch (err) {
-    persistLaneFailureState(options, err, err?.details?.failureStage || 'bootstrap');
-    throw err;
-  }
-  return launchSummary;
+  daemon.unref();
+  process.stdout.write(`${JSON.stringify({ pid: daemon.pid })}\n`);
 }
 
 export function stopResidentLane(rawOptions) {
@@ -1165,6 +1259,10 @@ async function main() {
   let options;
   try {
     options = normalizeResidentLaneOptions(raw);
+    if (options.launchDaemonHelper) {
+      launchResidentLaneDaemonHelper(raw);
+      return;
+    }
     if (options.daemon) {
       await runResidentLaneDaemon(options);
       return;

@@ -343,6 +343,7 @@ AI execution recipes:
 - Today, if a transport/orchestration recipe launches an inner `guardrail run`, the outer transport layer and inner exec layer are separate approval units with separate manifests. Do not assume nested runs collapse into one approval automatically.
 - If that transport/orchestration path later fails, do not immediately switch to ad hoc host-surface commands for investigation. Check the bounded Guardrail status path first, because raw host-surface inspection is itself another approval-bearing boundary.
 - Bundled `cmux-claude-exec` now uses the composed single-approval path instead of a nested inner Guardrail run. Use it when Claude must run inside that terminal surface and you want one approval that still binds the composed `claude-exec` trust/env/input/session semantics honestly.
+- For composed host-runtime Claude runs, the wrapper intentionally isolates the child environment with `env -i` and then rehydrates only the approved env intersection. If you see `env -i` in a pane capture, do not treat that alone as the bug; the real questions are whether the required vars were explicitly approved and whether `claude auth status` in that exact wrapped runtime reports `loggedIn: true`.
 - Diagnosis rule for host-runtime auth failures:
   - if direct exec in the current shell fails with a tool-auth error such as `Not logged in`
   - and the composed host-runtime recipe for the same tool fails with the same tool-auth error

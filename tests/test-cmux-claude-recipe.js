@@ -189,6 +189,8 @@ describe('CMUX Claude recipe', () => {
     assert.ok(rendered.includes('cmux-claude-exec@1.0.0'));
     assert.ok(rendered.includes(HOST_BOUNDARY_WARNING));
     assert.ok(rendered.includes('Composed Exec (launch-cmux-claude-exec)'));
+    assert.ok(rendered.includes('Hosted env mode:'));
+    assert.ok(rendered.includes('env -i; only approved vars survive'));
     assert.ok(rendered.includes('claude-exec@1.0.0'));
     assert.ok(capturedExecutorOpts === null);
     assert.ok(rendered.includes('Fresh approval required'));
@@ -301,6 +303,52 @@ describe('CMUX Claude recipe', () => {
     assert.equal(calls[3].args[0], 'capture-pane');
     assert.equal(calls[0].options.socketPath, '/tmp/cmux.sock');
     assert.ok(calls[2].args.at(-1).includes('[guardrail-exec-exit:'));
+  });
+
+  it('fails hosted auth preflight when claude auth status exits zero but reports loggedIn false', async () => {
+    const contract = encodeContract({
+      command: 'node',
+      args: ['./src/claude-exec-wrapper.js', '--prompt', 'Solve it'],
+      cwd: '/tmp/work',
+      envPolicy: {
+        allow: ['PATH', 'HOME'],
+        inject: {},
+      },
+      authPreflight: {
+        requirements: [{ type: 'claude_login' }],
+      },
+    });
+
+    const runner = async (args) => {
+      if (args[0] === 'new-workspace') return { stdout: 'OK workspace:9\n', stderr: '' };
+      if (args[0] === 'list-panels') return { stdout: '* surface:4 terminal [focused]\n', stderr: '' };
+      if (args[0] === 'send') return { stdout: '', stderr: '' };
+      if (args[0] === 'capture-pane') {
+        return { stdout: '{"loggedIn":false,"authMethod":"none"}\n[guardrail-exec-exit:auth-0:0]\n', stderr: '' };
+      }
+      throw new Error(`unexpected cmux call: ${args[0]}`);
+    };
+
+    await assert.rejects(
+      runCmuxClaudeRecipe(
+        {
+          socketPath: '/tmp/cmux.sock',
+          workspaceName: 'Claude Smoke',
+          launchCwd: '.',
+          execContractB64: contract,
+          captureLines: 80,
+          captureDelayMs: 0,
+          pollIntervalMs: 50,
+          waitTimeoutMs: 500,
+        },
+        {
+          runner,
+          wait: async () => {},
+          emitStdout: false,
+        },
+      ),
+      /missing_auth_prerequisite/,
+    );
   });
 
 });

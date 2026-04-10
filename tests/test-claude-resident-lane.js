@@ -164,6 +164,47 @@ describe('Claude resident lane', () => {
     assert.equal(summary.responseFifo, paths.responseFifo);
   });
 
+  it('treats EPERM pid probes as alive when checking resident lane status', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    mkdirSync(laneDir, { recursive: true });
+    const paths = lanePaths(laneDir);
+    mkfifo(paths.requestFifo);
+    mkfifo(paths.responseFifo);
+    const keyPath = join(dir, 'lane.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(paths.statePath, JSON.stringify({
+      pid: 424242,
+      status: 'ready',
+      sessionName: 'math-live-session',
+      sessionId: 'math-live-session-1',
+      workingDir: dir,
+      requestFifo: paths.requestFifo,
+      responseFifo: paths.responseFifo,
+      lastActivityAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const originalKill = process.kill;
+    process.kill = ((pid, signal) => {
+      if (pid === 424242 && signal === 0) {
+        const err = new Error('operation not permitted');
+        err.code = 'EPERM';
+        throw err;
+      }
+      return originalKill(pid, signal);
+    });
+
+    try {
+      const status = getResidentLaneStatus({ laneDir, keyPath, guardrailRepo: dir });
+      assert.equal(status.status, 'ready');
+      assert.equal(status.alive, true);
+      assert.equal(status.failureReason, null);
+    } finally {
+      process.kill = originalKill;
+    }
+  });
+
   it('fails lane startup when the daemon exits during bootstrap and records a failed state', async () => {
     const dir = tmpLaneDir();
     const laneDir = join(dir, '.guardrail', 'lanes', 'math');
@@ -238,6 +279,34 @@ describe('Claude resident lane', () => {
     const status = getResidentLaneStatus({ laneDir, guardrailRepo: dir });
     assert.equal(status.status, 'failed');
     assert.equal(status.failureStage, 'post_start');
+  });
+
+  it('keeps a launched resident lane alive across SIGHUP', async () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    const keyPath = join(dir, 'lane.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    const keyFd = openSync(keyPath, 'r');
+
+    const summary = await launchResidentLane({
+      laneDir,
+      guardrailRepo: dir,
+      workingDir: dir,
+      keyPath,
+      authFd: keyFd,
+      sessionName: 'math-live-session',
+    });
+
+    try {
+      process.kill(summary.pid, 'SIGHUP');
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+      const status = getResidentLaneStatus({ laneDir, guardrailRepo: dir, keyPath });
+      assert.equal(status.status, 'ready');
+      assert.equal(status.alive, true);
+    } finally {
+      closeSync(keyFd);
+      stopResidentLane({ laneDir, guardrailRepo: dir, keyPath, sessionName: 'math-live-session' });
+    }
   });
 
   it('sends a prompt over the resident lane FIFOs', async () => {

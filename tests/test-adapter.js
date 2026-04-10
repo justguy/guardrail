@@ -305,6 +305,30 @@ describe('adapter engine', () => {
     assert.match(result.adapterResult.guardrail.reason, /missing_auth_prerequisite/);
     assert.match(result.adapterResult.guardrail.reason, /Claude CLI is not logged in/);
   });
+
+  it('blocks before supervisor when claude auth status exits zero but reports loggedIn false', async () => {
+    const dir = makeTempDir();
+    const profilePath = writeProfile(dir, makeJsonProfile({
+      requires_auth: [{ type: 'claude_login', env: ['HOME'] }],
+    }));
+
+    let supervisorCalled = false;
+    const result = await runAdapter({
+      profilePath,
+      rawInput: { command: 'echo', args: ['hi'] },
+      envAllow: ['HOME'],
+      authCheckFn: async () => ({ success: true, stdout: '{"loggedIn":false,"authMethod":"none"}' }),
+      supervisorFn: async () => {
+        supervisorCalled = true;
+        return {};
+      },
+    });
+
+    assert.equal(supervisorCalled, false);
+    assert.equal(result.adapterResult.guardrail.category, 'blocked');
+    assert.match(result.adapterResult.guardrail.reason, /missing_auth_prerequisite/);
+    assert.match(result.adapterResult.guardrail.reason, /loggedIn/);
+  });
 });
 
 describe('adapter stdin protocol', () => {

@@ -334,6 +334,11 @@ export async function preflightRecipeAuthRuntime({
       ...deriveAuthEnvRequirements(authRequirements, currentEnv),
     ]),
   ];
+  const authEnvPolicy = {
+    inherit: false,
+    allow: [...new Set(['PATH', ...(envAllow || [])])],
+    inject: {},
+  };
 
   if (requiredEnv.length > 0 && envAllow.length === 0) {
     return {
@@ -371,6 +376,7 @@ export async function preflightRecipeAuthRuntime({
   const authCheck = await checkAuthPrerequisites(authRequirements, {
     cwd,
     checkRunner: authCheckFn,
+    envPolicy: authEnvPolicy,
   });
   if (!authCheck.ok) {
     const detail = authCheck.detail ? ` Detail: ${authCheck.detail}` : '';
@@ -420,6 +426,7 @@ function printComposedRecipeSummary(records = []) {
     if ((record.envIntersection || []).length > 0) {
       line(`  ${colorize('Env vars passed:'.padEnd(20), 'dim')} ${record.envIntersection.join(', ')}`);
     }
+    line(`  ${colorize('Hosted env mode:'.padEnd(20), 'dim')} isolated (env -i; only approved vars survive)`);
     line(`  ${colorize('Risk level:'.padEnd(20), 'dim')} ${colorize(record.riskAssessment.riskLevel.toUpperCase(), riskColor(record.riskAssessment.riskLevel))}`);
     line();
   }

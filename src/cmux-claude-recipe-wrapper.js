@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { spawn } from 'node:child_process';
-import { resolveAuthCheckDefinition } from './adapter-auth.js';
+import { evaluateAuthCheckResult, resolveAuthCheckDefinition } from './adapter-auth.js';
 
 const EXIT_SENTINEL_PREFIX = '[guardrail-exec-exit:';
 
@@ -343,8 +343,13 @@ export async function runCmuxClaudeRecipe(rawOptions, deps = {}) {
       buildWrappedRenderedCommand(commandText, token),
       token,
     );
-    if (authResult.execExitCode !== 0) {
-      const detail = stripExitSentinels(authResult.capture);
+    const detail = stripExitSentinels(authResult.capture);
+    const evaluated = evaluateAuthCheckResult(requirement, {
+      success: authResult.execExitCode === 0,
+      stdout: detail,
+      stderr: '',
+    });
+    if (!evaluated.ok) {
       throw new Error(`missing_auth_prerequisite: ${failureMessage}${detail ? ` Detail: ${detail}` : ''}`);
     }
   }
