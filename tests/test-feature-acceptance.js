@@ -10,7 +10,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, realpathSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, realpathSync, mkdirSync, openSync, closeSync, writeSync, readSync, constants as fsConstants } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { normalizeWorkflowDefinition, hashWorkflow, createWorkflowManifest } from '../src/workflow.js';
@@ -431,6 +432,84 @@ describe('README Feature: Template Mode', () => {
     const r = run(`${CLI} template lint --template ${join(dir, 'tmpl.json')}`);
     assert.ok(r.exitCode !== 0 || r.stdout.includes('bare') || r.stdout.includes('pattern'),
       'Should reject bare strings');
+  });
+});
+
+describe('README Feature: Resident Lane Mode', () => {
+  it('guardrail lane send writes one prompt through a resident lane FIFO', async () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    mkdirSync(laneDir, { recursive: true });
+    const requestFifo = join(laneDir, 'requests.fifo');
+    const responseFifo = join(laneDir, 'responses.fifo');
+    assert.equal(spawnSync('mkfifo', [requestFifo]).status, 0);
+    assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
+
+    const requestFd = openSync(requestFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK);
+    const responseFd = openSync(responseFifo, fsConstants.O_RDWR);
+
+    const laneServer = (async () => {
+      const chunk = Buffer.alloc(4096);
+      let buffer = '';
+      const startedAt = Date.now();
+      for (;;) {
+        if ((Date.now() - startedAt) > 5000) {
+          throw new Error('Timed out waiting for lane request');
+        }
+        try {
+          const bytesRead = readSync(requestFd, chunk, 0, chunk.length, null);
+          if (bytesRead > 0) {
+            buffer += chunk.toString('utf8', 0, bytesRead);
+            const newlineIndex = buffer.indexOf('\n');
+            if (newlineIndex >= 0) {
+              const request = JSON.parse(buffer.slice(0, newlineIndex));
+              writeSync(responseFd, `${JSON.stringify({ requestId: request.id, ok: true, stdout: '6\n' })}\n`, undefined, 'utf8');
+              return;
+            }
+          }
+        } catch (err) {
+          if (err?.code !== 'EAGAIN') throw err;
+        }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+      }
+    })();
+
+    const laneSend = new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn('node', [
+        join(process.cwd(), 'src', 'cli.js'),
+        'lane', 'send',
+        '--lane-dir', laneDir,
+        '--prompt', '2x3=?',
+      ], {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', rejectPromise);
+      child.on('close', (code) => {
+        resolvePromise({
+          exitCode: code ?? 1,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+        });
+      });
+    });
+
+    try {
+      const [result] = await Promise.all([laneSend, laneServer]);
+      assert.equal(result.exitCode, 0, `lane send should succeed: ${result.stderr}`);
+      assert.equal(result.stdout, '6');
+    } finally {
+      closeSync(requestFd);
+      closeSync(responseFd);
+    }
   });
 });
 

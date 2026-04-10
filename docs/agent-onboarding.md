@@ -235,6 +235,18 @@ AI execution recipes:
 - Bounded reuse now supports list-shaped inputs too, when the recipe or template declares an explicit `approval_mode: "list"` plus a bounded `item_validator` and `max_items`. This is the right shape for approved test-file lists or similar fixed-command multi-file runs.
 - `content_hash` and `review_each_time` are still stronger than bounded list reuse. If a file-bearing input is content-hash bound, changing the file set or file contents still causes drift/reapproval even when the input itself is a list.
 - Some AI recipes include other required prompt-bearing inputs, which can make the recipe effectively approval-per-run. Check the recipe file before assuming unattended reuse is possible.
+- For direct interactive chat that must survive repeated host-runtime turns, prefer the resident lane CLI surface over repeated outer transport launches:
+  - `node src/cli.js lane start --lane-dir .guardrail/lanes/<name> --session-name <name> ...`
+  - `node src/cli.js lane send --lane-dir .guardrail/lanes/<name> --prompt "<message>"`
+- `lane start` is the one-time host-runtime step. It starts a detached daemon in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), and fixes the executable boundary for later messages.
+- `lane send` is the per-message step. It writes a strict JSON request into the lane FIFO and reads the matching response back without reopening the outer transport/runtime hop.
+- The resident FIFO bridge is intentionally narrow:
+  - request schema is exactly `{ "id": "...", "prompt": "..." }`
+  - request ids are bounded and pattern-checked
+  - prompts are size-limited
+  - oversized or malformed payloads are dropped
+  - partial/incomplete writes time out and are discarded
+- Treat lane startup as the approval-bearing/runtime-bearing step. Treat later `lane send` turns as bounded session traffic, not as a new launcher/surface request.
 - For bundled `claude-exec`, the current standalone recipe env handshake is: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TERM_PROGRAM`, `LANG`, `TMPDIR`, `PWD`, `XDG_CONFIG_HOME`, and `CLAUDE_CONFIG_DIR`. Pass them with repeated `--env-allow` flags when present in the runtime you are validating.
 - For bundled `claude-exec`, use the recipe path to prove the CLI runtime works and to establish the bounded approval/unit. In current shipped recipe mode, `prompt` is session-bound `interactive_message` while `system_prompt` remains `review_each_time`. That means later user messages can change inside the same persistent named session, but a changed `system_prompt` or a new session still re-prompts. If you need unattended reruns with a fixed `system_prompt`, switch to a local template that wraps `src/claude-exec-wrapper.js` directly.
 - Transport/orchestration is a separate boundary. `claude-exec` does not include “launch this in another host runtime” behavior. If the tool must run through a different launcher, terminal surface, remote shell, container, or other host-runtime hop, use a separate transport/orchestration recipe instead of treating that outer hop as part of the exec recipe itself.

@@ -80,7 +80,7 @@ Secret detection scans both `envPolicy.inject` keys and `envPolicy.allow` lists 
 
 ---
 
-## Three Execution Modes
+## Four Execution Modes
 
 ### 1. Command Mode
 
@@ -173,6 +173,31 @@ Minimal valid template JSON example:
 ```
 
 Template inputs are constrained by schema, but approval reuse is still exact-value based on the resolved input set recorded in the manifest.
+
+### 4. Resident Lane Mode
+
+Keep an interactive AI session alive behind one bounded lane, then send later user messages without reopening the outer transport every turn:
+
+```bash
+# Start the lane once from the authenticated host runtime
+guardrail lane start \
+  --lane-dir .guardrail/lanes/claude-live \
+  --session-name claude-live \
+  --system-prompt "Answer directly and briefly."
+
+# Later turns go through the lane FIFO bridge
+guardrail lane send \
+  --lane-dir .guardrail/lanes/claude-live \
+  --prompt "2x3=?"
+```
+
+Resident lanes are for direct interactive use when the executable boundary should stay fixed but later user messages should not count as execution drift. The shipped Claude lane helper:
+- creates owner-only FIFOs (`0600`) under the lane directory
+- accepts only strict JSON requests with `id` and `prompt`
+- enforces prompt and payload size limits
+- expires after idle timeout and records lane state under `.guardrail/lanes/<name>/state.json`
+
+Lane startup still has to happen in a runtime where the downstream CLI auth already works. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time.
 
 ---
 

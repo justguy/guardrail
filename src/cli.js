@@ -31,6 +31,8 @@ Commands:
   run --shell "<script>"                Run a shell script under Guardrail
   run --recipe <id[@ver]> --input k=v     Run a recipe by ID (optional @version)
   run --template <path> --input k=v     Run a template under Guardrail
+  lane start [flags]                    Start a resident interactive lane
+  lane send [flags]                     Send one message through a resident lane
   workflow run [flags]                  Run a workflow definition under Guardrail
   workflow lint --definition <path>     Lint a workflow definition for issues
   template lint --template <path>       Lint a template for issues
@@ -84,6 +86,8 @@ Examples:
   guardrail run "npm test"
   guardrail run --shell "npm test && npm run lint"
   guardrail run --template ./templates/npm-publish.json --input package_dir=packages/my-lib --input tag=beta
+  guardrail lane start --lane-dir .guardrail/lanes/claude-live --session-name claude-live
+  guardrail lane send --lane-dir .guardrail/lanes/claude-live --prompt "2x3=?"
   guardrail template lint --template ./templates/npm-publish.json
   guardrail template explain --template ./templates/npm-publish.json
   guardrail template simulate --template ./templates/npm-publish.json --input package_dir=packages/my-lib
@@ -111,6 +115,7 @@ export function parseArgs(argv) {
     definition: null,
     recipeSearchDirs: [],
     allowUnverified: false,
+    laneOpts: {},
     command: null,
     args: [],
     demoTarget: null,
@@ -128,6 +133,25 @@ export function parseArgs(argv) {
       return;
     }
     result.inputs[key] = [result.inputs[key], value];
+  };
+
+  const parseMappedFlags = (target, mappings) => {
+    while (i < argv.length) {
+      const arg = argv[i];
+      if (arg === '--help') return { help: true };
+      if (arg === '--version') return { version: true };
+      if (arg === '--json') {
+        result.json = true;
+        i++;
+        continue;
+      }
+      const key = mappings[arg];
+      if (!key) return { error: 'usage' };
+      i++;
+      if (i >= argv.length) return { error: 'usage' };
+      target[key] = argv[i++];
+    }
+    return null;
   };
 
   // --- Subcommand -----------------------------------------------------------
@@ -323,7 +347,7 @@ export function parseArgs(argv) {
     return result;
   }
 
-  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify' && sub !== 'adapter') {
+  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify' && sub !== 'adapter' && sub !== 'lane') {
     return { error: 'usage' };
   }
 
@@ -436,6 +460,40 @@ export function parseArgs(argv) {
       return { error: 'usage' };
     }
     return result;
+  }
+
+  // --- lane subcommand ------------------------------------------------------
+
+  if (sub === 'lane') {
+    if (i >= argv.length || !['start', 'send'].includes(argv[i])) {
+      return { error: 'usage' };
+    }
+    const action = argv[i++];
+    result.subcommand = `lane-${action}`;
+    result.laneOpts = {};
+    const error = parseMappedFlags(result.laneOpts, {
+      '--lane-dir': 'laneDir',
+      '--guardrail-repo': 'guardrailRepo',
+      '--working-dir': 'workingDir',
+      '--model': 'model',
+      '--effort': 'effort',
+      '--permission-mode': 'permissionMode',
+      '--output-format': 'outputFormat',
+      '--max-budget-usd': 'maxBudgetUsd',
+      '--allowed-tools': 'allowedTools',
+      '--system-prompt': 'systemPrompt',
+      '--add-dirs': 'addDirs',
+      '--input-files': 'inputFiles',
+      '--session-name': 'sessionName',
+      '--session-id': 'sessionId',
+      '--no-session-persistence': 'noSessionPersistence',
+      '--poll-interval-ms': 'pollIntervalMs',
+      '--idle-timeout-ms': 'idleTimeoutMs',
+      '--request-id': 'requestId',
+      '--prompt': 'prompt',
+      '--timeout-ms': 'timeoutMs',
+    });
+    return error || result;
   }
 
   // --- create subcommand -----------------------------------------------------
@@ -850,6 +908,66 @@ async function main() {
       console.log('');
     }
     process.exit(result.passed ? 0 : 1);
+  }
+
+  // --- lane start/send -----------------------------------------------------
+
+  if (parsed.subcommand === 'lane-start') {
+    const { launchResidentLane } = await import('./claude-resident-lane.js');
+    if (!parsed.laneOpts?.laneDir) {
+      console.error('Error: --lane-dir <path> is required for lane start');
+      process.exit(1);
+    }
+    if (!parsed.laneOpts?.sessionName) {
+      console.error('Error: --session-name <name> is required for lane start');
+      process.exit(1);
+    }
+
+    const summary = await launchResidentLane(parsed.laneOpts);
+    if (parsed.json) {
+      console.log(JSON.stringify(summary, null, 2));
+    } else {
+      console.log(`Lane started: ${summary.sessionName}`);
+      console.log(`  Lane dir:      ${summary.laneDir}`);
+      console.log(`  Request FIFO:  ${summary.requestFifo}`);
+      console.log(`  Response FIFO: ${summary.responseFifo}`);
+      console.log(`  State path:    ${summary.statePath}`);
+      console.log(`  PID:           ${summary.pid}`);
+      if (summary.reused) {
+        console.log('  Reused:        yes');
+      }
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-send') {
+    const { sendResidentLaneMessage } = await import('./claude-resident-lane-client.js');
+    if (!parsed.laneOpts?.laneDir) {
+      console.error('Error: --lane-dir <path> is required for lane send');
+      process.exit(1);
+    }
+    if (!parsed.laneOpts?.prompt) {
+      console.error('Error: --prompt <text> is required for lane send');
+      process.exit(1);
+    }
+
+    const requestId = parsed.laneOpts.requestId || `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const response = await sendResidentLaneMessage([
+      '--lane-dir', parsed.laneOpts.laneDir,
+      '--request-id', requestId,
+      '--prompt', parsed.laneOpts.prompt,
+      '--timeout-ms', parsed.laneOpts.timeoutMs || '30000',
+    ]);
+
+    if (parsed.json) {
+      console.log(JSON.stringify(response, null, 2));
+    } else if (response.ok) {
+      process.stdout.write(response.stdout || '');
+    } else {
+      console.error(response.error || response.stderr || 'Resident lane request failed');
+    }
+
+    process.exit(response.ok ? 0 : (response.exitCode || 1));
   }
 
   // --- template lint -------------------------------------------------------

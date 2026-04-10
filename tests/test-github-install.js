@@ -547,6 +547,34 @@ describe('CLI bare recipe name detection', async () => {
     assert.equal(result.subcommand, 'workflow');
     assert.equal(result.allowUnverified, true);
   });
+
+  it('parses lane start flags', () => {
+    const result = parseArgs([
+      'lane', 'start',
+      '--lane-dir', '.guardrail/lanes/claude-live',
+      '--session-name', 'claude-live',
+      '--system-prompt', 'Answer briefly.',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-start');
+    assert.equal(result.laneOpts.laneDir, '.guardrail/lanes/claude-live');
+    assert.equal(result.laneOpts.sessionName, 'claude-live');
+    assert.equal(result.laneOpts.systemPrompt, 'Answer briefly.');
+    assert.equal(result.json, true);
+  });
+
+  it('parses lane send flags', () => {
+    const result = parseArgs([
+      'lane', 'send',
+      '--lane-dir', '.guardrail/lanes/claude-live',
+      '--prompt', '2x3=?',
+      '--timeout-ms', '5000',
+    ]);
+    assert.equal(result.subcommand, 'lane-send');
+    assert.equal(result.laneOpts.laneDir, '.guardrail/lanes/claude-live');
+    assert.equal(result.laneOpts.prompt, '2x3=?');
+    assert.equal(result.laneOpts.timeoutMs, '5000');
+  });
 });
 
 // ---------------------------------------------------------------------------
