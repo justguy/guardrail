@@ -9,6 +9,8 @@
  * mutates native statuses, is the sole compatibility boundary.
  */
 
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { extractValue, resolveTemplate } from './adapter-extract.js';
 import { validateProfile, loadProfile, resolveProfile } from './adapter-profile.js';
 import { runSupervisor } from './supervisor.js';
@@ -24,6 +26,9 @@ import {
 } from './adapter-result.js';
 
 export { ADAPTER_REASON_CODES, validateAdapterResult };
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // --- Category + code mapping ------------------------------------------------
 
@@ -55,6 +60,8 @@ function deriveCode(nativeStatus) {
 // strings by constructing a result directly. Never remove the upstream clip.
 
 const ADAPTER_OUTPUT_CAP_BYTES = 64 * 1024;
+const MAX_MCP_PROBE_TOOLS = 64;
+const MAX_MCP_PROBE_TEXT_CHARS = 240;
 
 function capOutputField(value, wasTruncated) {
   if (typeof value !== 'string') return { text: '', truncated: !!wasTruncated };
@@ -65,6 +72,80 @@ function capOutputField(value, wasTruncated) {
   return {
     text: buf.subarray(0, ADAPTER_OUTPUT_CAP_BYTES).toString('utf8'),
     truncated: true,
+  };
+}
+
+function truncateProbeText(value, maxChars = MAX_MCP_PROBE_TEXT_CHARS) {
+  if (typeof value !== 'string') return '';
+  return value.length <= maxChars ? value : `${value.slice(0, maxChars - 1)}…`;
+}
+
+function resolveMcpProbeHelperPath() {
+  return resolve(__dirname, 'adapter-mcp-stdio-probe.js');
+}
+
+function buildMcpProbeSupervisorOptions(profile, envAllow = []) {
+  const transport = profile.mcp_transport || {};
+  const helperArgs = [
+    resolveMcpProbeHelperPath(),
+    '--tool', profile.tool,
+    '--transport-command', transport.command,
+    '--correlation', transport.correlation,
+    '--capability-discovery', transport.capability_discovery,
+  ];
+
+  for (const arg of (transport.args || [])) {
+    helperArgs.push('--transport-arg', arg);
+  }
+  if (transport.cwd) {
+    helperArgs.push('--transport-cwd', transport.cwd);
+  }
+
+  return {
+    command: process.execPath,
+    args: helperArgs,
+    nonInteractive: true,
+    jsonOutput: true,
+    cwd: process.cwd(),
+    envPolicy: { inherit: false, allow: ['PATH', ...envAllow], inject: {} },
+  };
+}
+
+function normalizeProbePayload(payload, profile) {
+  if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('MCP stdio probe returned a non-object payload.');
+  }
+  if (payload.transport !== 'stdio') {
+    throw new Error('MCP stdio probe returned an unexpected transport.');
+  }
+  if (!Array.isArray(payload.tools)) {
+    throw new Error('MCP stdio probe payload is missing a tools array.');
+  }
+
+  const tools = payload.tools
+    .filter((tool) => tool && typeof tool === 'object' && typeof tool.name === 'string' && tool.name.trim() !== '')
+    .slice(0, MAX_MCP_PROBE_TOOLS)
+    .map((tool) => ({
+      name: truncateProbeText(tool.name, 120),
+      description: truncateProbeText(tool.description || '', MAX_MCP_PROBE_TEXT_CHARS),
+      hasInputSchema: !!tool.hasInputSchema,
+    }));
+
+  return {
+    tool: profile.tool,
+    protocol: 'mcp',
+    transport: 'stdio',
+    correlation: profile.mcp_transport?.correlation || null,
+    capabilityDiscovery: profile.mcp_transport?.capability_discovery || null,
+    server: {
+      name: truncateProbeText(payload.server?.name || '', 120),
+      version: truncateProbeText(payload.server?.version || '', 80),
+      protocolVersion: truncateProbeText(payload.server?.protocolVersion || '', 40),
+      hasToolsCapability: !!payload.server?.hasToolsCapability,
+    },
+    toolCount: Number.isInteger(payload.toolCount) ? payload.toolCount : payload.tools.length,
+    toolsTruncated: !!payload.toolsTruncated,
+    tools,
   };
 }
 
@@ -160,19 +241,9 @@ export async function runAdapter(opts = {}) {
   } = opts;
 
   // 1. Load and validate profile (fail closed)
-  let profile;
-  try {
-    profile = loadAdapterProfile(tool, profilePath);
-  } catch (err) {
-    return wrapFailed(ADAPTER_REASON_CODES.PROFILE_NOT_FOUND, err?.message || 'Failed to load adapter profile.');
-  }
-  const validation = validateProfile(profile);
-  if (!validation.valid) {
-    return wrapFailed(
-      ADAPTER_REASON_CODES.PROFILE_INVALID,
-      `Adapter profile validation failed: ${validation.errors.join('; ')}`,
-    );
-  }
+  const profileResult = loadAndValidateAdapterProfile(tool, profilePath);
+  if (profileResult.error) return profileResult.error;
+  const profile = profileResult.profile;
 
   // 2. MCP gate: structured block that uses the profile's blocked exit_codes
   // mapping. See docs/adapter-implementation-plan.md#mcp-roadmap.
@@ -190,28 +261,12 @@ export async function runAdapter(opts = {}) {
   // 3. Auth/env preflight. Preflight blocks keep the synthetic adapter exit
   // code (16) rather than mapping through profile.exit_codes so scripted
   // auth-failure callers get a stable preflight signal across profiles.
-  const envCheck = checkEnvMappings(profile.requires_env || [], envAllow, {
-    authRequirements: profile.requires_auth || [],
-    currentEnv: process.env,
-  });
-  if (!envCheck.ok) {
-    return wrapBlocked(
-      ADAPTER_REASON_CODES.MISSING_AUTH_MAPPING,
-      `${envCheck.code}: ${envCheck.message}`,
-    );
-  }
-
-  const authCheck = await checkAuthPrerequisites(profile.requires_auth || [], {
+  const preflightResult = await runAdapterPreflight(profile, {
+    envAllow,
     cwd: directCwd || process.cwd(),
-    checkRunner: authCheckFn,
+    authCheckFn,
   });
-  if (!authCheck.ok) {
-    const detail = authCheck.detail ? ` Detail: ${authCheck.detail}` : '';
-    return wrapBlocked(
-      ADAPTER_REASON_CODES.MISSING_AUTH_PREREQUISITE,
-      `${authCheck.code}: ${authCheck.message}${detail}`,
-    );
-  }
+  if (preflightResult.error) return preflightResult.error;
 
   // 4. Resolve command/args/cwd: direct CLI wins, then rawInput via intercept
   let command = directCommand || null;
@@ -270,12 +325,172 @@ export async function runAdapter(opts = {}) {
   };
 }
 
+export async function probeAdapterMcpStdio(opts = {}) {
+  const {
+    tool, profilePath,
+    cwd: directCwd,
+    supervisorFn = runSupervisor,
+    envAllow = [],
+    authCheckFn,
+    timeoutMs = 5000,
+  } = opts;
+
+  const profileResult = loadAndValidateAdapterProfile(tool, profilePath);
+  if (profileResult.error) return { ok: false, adapterResult: profileResult.error.adapterResult, exitCode: profileResult.error.exitCode };
+  const profile = profileResult.profile;
+
+  if (profile.protocol !== 'mcp') {
+    const error = wrapBlocked(
+      ADAPTER_REASON_CODES.UNSUPPORTED,
+      'Adapter probe only supports profiles that declare protocol "mcp".',
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+  if (profile.mcp_transport?.type !== 'stdio') {
+    const error = wrapBlocked(
+      ADAPTER_REASON_CODES.UNSUPPORTED,
+      'Adapter probe currently supports only stdio MCP transports.',
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+
+  const preflightResult = await runAdapterPreflight(profile, {
+    envAllow,
+    cwd: directCwd || process.cwd(),
+    authCheckFn,
+  });
+  if (preflightResult.error) {
+    return { ok: false, adapterResult: preflightResult.error.adapterResult, exitCode: preflightResult.error.exitCode };
+  }
+
+  const helperPath = resolve(__dirname, 'adapter-mcp-stdio-probe.js');
+  const transport = profile.mcp_transport;
+  const supervisorOptions = {
+    command: process.execPath,
+    args: [
+      helperPath,
+      '--command', transport.command,
+      ...((transport.args || []).flatMap((value) => ['--arg', value])),
+      ...(transport.cwd ? ['--cwd', transport.cwd] : []),
+      '--timeout-ms', String(timeoutMs),
+    ],
+    nonInteractive: true,
+    jsonOutput: true,
+    envPolicy: { inherit: false, allow: ['PATH', ...envAllow], inject: {} },
+  };
+  if (directCwd) supervisorOptions.cwd = directCwd;
+
+  let supervisorResult;
+  try {
+    supervisorResult = await supervisorFn(supervisorOptions);
+  } catch (err) {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.SUPERVISOR_THREW,
+      `Supervisor execution error: ${err?.message || 'unknown'}`,
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+
+  const adapterResult = normalizeToAdapterResult(supervisorResult);
+  if (adapterResult.guardrail.category !== 'success') {
+    return {
+      ok: false,
+      adapterResult,
+      exitCode: adapterResult.guardrail.exitCode,
+    };
+  }
+
+  let parsedProbe;
+  try {
+    parsedProbe = JSON.parse(supervisorResult?.worker?.stdout || '{}');
+  } catch (err) {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.PROTOCOL_ERROR,
+      `MCP stdio probe returned invalid JSON: ${err.message}`,
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+
+  if (parsedProbe?.ok !== true) {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.PROTOCOL_ERROR,
+      parsedProbe?.reason || 'MCP stdio probe did not complete successfully.',
+    );
+    return {
+      ok: false,
+      adapterResult: error.adapterResult,
+      exitCode: error.exitCode,
+      probe: parsedProbe,
+    };
+  }
+
+  return {
+    ok: true,
+    probe: {
+      tool: profile.tool,
+      transport: parsedProbe.transport,
+      server: parsedProbe.server,
+    },
+    exitCode: 0,
+  };
+}
+
 // --- Internal helpers -------------------------------------------------------
 
 function loadAdapterProfile(tool, profilePath) {
   if (profilePath) return loadProfile(profilePath);
   if (tool) return resolveProfile(tool);
   return {}; // empty -> validation catches it
+}
+
+function loadAndValidateAdapterProfile(tool, profilePath) {
+  let profile;
+  try {
+    profile = loadAdapterProfile(tool, profilePath);
+  } catch (err) {
+    return { error: wrapFailed(ADAPTER_REASON_CODES.PROFILE_NOT_FOUND, err?.message || 'Failed to load adapter profile.') };
+  }
+  const validation = validateProfile(profile);
+  if (!validation.valid) {
+    return {
+      error: wrapFailed(
+        ADAPTER_REASON_CODES.PROFILE_INVALID,
+        `Adapter profile validation failed: ${validation.errors.join('; ')}`,
+      ),
+    };
+  }
+  return { profile };
+}
+
+async function runAdapterPreflight(profile, options) {
+  const envCheck = checkEnvMappings(profile.requires_env || [], options.envAllow || [], {
+    authRequirements: profile.requires_auth || [],
+    currentEnv: process.env,
+  });
+  if (!envCheck.ok) {
+    return {
+      error: wrapBlocked(
+        ADAPTER_REASON_CODES.MISSING_AUTH_MAPPING,
+        `${envCheck.code}: ${envCheck.message}`,
+      ),
+    };
+  }
+
+  const authCheck = await checkAuthPrerequisites(profile.requires_auth || [], {
+    cwd: options.cwd || process.cwd(),
+    checkRunner: options.authCheckFn,
+  });
+  if (!authCheck.ok) {
+    const detail = authCheck.detail ? ` Detail: ${authCheck.detail}` : '';
+    return {
+      error: wrapBlocked(
+        ADAPTER_REASON_CODES.MISSING_AUTH_PREREQUISITE,
+        `${authCheck.code}: ${authCheck.message}${detail}`,
+      ),
+    };
+  }
+
+  return { error: null };
 }
 
 function buildDriftSummary(drift) {

@@ -115,6 +115,7 @@ Commands:
   recipe versions <id>                  List installed versions of a recipe
   recipe publish --name <n> --category <c> [--manifest <path>] [--description <d>] [--dry-run]
   adapter run --tool <name> -- <cmd>    Run a command through an adapter profile
+  adapter probe --tool <name>           Probe an MCP stdio profile for discovery only
   adapter shim --tool <n> --commands <c>  Create PATH shims for adapter interception
   adapter profile install <source>      Install an adapter profile
   adapter profile list                  List adapter profiles
@@ -1766,7 +1767,7 @@ async function main() {
 
   if (parsed.subcommand === 'adapter') {
     const { runAdapterCli } = await import('./adapter-cli.js');
-    await runAdapterCli(parsed.adapterArgv || []);
+    await runAdapterCli(parsed.adapterArgv || [], { jsonOutput: parsed.json });
     process.exit(0);
   }
 

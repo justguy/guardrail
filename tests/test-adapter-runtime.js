@@ -9,6 +9,7 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readdirSync } from 'node:fs';
@@ -21,6 +22,7 @@ import {
 import {
   runAdapter,
   renderResponse,
+  probeAdapterMcpStdio,
 } from '../src/adapter-engine.js';
 import {
   createShim,
@@ -30,6 +32,7 @@ import {
   writeShellRc,
 } from '../src/adapter-shim.js';
 import { parseStdinInput } from '../src/adapter-stdin.js';
+import { buildEnvFromPolicy } from '../src/shared.js';
 
 // --- Fixtures ---------------------------------------------------------------
 
@@ -55,6 +58,82 @@ afterEach(() => {
     }
   }
 });
+
+function writeFakeMcpServer(dir, mode = 'success') {
+  const scriptPath = join(dir, `fake-mcp-${mode}.mjs`);
+  const script = `
+    import process from 'node:process';
+    let buffer = Buffer.alloc(0);
+    function encode(message) {
+      const body = Buffer.from(JSON.stringify(message), 'utf8');
+      return Buffer.concat([Buffer.from(\`Content-Length: \${body.length}\\r\\n\\r\\n\`, 'utf8'), body]);
+    }
+    function send(message) {
+      process.stdout.write(encode(message));
+    }
+    function handle(message) {
+      if (message.method === 'initialize') {
+        if (${JSON.stringify(mode)} === 'mismatched-id') {
+          send({ jsonrpc: '2.0', id: 'wrong-id', result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fake-mcp', version: '1.0.0' } } });
+          return;
+        }
+        if (${JSON.stringify(mode)} === 'unexpected-request') {
+          send({ jsonrpc: '2.0', id: 'server-request', method: 'roots/list', params: {} });
+          return;
+        }
+        send({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fake-mcp', version: '1.0.0' } } });
+        return;
+      }
+      if (message.method === 'tools/list') {
+        send({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'echo' }, { name: 'sum' }] } });
+      }
+    }
+    process.stdin.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      for (;;) {
+        const headerEnd = buffer.indexOf('\\r\\n\\r\\n');
+        if (headerEnd === -1) break;
+        const header = buffer.subarray(0, headerEnd).toString('utf8');
+        const match = /Content-Length:\\s*(\\d+)/i.exec(header);
+        if (!match) process.exit(2);
+        const length = Number.parseInt(match[1], 10);
+        const messageEnd = headerEnd + 4 + length;
+        if (buffer.length < messageEnd) break;
+        const payload = buffer.subarray(headerEnd + 4, messageEnd).toString('utf8');
+        buffer = buffer.subarray(messageEnd);
+        handle(JSON.parse(payload));
+      }
+    });
+  `;
+  writeFileSync(scriptPath, script, 'utf8');
+  return scriptPath;
+}
+
+async function runProbeHelperSupervisor(options) {
+  const child = spawnSync(options.command, options.args, {
+    cwd: options.cwd || process.cwd(),
+    encoding: 'utf8',
+    env: buildEnvFromPolicy(options.envPolicy),
+  });
+
+  return {
+    runId: 'probe-runtime',
+    status: child.status === 0 ? 'success' : 'internal_error',
+    reason: child.status === 0 ? 'ok' : (child.stderr || `exit ${child.status}`),
+    exitCode: child.status ?? 1,
+    worker: {
+      launched: true,
+      exitCode: child.status ?? 1,
+      stdout: child.stdout || '',
+      stderr: child.stderr || '',
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      interactivePromptDetected: false,
+      timedOut: false,
+    },
+    telemetry: { durationMs: 1 },
+  };
+}
 
 /**
  * Construct a synthetic adapter-result/v1 value for rendering tests.
@@ -300,6 +379,94 @@ describe('MCP block gate', () => {
     assert.equal(result.adapterResult.guardrail.code, 'MCP_BLOCKED');
     assert.ok(result.adapterResult.guardrail.reason.includes('MCP'));
     assert.equal(typeof result.exitCode, 'number');
+  });
+});
+
+describe('MCP stdio discovery probe', () => {
+  it('discovers tools from a bounded fake stdio server', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeMcpServer(dir, 'success');
+    const profile = {
+      version: '1.0.0',
+      tool: 'test-mcp-probe',
+      description: 'generic mcp profile under test',
+      schema_target: 'adapter-result/v1',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: process.execPath,
+        args: [serverPath],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+      intercept: {
+        command: '$.command',
+        args: '$.args',
+        cwd: '$.cwd',
+      },
+      response: {
+        format: 'json',
+        blocked: { status: 'blocked', reason: '$.guardrail.reason' },
+      },
+      exit_codes: { success: 0, blocked: 12, failed: 1 },
+      defaults: { non_interactive: true, json_output: true },
+    };
+    const profilePath = join(dir, 'test-mcp-probe.json');
+    writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+
+    const result = await probeAdapterMcpStdio({
+      profilePath,
+      envAllow: [],
+      supervisorFn: runProbeHelperSupervisor,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.probe.tool, 'test-mcp-probe');
+    assert.equal(result.probe.server.serverInfo.name, 'fake-mcp');
+    assert.deepEqual(result.probe.server.tools, ['echo', 'sum']);
+  });
+
+  it('fails closed when request correlation does not match', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeMcpServer(dir, 'mismatched-id');
+    const profile = {
+      version: '1.0.0',
+      tool: 'test-mcp-probe',
+      description: 'generic mcp profile under test',
+      schema_target: 'adapter-result/v1',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: process.execPath,
+        args: [serverPath],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+      intercept: {
+        command: '$.command',
+        args: '$.args',
+        cwd: '$.cwd',
+      },
+      response: {
+        format: 'json',
+        blocked: { status: 'blocked', reason: '$.guardrail.reason' },
+      },
+      exit_codes: { success: 0, blocked: 12, failed: 1 },
+      defaults: { non_interactive: true, json_output: true },
+    };
+    const profilePath = join(dir, 'test-mcp-probe.json');
+    writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+
+    const result = await probeAdapterMcpStdio({
+      profilePath,
+      supervisorFn: runProbeHelperSupervisor,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.adapterResult.guardrail.code, 'PROTOCOL_ERROR');
+    assert.ok(result.adapterResult.guardrail.reason.includes('mismatched request_id'));
   });
 });
 

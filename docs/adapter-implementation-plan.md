@@ -744,7 +744,8 @@ Current partial state:
 
 - MCP profiles may now declare a validated `mcp_transport` contract
 - Guardrail currently accepts `stdio` as the declared transport shape and requires explicit correlation/capability-discovery fields
-- runtime execution is still blocked; the contract is design-gate groundwork, not runnable transport support
+- `guardrail adapter probe --tool <name>` is now the bounded discovery exception: it runs an approval-bearing stdio helper that performs only `initialize` plus `tools/list` and returns discovered tool names
+- general runtime execution is still blocked; the contract is design-gate groundwork, not runnable transport support
 
 ---
 
@@ -754,6 +755,7 @@ Current partial state:
 guardrail adapter run --tool openclaw -- npm test
 guardrail adapter run --profile ./my-tool.json -- npm test
 guardrail adapter run --profile ./my-tool.json --env-allow ANTHROPIC_API_KEY -- npm test
+guardrail adapter probe --tool cline
 guardrail adapter shim --tool aider --commands npm,git,python
 guardrail adapter shim --list
 guardrail adapter shim --remove npm

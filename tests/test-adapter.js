@@ -9,6 +9,7 @@ import {
   normalizeToAdapterResult,
   renderResponse,
   runAdapter,
+  probeAdapterMcpStdio,
 } from '../src/adapter-engine.js';
 import { runStdinAdapter } from '../src/adapter-stdin.js';
 
@@ -577,6 +578,14 @@ describe('parseAdapterArgs', async () => {
     assert.deepEqual(r.envAllow, ['ANTHROPIC_API_KEY', 'FOO']);
   });
 
+  it('parses adapter probe with repeated --env-allow flags', () => {
+    const r = parseAdapterArgs(['probe', '--tool', 'cline', '--env-allow', 'HOME', '--env-allow', 'XDG_CONFIG_HOME', '--timeout-ms', '2500']);
+    assert.equal(r.subcommand, 'adapter-probe');
+    assert.equal(r.tool, 'cline');
+    assert.equal(r.timeoutMs, '2500');
+    assert.deepEqual(r.envAllow, ['HOME', 'XDG_CONFIG_HOME']);
+  });
+
   it('parses adapter shim --tool aider --commands npm,git', () => {
     const r = parseAdapterArgs(['shim', '--tool', 'aider', '--commands', 'npm,git']);
     assert.equal(r.subcommand, 'adapter-shim');
@@ -623,6 +632,118 @@ describe('parseAdapterArgs', async () => {
   it('returns error for unknown subcommand', () => {
     const r = parseAdapterArgs(['bogus']);
     assert.ok(r.error);
+  });
+});
+
+describe('probeAdapterMcpStdio', () => {
+  it('rejects non-mcp profiles', async () => {
+    const dir = makeTempDir();
+    const profilePath = writeProfile(dir, makeJsonProfile());
+
+    const result = await probeAdapterMcpStdio({ profilePath });
+    assert.equal(result.ok, false);
+    assert.equal(result.adapterResult.guardrail.code, 'UNSUPPORTED');
+  });
+
+  it('enforces env/auth preflight before probe launch', async () => {
+    const dir = makeTempDir();
+    const profilePath = writeProfile(dir, makeJsonProfile({
+      tool: 'probe-mcp',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: 'node',
+        args: ['server.js'],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+      requires_env: ['HOME'],
+    }));
+
+    let supervisorCalled = false;
+    const result = await probeAdapterMcpStdio({
+      profilePath,
+      supervisorFn: async () => {
+        supervisorCalled = true;
+        return {};
+      },
+    });
+
+    assert.equal(supervisorCalled, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.adapterResult.guardrail.code, 'MISSING_AUTH_MAPPING');
+  });
+
+  it('returns parsed probe payload on success', async () => {
+    const dir = makeTempDir();
+    const profilePath = writeProfile(dir, makeJsonProfile({
+      tool: 'probe-mcp',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: 'node',
+        args: ['server.js'],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+    }));
+
+    const result = await probeAdapterMcpStdio({
+      profilePath,
+      supervisorFn: async () => ({
+        runId: 'gr-probe',
+        status: 'success',
+        reason: 'ok',
+        exitCode: 0,
+        worker: {
+          launched: true,
+          stdout: JSON.stringify({
+            ok: true,
+            transport: { type: 'stdio', command: 'node', args: ['server.js'], cwd: null },
+            server: { protocolVersion: '2024-11-05', serverInfo: { name: 'fake-server' }, capabilities: {}, toolCount: 2, tools: ['echo', 'sum'] },
+          }),
+          stderr: '',
+        },
+        telemetry: { durationMs: 3 },
+      }),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.probe.tool, 'probe-mcp');
+    assert.deepEqual(result.probe.server.tools, ['echo', 'sum']);
+  });
+
+  it('fails closed when helper output is malformed', async () => {
+    const dir = makeTempDir();
+    const profilePath = writeProfile(dir, makeJsonProfile({
+      tool: 'probe-mcp',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: 'node',
+        args: ['server.js'],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+    }));
+
+    const result = await probeAdapterMcpStdio({
+      profilePath,
+      supervisorFn: async () => ({
+        runId: 'gr-probe',
+        status: 'success',
+        reason: 'ok',
+        exitCode: 0,
+        worker: { launched: true, stdout: '{not-json', stderr: '' },
+        telemetry: { durationMs: 3 },
+      }),
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.adapterResult.guardrail.code, 'PROTOCOL_ERROR');
   });
 });
 

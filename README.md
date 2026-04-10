@@ -652,6 +652,7 @@ MCP status:
 - `stdin-json` and `env-shim` are the runnable adapter transports today
 - MCP profiles are recognized and may declare a validated `mcp_transport` contract, but runtime support is still intentionally blocked
 - blocked MCP runs now tell you which transport contract was recognized so users can distinguish “profile is malformed” from “transport exists on paper but is not live yet”
+- `guardrail adapter probe --tool <name>` is now the bounded MCP discovery exception: it runs an approval-bearing stdio probe that only performs `initialize` plus `tools/list` for MCP profiles with declared `stdio` transport, without enabling full MCP command execution
 
 Current architecture:
 
@@ -660,6 +661,7 @@ Current architecture:
 - **Pure-data profiles**: public profiles declare a `schema_target`, map fields from `adapter-result/v1`, and cannot execute arbitrary code
 - **Pinned distribution**: public profiles install from SHA-pinned GitHub URLs, not from bare names
 - **Protocol limits**: Phase 1 supports `stdin-json` and `env-shim`; `mcp` profiles may exist but runtime support is deferred and blocked before execution
+- **Bounded MCP probe**: `adapter probe` is additive and opt-in; it uses the declared `mcp_transport` contract, runs the transport under Guardrail, and only performs capability discovery (`initialize` + `tools/list`)
 - **Logging and audit**: adapter runs emit structured log/audit events, and any stdout/stderr exposed to adapters is clipped to bounded sizes
 - **Auth preflight**: profiles may declare `requires_env` and `requires_auth`; Guardrail fails early when required env mappings or bounded CLI auth prerequisites are missing. `requires_env` requires explicit `--env-allow` mapping; missing entries fail closed with `missing_auth_mapping`. `requires_auth` runs bounded local checks (for example `claude_login` and `gh_auth`) and fails with `missing_auth_prerequisite` when the current runtime is not authenticated.
 
@@ -668,6 +670,7 @@ Example:
 ```bash
 guardrail adapter run --tool openclaw -- npm test
 guardrail adapter run --profile ./my-tool.json --env-allow ANTHROPIC_API_KEY -- npm test
+guardrail adapter probe --tool cline
 guardrail adapter run --tool cline -- echo "blocked in v0.2"
 guardrail adapter profile install github://guardrail-dev/adapter-profiles/openclaw.json@<sha>
 ```
@@ -684,6 +687,7 @@ Adapter caveats:
 
 - `requires_auth` is preflight-only and does not perform interactive login. If a tool reports `missing_auth_prerequisite`, authenticate the runtime first (for example `claude auth login` or `gh auth login`) and retry.
 - Adapter `run` also enforces approval reuse: first approval is interactive and binds an adapter manifest; without one, `adapter run` returns a blocked result with `No approved manifest found`.
+- `adapter probe` is discovery only. It does not run user commands through MCP profiles, and it does not make `adapter run` live for MCP tools. Use it to confirm that the declared stdio transport can initialize and expose tools under Guardrail.
 - MCP profiles are blocked at CLI level in v0.2 with a hard error. If you need IDE-style protocol execution now, use the env-shim path instead.
 - `--env-allow` is bounded and explicit. It only controls what environment keys are handed to the adapter process for that run.
 - `claude-exec` and `codex-exec` are approval-bounded wrappers, not outer sandboxes. If you run them outside your host sandbox/container boundary, the underlying AI CLI runs with host privileges subject to its own permission model. Guardrail now calls this out as a yellow-to-red risk reason in approval UX.

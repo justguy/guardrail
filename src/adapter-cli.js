@@ -1,15 +1,72 @@
-import { resolve } from 'node:path';
-import { existsSync } from 'node:fs';
-
 // ---------------------------------------------------------------------------
 // Adapter CLI — subcommand parsing and routing
 // ---------------------------------------------------------------------------
+
+function readFlagValue(argv, index) {
+  if (index + 1 >= argv.length) return { error: 'usage' };
+  return { value: argv[index + 1], nextIndex: index + 2 };
+}
+
+function parseFlags(argv, startIndex, result, handlers) {
+  let i = startIndex;
+  while (i < argv.length) {
+    const handler = handlers[argv[i]];
+    if (!handler) return { error: 'usage' };
+    const next = handler(result, argv, i);
+    if (!next || next.error) return { error: 'usage' };
+    i = next.nextIndex;
+  }
+  return result;
+}
+
+function valueFlag(field, transform = (value) => value) {
+  return (result, argv, index) => {
+    const next = readFlagValue(argv, index);
+    if (next.error) return next;
+    result[field] = transform(next.value);
+    return next;
+  };
+}
+
+function repeatedValueFlag(field, transform = (value) => value) {
+  return (result, argv, index) => {
+    const next = readFlagValue(argv, index);
+    if (next.error) return next;
+    result[field].push(transform(next.value));
+    return next;
+  };
+}
+
+function parseRunArgs(argv, startIndex, result) {
+  let i = startIndex;
+  while (i < argv.length) {
+    if (argv[i] === '--') {
+      i += 1;
+      if (i < argv.length) {
+        result.command = argv[i];
+        result.args = argv.slice(i + 1);
+      }
+      return result;
+    }
+    const handler = {
+      '--tool': valueFlag('tool'),
+      '--profile': valueFlag('profilePath'),
+      '--env-allow': repeatedValueFlag('envAllow'),
+    }[argv[i]];
+    if (!handler) return { error: 'usage' };
+    const next = handler(result, argv, i);
+    if (next.error) return next;
+    i = next.nextIndex;
+  }
+  return result;
+}
 
 /**
  * Parse adapter subcommand arguments.
  *
  * Supported commands:
  *   adapter run --tool <name> [--profile <path>] [--env-allow <VAR>] -- <command> [args...]
+ *   adapter probe --tool <name> [--profile <path>] [--env-allow <VAR>] [--timeout-ms <ms>]
  *   adapter shim --tool <name> --commands <cmd1,cmd2> [--list] [--remove <cmd>] [--install-path [--write]]
  *   adapter profile install <path|url|github://>
  *   adapter profile list
@@ -17,88 +74,81 @@ import { existsSync } from 'node:fs';
  */
 export function parseAdapterArgs(argv) {
   const result = { subcommand: null };
-  let i = 0;
+  if (argv.length === 0) return { error: 'usage' };
 
-  if (i >= argv.length) return { error: 'usage' };
+  const action = argv[0];
 
-  const action = argv[i++];
-
-  // --- adapter run ---
   if (action === 'run') {
-    result.subcommand = 'adapter-run';
-    result.tool = null;
-    result.profilePath = null;
-    result.envAllow = [];
-    result.command = null;
-    result.args = [];
-
-    while (i < argv.length) {
-      if (argv[i] === '--tool' && i + 1 < argv.length) { result.tool = argv[++i]; i++; continue; }
-      if (argv[i] === '--profile' && i + 1 < argv.length) { result.profilePath = argv[++i]; i++; continue; }
-      if (argv[i] === '--env-allow' && i + 1 < argv.length) { result.envAllow.push(argv[++i]); i++; continue; }
-      if (argv[i] === '--') {
-        i++;
-        if (i < argv.length) {
-          result.command = argv[i++];
-          result.args = argv.slice(i);
-        }
-        break;
-      }
-      return { error: 'usage' };
-    }
-
-    return result;
+    return parseRunArgs(argv, 1, {
+      subcommand: 'adapter-run',
+      tool: null,
+      profilePath: null,
+      envAllow: [],
+      command: null,
+      args: [],
+    });
   }
 
-  // --- adapter shim ---
+  if (action === 'probe') {
+    return parseFlags(argv, 1, {
+      subcommand: 'adapter-probe',
+      tool: null,
+      profilePath: null,
+      envAllow: [],
+      timeoutMs: null,
+      json: false,
+    }, {
+      '--tool': valueFlag('tool'),
+      '--profile': valueFlag('profilePath'),
+      '--env-allow': repeatedValueFlag('envAllow'),
+      '--timeout-ms': valueFlag('timeoutMs'),
+      '--json': (parsed, _argv, index) => { parsed.json = true; return { nextIndex: index + 1 }; },
+    });
+  }
+
   if (action === 'shim') {
-    result.subcommand = 'adapter-shim';
-    result.tool = null;
-    result.commands = [];
-    result.list = false;
-    result.remove = null;
-    result.installPath = false;
-    result.write = false;
-
-    while (i < argv.length) {
-      if (argv[i] === '--tool' && i + 1 < argv.length) { result.tool = argv[++i]; i++; continue; }
-      if (argv[i] === '--commands' && i + 1 < argv.length) { result.commands = argv[++i].split(','); i++; continue; }
-      if (argv[i] === '--list') { result.list = true; i++; continue; }
-      if (argv[i] === '--remove' && i + 1 < argv.length) { result.remove = argv[++i]; i++; continue; }
-      if (argv[i] === '--install-path') { result.installPath = true; i++; continue; }
-      if (argv[i] === '--write') { result.write = true; i++; continue; }
-      return { error: 'usage' };
-    }
-
-    return result;
+    return parseFlags(argv, 1, {
+      subcommand: 'adapter-shim',
+      tool: null,
+      commands: [],
+      list: false,
+      remove: null,
+      installPath: false,
+      write: false,
+    }, {
+      '--tool': valueFlag('tool'),
+      '--commands': valueFlag('commands', (value) => value.split(',')),
+      '--list': (parsed, _argv, index) => { parsed.list = true; return { nextIndex: index + 1 }; },
+      '--remove': valueFlag('remove'),
+      '--install-path': (parsed, _argv, index) => { parsed.installPath = true; return { nextIndex: index + 1 }; },
+      '--write': (parsed, _argv, index) => { parsed.write = true; return { nextIndex: index + 1 }; },
+    });
   }
 
-  // --- adapter profile ---
   if (action === 'profile') {
-    if (i >= argv.length) return { error: 'usage' };
-    const profileAction = argv[i++];
+    if (argv.length < 2) return { error: 'usage' };
+    const profileAction = argv[1];
 
     if (profileAction === 'install') {
-      result.subcommand = 'adapter-profile-install';
-      if (i >= argv.length) return { error: 'usage' };
-      result.source = argv[i++];
-      while (i < argv.length) {
-        if (argv[i] === '--force') { result.force = true; i++; continue; }
-        return { error: 'usage' };
-      }
-      return result;
+      if (argv.length < 3) return { error: 'usage' };
+      return parseFlags(argv, 3, {
+        subcommand: 'adapter-profile-install',
+        source: argv[2],
+        force: false,
+      }, {
+        '--force': (parsed, _argv, index) => {
+          parsed.force = true;
+          return { nextIndex: index + 1 };
+        },
+      });
     }
 
     if (profileAction === 'list') {
-      result.subcommand = 'adapter-profile-list';
-      return result;
+      return { subcommand: 'adapter-profile-list' };
     }
 
-    if (profileAction === 'show') {
-      result.subcommand = 'adapter-profile-show';
-      if (i >= argv.length) return { error: 'usage' };
-      result.tool = argv[i++];
-      return result;
+    if (profileAction === 'show' && argv.length >= 3) {
+      return { subcommand: 'adapter-profile-show', tool: argv[2] };
     }
 
     return { error: 'usage' };
@@ -107,21 +157,48 @@ export function parseAdapterArgs(argv) {
   return { error: 'usage' };
 }
 
+function formatProbeResult(result, jsonOutput) {
+  if (jsonOutput) {
+    return JSON.stringify(result.ok ? result : {
+      ok: false,
+      adapterResult: result.adapterResult,
+      ...(result.probe ? { probe: result.probe } : {}),
+    }, null, 2);
+  }
+
+  if (!result.ok) {
+    return result.adapterResult?.guardrail?.reason || 'Adapter probe failed.';
+  }
+
+  const lines = [
+    `MCP stdio probe succeeded for ${result.probe.tool}`,
+    `  Transport:         ${result.probe.transport.type}`,
+    `  Command:           ${result.probe.transport.command}`,
+    `  Protocol version:  ${result.probe.server.protocolVersion || '<unknown>'}`,
+  ];
+  if (result.probe.server.serverInfo?.name) {
+    const version = result.probe.server.serverInfo.version ? ` v${result.probe.server.serverInfo.version}` : '';
+    lines.push(`  Server:            ${result.probe.server.serverInfo.name}${version}`);
+  }
+  lines.push(`  Tools discovered:  ${result.probe.server.toolCount}`);
+  for (const toolName of result.probe.server.tools || []) {
+    lines.push(`    - ${toolName}`);
+  }
+  return lines.join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Adapter CLI dispatcher
 // ---------------------------------------------------------------------------
 
-/**
- * Run the adapter CLI from parsed arguments.
- * Called by main() in cli.js when subcommand === 'adapter'.
- */
-export async function runAdapterCli(adapterArgv) {
+export async function runAdapterCli(adapterArgv, options = {}) {
   const parsed = parseAdapterArgs(adapterArgv);
 
   if (parsed.error) {
-    console.error('Usage: guardrail adapter <run|shim|profile> [options]');
+    console.error('Usage: guardrail adapter <run|probe|shim|profile> [options]');
     console.error('');
     console.error('  adapter run --tool <name> [--env-allow VAR] -- <command> [args...]');
+    console.error('  adapter probe --tool <name> [--env-allow VAR] [--timeout-ms MS]');
     console.error('  adapter shim --tool <name> --commands <cmd1,cmd2>');
     console.error('  adapter shim --list');
     console.error('  adapter shim --remove <command>');
@@ -133,7 +210,6 @@ export async function runAdapterCli(adapterArgv) {
     return;
   }
 
-  // --- adapter run ---
   if (parsed.subcommand === 'adapter-run') {
     if (!parsed.tool && !parsed.profilePath) {
       console.error('Error: No tool specified. Use --tool <name> or --profile <path>.');
@@ -152,9 +228,6 @@ export async function runAdapterCli(adapterArgv) {
         envAllow: parsed.envAllow || [],
       });
 
-      // MCP gate: adapter-result carries the structured block; the CLI keeps
-      // the user-facing error message shape and the historical exit-1 for
-      // shell scripts that pipe `guardrail adapter run --tool cline ...`.
       const code = result?.adapterResult?.guardrail?.code;
       if (code === ADAPTER_REASON_CODES.MCP_BLOCKED) {
         console.error('Error: MCP protocol is not yet supported in v0.2.');
@@ -168,9 +241,6 @@ export async function runAdapterCli(adapterArgv) {
         process.exit(1);
         return;
       }
-      // PROFILE_NOT_FOUND / PROFILE_INVALID: keep the legacy behaviour of
-      // printing the reason to stderr and exiting with 1 rather than the
-      // adapter-result exit code, so existing shell scripts don't break.
       if (
         code === ADAPTER_REASON_CODES.PROFILE_NOT_FOUND
         || code === ADAPTER_REASON_CODES.PROFILE_INVALID
@@ -192,7 +262,39 @@ export async function runAdapterCli(adapterArgv) {
     return;
   }
 
-  // --- adapter shim ---
+  if (parsed.subcommand === 'adapter-probe') {
+    if (!parsed.tool && !parsed.profilePath) {
+      console.error('Error: No tool specified. Use --tool <name> or --profile <path>.');
+      console.error('Available tools: guardrail adapter profile list');
+      process.exit(1);
+      return;
+    }
+
+    const { probeAdapterMcpStdio } = await import('./adapter-engine.js');
+    const jsonOutput = !!parsed.json || !!options.jsonOutput;
+    const result = await probeAdapterMcpStdio({
+      tool: parsed.tool,
+      profilePath: parsed.profilePath,
+      envAllow: parsed.envAllow || [],
+      timeoutMs: parsed.timeoutMs || 5000,
+    });
+
+    if (!result.ok) {
+      const output = formatProbeResult(result, jsonOutput);
+      if (jsonOutput) {
+        console.log(output);
+      } else {
+        console.error(output);
+      }
+      process.exit(result.exitCode || 1);
+      return;
+    }
+
+    console.log(formatProbeResult(result, jsonOutput));
+    process.exit(0);
+    return;
+  }
+
   if (parsed.subcommand === 'adapter-shim') {
     const { createShim, removeShim, listShims, getInstallPathExport, writeShellRc } = await import('./adapter-shim.js');
 
@@ -255,7 +357,6 @@ export async function runAdapterCli(adapterArgv) {
     return;
   }
 
-  // --- adapter profile install ---
   if (parsed.subcommand === 'adapter-profile-install') {
     const { installAdapterProfile } = await import('./adapter-profile-install.js');
     try {
@@ -271,7 +372,6 @@ export async function runAdapterCli(adapterArgv) {
     return;
   }
 
-  // --- adapter profile list ---
   if (parsed.subcommand === 'adapter-profile-list') {
     const { listProfiles } = await import('./adapter-profile.js');
     const profiles = listProfiles();
@@ -288,7 +388,6 @@ export async function runAdapterCli(adapterArgv) {
     return;
   }
 
-  // --- adapter profile show ---
   if (parsed.subcommand === 'adapter-profile-show') {
     const { resolveProfile } = await import('./adapter-profile.js');
     try {
@@ -299,6 +398,5 @@ export async function runAdapterCli(adapterArgv) {
       console.error(err.message);
       process.exit(1);
     }
-    return;
   }
 }

@@ -414,11 +414,13 @@ Adapter mode operator rules:
 - `adapter run` builds on the selected profile and the underlying supervisor contract. If the profile/runtime does not support the interactive approval path you need, stop and report that instead of guessing hidden flags.
 - MCP profiles are still blocked at runtime, but they may now declare an explicit `mcp_transport` contract. Treat that as design-gate metadata only until Guardrail ships actual MCP transport support.
 - If a blocked MCP run mentions a declared transport, that means the profile shape was recognized; it does not mean the MCP runtime is live.
+- The one shipped MCP exception is `adapter probe --tool <name>`. It is an explicit discovery-only path for MCP `stdio` profiles: Guardrail approves and launches the declared transport, performs `initialize` plus `tools/list`, and reports the discovered tool inventory. It does not enable general MCP execution or make `adapter run` live for MCP profiles.
 
 Useful adapter subcommands:
 
 - `guardrail adapter run --tool <name> -- <command> [args...]`
 - `guardrail adapter run --profile <profile-path> -- <command> [args...]`
+- `guardrail adapter probe --tool <name>`
 - `guardrail adapter profile install github://owner/repo/path.json@<sha>`
 - `guardrail adapter profile list`
 - `guardrail adapter profile show <tool>`
@@ -427,10 +429,11 @@ Bounded auth preflight behavior:
 
 - `requires_env` requires explicit env mappings. If a required variable is not in `--env-allow`, `adapter run` fails before execution with `missing_auth_mapping`.
 - `requires_auth` validates bounded runtime state for known checks (for example `claude_login`, `gh_auth`) before process launch; missing checks fail with `missing_auth_prerequisite`.
+- The same env/auth preflight applies to `adapter probe` before the MCP stdio transport is launched. If the probe blocks on `missing_auth_mapping` or `missing_auth_prerequisite`, fix the runtime and rerun the probe; do not assume the probe can bypass adapter auth requirements.
 - Auth preflight returns blocked status and stops. It does not log the agent in for you; authentication must already exist in the same runtime (`claude auth login` / `gh auth status/login`).
 - Explicit env mapping may still be insufficient for CLIs whose login state lives in OS-managed secure stores or other process-identity-gated locations. In those cases the practical fix is to run Guardrail from the same working launcher/runtime, or to redo login from the exact shell/runtime that will later launch Guardrail.
 - This adapter auth-preflight section explains the shipped `requires_env` / `requires_auth` behavior. Standalone recipe mode does not yet run the same preflight automatically, so recipe-mode agents must rely on the selected recipe's auth/runtime notes plus direct tool checks in the Guardrail runtime.
-- MCP protocol profiles are intentionally blocked in v0.2 at CLI level. Use a supported non-MCP profile shape instead or wait for the roadmap to land.
+- MCP protocol profiles are intentionally blocked for `adapter run` in v0.2. Use `adapter probe` only for bounded discovery, or use a supported non-MCP profile shape for actual execution.
 
 Host runtime decision rule:
 
