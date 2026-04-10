@@ -66,7 +66,12 @@ function makeClaudeStubRecipe(overrides = {}) {
       },
       prompt: {
         type: 'string',
-        approval_mode: 'review_each_time',
+        approval_mode: 'interactive_message',
+        required: false,
+      },
+      no_session_persistence: {
+        type: 'boolean',
+        default: true,
         required: false,
       },
       lifecycle: {
@@ -168,8 +173,12 @@ describe('Claude recipe', () => {
     );
     assert.match(recipe.inputs.system_prompt.description, /Workflow recipe_ref usage does not bypass this reapproval rule/);
     assert.ok(
-      recipe.guardrails?.constraints?.some((line) => line.includes('recipe_ref chaining') && line.includes('local template')),
+      recipe.guardrails?.constraints?.some((line) => line.includes('interactive_message semantics')),
     );
+    assert.ok(
+      recipe.guardrails?.constraints?.some((line) => line.includes('system_prompt remains review_each_time') && line.includes('local template')),
+    );
+    assert.equal(recipe.inputs.prompt.approval_mode, 'interactive_message');
   });
 
   it('parses wrapper args by flag name', () => {
@@ -526,6 +535,7 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
       working_dir: '.',
       session_name: 'auth-review',
       lifecycle: 'start',
+      no_session_persistence: true,
     };
     seedStubManifest(dir, recipesDir, recipe, resolvedInputs);
 
@@ -649,7 +659,7 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
     assert.equal(executor.called, 0);
   });
 
-  it('still forces fresh approval for review_each_time prompt even when session matches', async () => {
+  it('reuses interactive_message prompt in the same persistent session without reapproval', async () => {
     const dir = tmpDir();
     const recipesDir = join(dir, 'recipes');
     mkdirSync(recipesDir, { recursive: true });
@@ -660,6 +670,7 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
       working_dir: '.',
       session_name: 'auth-review',
       lifecycle: 'continue',
+      no_session_persistence: false,
       prompt: 'Original prompt contents',
     };
     seedStubManifest(dir, recipesDir, recipe, approvedInputs);
@@ -684,9 +695,9 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
     );
     saveSessionContract(approvedContract, contractPath);
 
-    // Now run with a DIFFERENT prompt. The session contract still matches,
-    // but prompt is review_each_time so the recipe-manifest diff must force
-    // fresh approval. In non-interactive mode that surfaces as drift.
+    // Now run with a DIFFERENT prompt. The session contract still matches
+    // and prompt is interactive_message, so the recipe-manifest diff should
+    // treat this as session-bound user traffic rather than drift.
     const executor = stubExecutor();
     const result = await runRecipeSupervisor({
       specifier: recipe.id,
@@ -694,6 +705,7 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
         working_dir: '.',
         session_name: 'auth-review',
         lifecycle: 'continue',
+        no_session_persistence: false,
         prompt: 'A completely different prompt',
       },
       cwd: dir,
@@ -703,13 +715,61 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
       executorFn: executor.fn,
     });
 
-    // The prompt change must block the run — session match must NOT bypass
-    // prompt reapproval.
-    assert.notEqual(result.status, 'success');
-    assert.equal(executor.called, 0, 'executor must not run when prompt drift is detected');
-    assert.ok(
-      result.status === 'drift_detected' || result.status === 'approval_required',
-      `expected drift_detected or approval_required, got ${result.status}`,
+    assert.equal(result.status, 'success');
+    assert.equal(executor.called, 1, 'executor should run when only the interactive message changes');
+  });
+
+  it('still forces fresh approval for interactive_message prompt when persistence is disabled', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    const recipe = makeClaudeStubRecipe();
+    writeStubRecipeFile(recipesDir, recipe);
+
+    const approvedInputs = {
+      working_dir: '.',
+      session_name: 'auth-review',
+      lifecycle: 'continue',
+      no_session_persistence: true,
+      prompt: 'Original prompt contents',
+    };
+    seedStubManifest(dir, recipesDir, recipe, approvedInputs);
+
+    const approvedContract = buildSessionContract({
+      tool: 'claude',
+      recipeId: 'claude-exec',
+      recipeVersion: '1.0.0',
+      workingDir: '.',
+      addDirs: [],
+      sessionName: 'auth-review',
+      sessionId: null,
+      lifecycle: 'continue',
+    });
+    const contractPath = defaultSessionContractPath(
+      join(dir, '.guardrail'),
+      recipe.id,
+      'auth-review',
     );
+    saveSessionContract(approvedContract, contractPath);
+
+    const executor = stubExecutor();
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: {
+        working_dir: '.',
+        session_name: 'auth-review',
+        lifecycle: 'continue',
+        no_session_persistence: true,
+        prompt: 'A completely different prompt',
+      },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      nonInteractive: true,
+      jsonOutput: true,
+      executorFn: executor.fn,
+    });
+
+    assert.notEqual(result.status, 'success');
+    assert.equal(executor.called, 0, 'executor must not run when persistence is disabled');
   });
 });

@@ -1,6 +1,6 @@
 # Guardrail — Interactive User-Message Sessions
 
-Status: Proposed roadmap item for `D0s`  
+Status: Partially implemented for recipe/template manifest reuse; resident send-message lanes still open under `D0s` / `D0r`  
 Audience: Maintainers extending AI runtime recipes, transport composition, and approval semantics  
 Goal: Let a user chat directly with a guarded AI runtime without reapproving every message, while still keeping the executable boundary fixed and auditable
 
@@ -90,14 +90,14 @@ Instead:
 
 ### `claude-exec` / `codex-exec` recipe mode today
 
-- `prompt` and `system_prompt` are `review_each_time`
-- good for one-shot bounded automation
-- wrong abstraction for direct interactive chat
+- `prompt` now supports `interactive_message` session-bound reuse for the same persistent named session
+- `system_prompt` remains `review_each_time`
+- good for direct chat inside a fixed runtime boundary, but still not a full resident send-message lane
 
 ### Session contracts (`A0g`)
 
 - useful for named runs and attach/continue enforcement
-- do not yet distinguish "message inside session" from "prompt drift requiring approval"
+- now sufficient to distinguish session-bound prompt traffic from executable-boundary drift when the artifact explicitly marks `prompt` as `interactive_message`
 
 ### Resident transport sessions (`D0r`)
 
@@ -133,7 +133,7 @@ Recommendation:
 ## Acceptance Criteria
 
 - one approval starts an interactive guarded AI session
-- later user messages do not require fresh approval by default
+- later user messages do not require fresh approval by default when they stay inside the same persistent named session
 - changing runtime boundary fields still requires fresh approval
 - host-runtime transport can still be explicit and composed
 - audit clearly distinguishes:

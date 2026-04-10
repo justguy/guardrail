@@ -43,6 +43,7 @@ describe('CMUX Claude recipe', () => {
     assert.ok(Array.isArray(recipe.requires_env));
     assert.ok(recipe.steps[0].composed_recipe);
     assert.equal(recipe.steps[0].composed_recipe.recipe, 'claude-exec');
+    assert.equal(recipe.inputs.prompt.approval_mode, 'interactive_message');
     assert.ok(
       recipe.guardrails?.constraints?.some((line) => line.includes('same Guardrail approval unit')),
     );

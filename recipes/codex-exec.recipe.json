@@ -21,8 +21,8 @@
     },
     "prompt": {
       "type": "string",
-      "description": "Inline prompt text to send to Codex. Fresh approval is required each time.",
-      "approval_mode": "review_each_time",
+      "description": "Inline prompt text to send to Codex. For one-shot runs this is still approval-sensitive. For persistent named sessions (`lifecycle=continue|attach`), later user messages can change without reapproval as long as the session identity and executable boundary stay fixed.",
+      "approval_mode": "interactive_message",
       "required": false
     },
     "input_files": {
@@ -228,6 +228,8 @@
       "Input files are appended as explicit tagged blocks so the prompt boundary is visible",
       "Guardrail does not provide outer sandboxing for Codex itself; running this recipe outside an external sandbox uses host privileges subject to Codex's own permission model",
       "The wrapper only forwards supported codex exec flags and drops unset parameters"
+      ,
+      "The inline prompt uses interactive_message semantics: later user messages may change without reapproval only for the same persistent named session. Session-identity or runtime-boundary changes still require approval"
     ],
     "invariants": [
       "mode: structured",

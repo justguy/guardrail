@@ -56,8 +56,8 @@
     },
     "prompt": {
       "type": "string",
-      "description": "Inline prompt text for the composed claude-exec layer. Fresh approval is still required each time.",
-      "approval_mode": "review_each_time",
+      "description": "Inline prompt text for the composed claude-exec layer. For a persistent named session (`lifecycle=continue|attach` with `no_session_persistence=false`), later user messages can change without reapproval as long as the composed session identity and executable boundary stay fixed.",
+      "approval_mode": "interactive_message",
       "required": false
     },
     "input_files": {
@@ -237,7 +237,7 @@
     "constraints": [
       "This recipe keeps the cmux host-runtime hop explicit, but composes the bundled claude-exec recipe into the same Guardrail approval unit instead of launching a nested inner guardrail run",
       "The wrapper creates a fresh workspace, executes a bounded composed contract, waits for a hosted exit sentinel, and captures pane output without shell-mode recipe steps",
-      "The composed claude-exec layer still owns its review_each_time prompt/system_prompt rules, trust boundary, session contract behavior, env handshake, and Claude CLI auth/runtime requirements",
+      "The composed claude-exec layer still owns its trust boundary, session contract behavior, env handshake, and Claude CLI auth/runtime requirements. `prompt` is interactive_message/session-bound; `system_prompt` remains review_each_time",
       "socket_path is exact-match approved because it addresses a specific terminal control socket",
       "One approval manifest covers both the explicit transport layer and the composed claude-exec layer; drift in either layer blocks reuse"
     ],

@@ -264,6 +264,20 @@ export function validateInputValue(value, schema, opts = {}) {
     };
   }
 
+  // interactive_message: free-form user text that is intended to flow
+  // inside an already-approved interactive session. Approval reuse policy is
+  // handled at manifest/session comparison time, not here.
+  if (mode === 'interactive_message') {
+    const normalized = normalizeValue(value, schema);
+    return {
+      valid: true,
+      normalized,
+      risk_traits: [],
+      reasons: [],
+      never_reuse: false,
+    };
+  }
+
   // boolean type: validate before mode dispatch
   if (schema.type === 'boolean') {
     if (value === 'true' || value === true)

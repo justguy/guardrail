@@ -35,8 +35,8 @@
     },
     "prompt": {
       "type": "string",
-      "description": "Inline prompt text to send to Claude. Use this for per-run instructions; keep stable file-backed context in input_files.",
-      "approval_mode": "review_each_time",
+      "description": "Inline prompt text to send to Claude. For one-shot runs this is still approval-sensitive. For persistent named sessions (`lifecycle=continue|attach` with `no_session_persistence=false`), later user messages can change without reapproval as long as the session identity and executable boundary stay fixed. Keep stable file-backed context in input_files.",
+      "approval_mode": "interactive_message",
       "required": false
     },
     "input_files": {
@@ -184,7 +184,8 @@
       "Guardrail does not perform `claude auth login` for this recipe. If Claude reports `Not logged in`, fix the Claude CLI auth state in the same runtime that launches Guardrail, then rerun the same approved command",
       "If another shell or tool can run Claude successfully, compare `which -a claude` and `claude auth status` there versus the Guardrail runtime before changing approval state. Start with PATH, HOME, XDG_CONFIG_HOME, or CLAUDE_CONFIG_DIR, but do not assume env alignment alone will solve secure-store-backed CLI auth",
       "General Claude auth repair sequence for this recipe: `which -a claude`, `claude auth status`, prefer rerunning Guardrail from a shell where that status already succeeds, and if login must be redone for Guardrail reuse run `claude auth login --claudeai` (or `--console`) from the exact same shell/runtime that will later launch Guardrail",
-      "Inline prompt-bearing inputs such as prompt and system_prompt remain review_each_time even under workflow recipe_ref chaining. If you need a fixed local system prompt with unattended reuse, use a local template that wraps the Claude wrapper directly instead of chaining claude-exec as a recipe_ref",
+      "The inline prompt uses interactive_message semantics: later user messages may change without reapproval only for the same persistent named session (`continue` or `attach` with `no_session_persistence=false`). New sessions or session-identity changes still require approval",
+      "system_prompt remains review_each_time even under workflow recipe_ref chaining. If you need a fixed local system prompt with unattended reuse, use a local template that wraps the Claude wrapper directly instead of chaining claude-exec as a recipe_ref",
       "No shell mode steps — a single structured node wrapper handles prompt assembly and invocation"
     ],
     "invariants": [

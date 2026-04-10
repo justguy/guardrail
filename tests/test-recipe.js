@@ -707,6 +707,104 @@ describe('Recipe: Manifest Semantics', () => {
     assert.equal(comparison.diffs.length, 0);
   });
 
+  it('allows interactive_message reuse within the same persistent session', () => {
+    const recipe = makeRecipe({
+      inputs: {
+        prompt: {
+          type: 'string',
+          approval_mode: 'interactive_message',
+          description: 'User message',
+        },
+        lifecycle: {
+          type: 'string',
+          enum: ['start', 'continue', 'attach'],
+          default: 'start',
+        },
+        session_name: {
+          type: 'string',
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$',
+        },
+        no_session_persistence: {
+          type: 'boolean',
+          default: true,
+          required: false,
+        },
+      },
+      steps: [
+        { id: 'step-1', description: 'Send message', run: { command: 'echo', args: ['{{inputs.prompt}}'], mode: 'structured' } },
+      ],
+    });
+
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { prompt: '2x3=?', lifecycle: 'continue', session_name: 'math-session', no_session_persistence: false },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { prompt: '2x4=?', lifecycle: 'continue', session_name: 'math-session', no_session_persistence: false },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const comparison = compareRecipeManifests(changed, base);
+    assert.equal(comparison.matches, true);
+    assert.equal(comparison.diffs.length, 0);
+  });
+
+  it('rejects interactive_message reuse when persistence is disabled', () => {
+    const recipe = makeRecipe({
+      inputs: {
+        prompt: {
+          type: 'string',
+          approval_mode: 'interactive_message',
+          description: 'User message',
+        },
+        lifecycle: {
+          type: 'string',
+          enum: ['start', 'continue', 'attach'],
+          default: 'start',
+        },
+        session_name: {
+          type: 'string',
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$',
+        },
+        no_session_persistence: {
+          type: 'boolean',
+          default: true,
+          required: false,
+        },
+      },
+      steps: [
+        { id: 'step-1', description: 'Send message', run: { command: 'echo', args: ['{{inputs.prompt}}'], mode: 'structured' } },
+      ],
+    });
+
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { prompt: '2x3=?', lifecycle: 'continue', session_name: 'math-session', no_session_persistence: true },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { prompt: '2x4=?', lifecycle: 'continue', session_name: 'math-session', no_session_persistence: true },
+      { cwd: '/repo', projectRoot: '/repo', sourcePath: '/repo/recipes/test.recipe.json' },
+    );
+
+    const comparison = compareRecipeManifests(changed, base);
+    assert.equal(comparison.matches, false);
+    assert.ok(comparison.diffs.some(d => d.includes('input "prompt"')));
+  });
+
   it('rejects bounded list input reuse outside approved envelope with explicit diff', () => {
     const recipe = makeRecipe({
       inputs: {

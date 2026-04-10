@@ -118,7 +118,7 @@ function validateInputs(inputs) {
     }
     if (schema.type === 'string') {
       // approval_mode overrides the pattern/enum requirement
-      const MODES_WITHOUT_PATTERN = new Set(['exact', 'path_policy', 'list', 'review_each_time', 'template_slots']);
+      const MODES_WITHOUT_PATTERN = new Set(['exact', 'path_policy', 'list', 'review_each_time', 'interactive_message', 'template_slots']);
       if (!schema.pattern && !schema.enum && !MODES_WITHOUT_PATTERN.has(schema.approval_mode)) {
         errors.push(`${p}: string inputs must have "pattern", "enum", or "approval_mode" constraint`);
       }
@@ -235,6 +235,11 @@ function makeInputApprovalEnvelope(schema) {
     ? schema.approval_mode
     : null;
   if (explicitMode === 'review_each_time' || explicitMode === 'exact') return null;
+  if (explicitMode === 'interactive_message') {
+    return {
+      type: 'interactive_message',
+    };
+  }
   if (schema.content_hash === true) return null;
 
   if (explicitMode === 'list') {
@@ -320,10 +325,24 @@ function describeInputApprovalEnvelope(envelope) {
   if (envelope.type === 'integer_range') {
     return `integer_range(${envelope.min}..${envelope.max})`;
   }
+  if (envelope.type === 'interactive_message') {
+    return 'interactive_message(session-bound)';
+  }
   if (envelope.type === 'list') {
     return `list(max_items=${envelope.maxItems})`;
   }
   return '';
+}
+
+function canReuseInteractiveMessage(candidate, approved) {
+  const cInputs = candidate?.resolvedInputs ?? {};
+  const aInputs = approved?.resolvedInputs ?? {};
+  const lifecycle = cInputs.lifecycle ?? 'start';
+  if (lifecycle !== 'continue' && lifecycle !== 'attach') return false;
+  const sessionName = cInputs.session_name ?? null;
+  if (!sessionName || sessionName !== (aInputs.session_name ?? null)) return false;
+  if (cInputs.no_session_persistence === true || aInputs.no_session_persistence === true) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +668,17 @@ export function diffRecipeManifests(candidate, approved) {
     if (!deepEqual(cVal, aVal)) {
       if (
         envelope
+        && envelope.type === 'interactive_message'
+        && canReuseInteractiveMessage(candidate, approved)
+        && typeof cVal === 'string'
+        && typeof aVal === 'string'
+      ) {
+        continue;
+      }
+
+      if (
+        envelope
+        && envelope.type !== 'interactive_message'
         && isWithinInputApprovalEnvelope(cVal, envelope)
         && isWithinInputApprovalEnvelope(aVal, envelope)
       ) {
@@ -692,8 +722,23 @@ export function diffRecipeManifests(candidate, approved) {
 
   const candidateComposedRecipes = candidate.composedRecipes ?? [];
   const approvedComposedRecipes = approved.composedRecipes ?? [];
-  if (!deepEqual(candidateComposedRecipes, approvedComposedRecipes)) {
-    diffs.push(`~ composedRecipes: ${pretty(approvedComposedRecipes)} -> ${pretty(candidateComposedRecipes)}`);
+  if (candidateComposedRecipes.length !== approvedComposedRecipes.length) {
+    diffs.push(`~ composedRecipes length: ${approvedComposedRecipes.length} -> ${candidateComposedRecipes.length}`);
+  } else {
+    for (let i = 0; i < candidateComposedRecipes.length; i += 1) {
+      const cRecord = candidateComposedRecipes[i];
+      const aRecord = approvedComposedRecipes[i];
+      if ((cRecord?.stepId ?? null) !== (aRecord?.stepId ?? null)) {
+        diffs.push(`~ composedRecipes[${i}].stepId: ${pretty(aRecord?.stepId)} -> ${pretty(cRecord?.stepId)}`);
+        continue;
+      }
+      const recordComparison = compareRecipeManifests(cRecord, aRecord);
+      if (!recordComparison.matches) {
+        diffs.push(
+          `~ composedRecipes[${cRecord?.stepId ?? i}]: ${recordComparison.diffs.join('; ')}`,
+        );
+      }
+    }
   }
 
   return diffs;

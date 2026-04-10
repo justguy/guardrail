@@ -67,7 +67,7 @@ function validateTopLevel(def) {
 
 function validateInputSchema(def) {
   const errors = [];
-  const MODES_WITHOUT_PATTERN = new Set(['exact', 'path_policy', 'list', 'review_each_time', 'template_slots']);
+  const MODES_WITHOUT_PATTERN = new Set(['exact', 'path_policy', 'list', 'review_each_time', 'interactive_message', 'template_slots']);
   if (!def.inputs || typeof def.inputs !== 'object' || Array.isArray(def.inputs)) {
     errors.push('inputs must be an object');
     return errors;
@@ -360,7 +360,7 @@ function lintBareStrings(def) {
       schema.type === 'string'
       && !schema.pattern
       && !schema.enum
-      && !new Set(['exact', 'path_policy', 'list', 'review_each_time', 'template_slots']).has(schema.approval_mode)
+      && !new Set(['exact', 'path_policy', 'list', 'review_each_time', 'interactive_message', 'template_slots']).has(schema.approval_mode)
     ) {
       warnings.push(`input "${key}": bare string without pattern or enum is rejected`);
     }
@@ -452,6 +452,9 @@ export function validateUserInputs(inputSchema, userInputs) {
     }
 
     if (value === undefined) {
+      if (schema.required === false) {
+        continue;
+      }
       errors.push(`missing required input: "${key}"`);
       continue;
     }
@@ -698,6 +701,11 @@ function buildInputApprovalEnvelope(schema) {
   if (explicitMode === 'review_each_time' || explicitMode === 'exact') {
     return null;
   }
+  if (explicitMode === 'interactive_message') {
+    return {
+      type: 'interactive_message',
+    };
+  }
 
   if (explicitMode === 'list') {
     if (!Number.isInteger(schema.max_items) || schema.max_items < 1) {
@@ -787,6 +795,9 @@ function stringifyEnvelope(envelope) {
   if (!envelope || typeof envelope !== 'object') {
     return 'unbounded';
   }
+  if (envelope.type === 'interactive_message') {
+    return 'interactive_message(session-bound)';
+  }
   if (envelope.type === 'enum') {
     return `enum(${JSON.stringify(envelope.values)})`;
   }
@@ -804,7 +815,12 @@ function diffInputValue(key, candidateValue, approvedValue, envelope, diffs) {
     return;
   }
 
-  if (envelope && isBoundedInputEnvelopeMatch(candidateValue, envelope) && isBoundedInputEnvelopeMatch(approvedValue, envelope)) {
+  if (
+    envelope
+    && envelope.type !== 'interactive_message'
+    && isBoundedInputEnvelopeMatch(candidateValue, envelope)
+    && isBoundedInputEnvelopeMatch(approvedValue, envelope)
+  ) {
     return;
   }
 
@@ -814,6 +830,17 @@ function diffInputValue(key, candidateValue, approvedValue, envelope, diffs) {
   }
 
   diffs.push(`~ input "${key}": ${JSON.stringify(approvedValue)} -> ${JSON.stringify(candidateValue)}`);
+}
+
+function canReuseInteractiveMessage(candidate, approved) {
+  const cInputs = candidate?.resolvedInputs ?? {};
+  const aInputs = approved?.resolvedInputs ?? {};
+  const lifecycle = cInputs.lifecycle ?? 'start';
+  if (lifecycle !== 'continue' && lifecycle !== 'attach') return false;
+  const sessionName = cInputs.session_name ?? null;
+  if (!sessionName || sessionName !== (aInputs.session_name ?? null)) return false;
+  if (cInputs.no_session_persistence === true || aInputs.no_session_persistence === true) return false;
+  return true;
 }
 
 /**
@@ -874,7 +901,16 @@ export function diffTemplateManifests(candidate, approved) {
     }
   } else {
     for (const key of allKeys) {
-      diffInputValue(key, cInputs[key], aInputs[key], approved.inputApprovalEnvelopes[key], diffs);
+      const envelope = approved.inputApprovalEnvelopes[key];
+      if (
+        envelope?.type === 'interactive_message'
+        && canReuseInteractiveMessage(candidate, approved)
+        && typeof cInputs[key] === 'string'
+        && typeof aInputs[key] === 'string'
+      ) {
+        continue;
+      }
+      diffInputValue(key, cInputs[key], aInputs[key], envelope, diffs);
     }
   }
 

@@ -56,7 +56,7 @@ function makeCodexSessionStubRecipe(overrides = {}) {
       },
       prompt: {
         type: 'string',
-        approval_mode: 'review_each_time',
+        approval_mode: 'interactive_message',
         required: false,
       },
     },
@@ -122,6 +122,10 @@ describe('Codex recipe', () => {
     assert.equal(recipe.version, '1.0.0');
     assert.equal(recipe.risk_level, 'high');
     assert.equal(recipe.steps.length, 1);
+    assert.equal(recipe.inputs.prompt.approval_mode, 'interactive_message');
+    assert.ok(
+      recipe.guardrails?.constraints?.some((line) => line.includes('interactive_message semantics')),
+    );
   });
 
   it('loads the codex exec recipe with session lifecycle inputs', () => {
@@ -390,7 +394,7 @@ describe('Codex recipe: session-contract enforcement', () => {
     assert.equal(executor.called, 0);
   });
 
-  it('review_each_time prompt still forces reapproval even when session contract matches', async () => {
+  it('reuses interactive_message prompt when the session contract matches', async () => {
     const dir = tmpDir();
     const recipesDir = join(dir, 'recipes');
     mkdirSync(recipesDir, { recursive: true });
@@ -431,9 +435,8 @@ describe('Codex recipe: session-contract enforcement', () => {
     );
     saveSessionContract(approvedContract, contractPath);
 
-    // Run with a DIFFERENT prompt — session matches but prompt drift must
-    // still force fresh approval. review_each_time also never reuses even
-    // when everything else matches.
+    // Run with a DIFFERENT prompt — session matches and prompt is
+    // interactive_message, so this should reuse the approved manifest.
     const executor = stubExecutor();
     const result = await runRecipeSupervisor({
       specifier: recipe.id,
@@ -451,11 +454,7 @@ describe('Codex recipe: session-contract enforcement', () => {
       executorFn: executor.fn,
     });
 
-    // Non-interactive + needs approval = drift_detected or approval_required.
-    assert.ok(
-      result.status === 'drift_detected' || result.status === 'approval_required',
-      `expected approval/drift status, got ${result.status}: ${result.reason}`,
-    );
-    assert.equal(executor.called, 0, 'executor must not run when prompt drift requires reapproval');
+    assert.equal(result.status, 'success');
+    assert.equal(executor.called, 1, 'executor must run when only the interactive message changes');
   });
 });

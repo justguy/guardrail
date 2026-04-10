@@ -329,6 +329,27 @@ describe('Input Validation', () => {
     assert.ok(result.errors.some(e => /missing required/.test(e)));
   });
 
+  it('allows missing optional inputs', () => {
+    const schema = {
+      required_value: {
+        type: 'string',
+        pattern: '^ok$',
+        description: 'Required field',
+      },
+      optional_value: {
+        type: 'string',
+        pattern: '^maybe$',
+        required: false,
+        description: 'Optional field',
+      },
+    };
+    const result = validateUserInputs(schema, { required_value: 'ok' });
+    assert.ok(result.valid);
+    assert.equal(result.errors.length, 0);
+    assert.equal(result.values.required_value, 'ok');
+    assert.equal(Object.hasOwn(result.values, 'optional_value'), false);
+  });
+
   it('rejects input that fails pattern', () => {
     const schema = makeIndividualTemplate().inputs;
     const result = validateUserInputs(schema, { target: '../../../etc/passwd' });
@@ -699,6 +720,104 @@ describe('Template Manifest', () => {
     const result = compareTemplateManifests(candidate, base);
     assert.ok(result.matches);
     assert.equal(result.diffs.length, 0);
+  });
+
+  it('allows interactive_message drift within the same persistent session', () => {
+    const def = makeIndividualTemplate({
+      name: 'interactive-chat',
+      description: 'Interactive chat session',
+      inputs: {
+        prompt: {
+          type: 'string',
+          approval_mode: 'interactive_message',
+          description: 'User message',
+        },
+        lifecycle: {
+          type: 'string',
+          enum: ['start', 'continue', 'attach'],
+          default: 'start',
+          description: 'Session lifecycle',
+        },
+        session_name: {
+          type: 'string',
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$',
+          description: 'Session slot',
+        },
+        no_session_persistence: {
+          type: 'boolean',
+          default: true,
+          description: 'Disable persistence',
+        },
+      },
+      run: { command: 'echo', args: ['{{inputs.prompt}}'], mode: 'structured', env: {} },
+    });
+
+    const risk = { trustClass: 'reviewed_internal', riskLevel: 'green', reasons: [] };
+    const base = createTemplateManifest(def, 'h-base', risk, {
+      prompt: '2x3=?',
+      lifecycle: 'continue',
+      session_name: 'math-session',
+      no_session_persistence: false,
+    }, []);
+    const candidate = createTemplateManifest(def, 'h-candidate', risk, {
+      prompt: '2x4=?',
+      lifecycle: 'continue',
+      session_name: 'math-session',
+      no_session_persistence: false,
+    }, []);
+
+    const result = compareTemplateManifests(candidate, base);
+    assert.ok(result.matches);
+    assert.equal(result.diffs.length, 0);
+  });
+
+  it('fails interactive_message drift when persistence is disabled', () => {
+    const def = makeIndividualTemplate({
+      name: 'interactive-chat',
+      description: 'Interactive chat session',
+      inputs: {
+        prompt: {
+          type: 'string',
+          approval_mode: 'interactive_message',
+          description: 'User message',
+        },
+        lifecycle: {
+          type: 'string',
+          enum: ['start', 'continue', 'attach'],
+          default: 'start',
+          description: 'Session lifecycle',
+        },
+        session_name: {
+          type: 'string',
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$',
+          description: 'Session slot',
+        },
+        no_session_persistence: {
+          type: 'boolean',
+          default: true,
+          description: 'Disable persistence',
+        },
+      },
+      run: { command: 'echo', args: ['{{inputs.prompt}}'], mode: 'structured', env: {} },
+    });
+
+    const risk = { trustClass: 'reviewed_internal', riskLevel: 'green', reasons: [] };
+    const approved = createTemplateManifest(def, 'h-base', risk, {
+      prompt: '2x3=?',
+      lifecycle: 'continue',
+      session_name: 'math-session',
+      no_session_persistence: true,
+    }, []);
+    const candidate = createTemplateManifest(def, 'h-candidate', risk, {
+      prompt: '2x4=?',
+      lifecycle: 'continue',
+      session_name: 'math-session',
+      no_session_persistence: true,
+    }, []);
+
+    const result = compareTemplateManifests(candidate, approved);
+    assert.ok(!result.matches);
+    assert.ok(result.diffs.some(d => /prompt/.test(d)));
   });
 
   it('fails when list input leaves approved approval envelope', () => {

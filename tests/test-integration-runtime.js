@@ -1285,6 +1285,73 @@ describe('Integration: Recipe Supervisor Runtime Policy', () => {
     assert.match(result.reason, /review_each_time inputs: prompt/);
   });
 
+  it('reuses interactive_message recipe inputs for the same persistent session', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    const recipe = makeRecipe({
+      inputs: {
+        prompt: {
+          type: 'string',
+          approval_mode: 'interactive_message',
+          required: false,
+        },
+        lifecycle: {
+          type: 'string',
+          enum: ['start', 'continue', 'attach'],
+          default: 'start',
+          required: false,
+        },
+        session_name: {
+          type: 'string',
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$',
+          required: false,
+        },
+        no_session_persistence: {
+          type: 'boolean',
+          default: true,
+          required: false,
+        },
+      },
+      steps: [
+        {
+          id: 'step-1',
+          description: 'Echo prompt',
+          run: { command: 'echo', args: ['{{inputs.prompt}}'], mode: 'structured' },
+        },
+      ],
+    });
+    const sourcePath = writeRecipeFile(recipesDir, recipe);
+    const manifestPath = join(dir, '.guardrail', 'recipes', `${recipe.id}.approved.json`);
+    mkdirSync(join(dir, '.guardrail', 'recipes'), { recursive: true });
+
+    createApprovedRecipeManifest(recipe, dir, manifestPath, sourcePath, {
+      resolvedInputs: {
+        prompt: '2x3=?',
+        lifecycle: 'continue',
+        session_name: 'math-session',
+        no_session_persistence: false,
+      },
+    });
+
+    const result = await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: {
+        prompt: '2x4=?',
+        lifecycle: 'continue',
+        session_name: 'math-session',
+        no_session_persistence: false,
+      },
+      cwd: dir,
+      searchDirs: [recipesDir],
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'success');
+  });
+
   it('time policy blocks recipe execution with an approved manifest', async () => {
     const dir = tmpDir();
     const recipesDir = join(dir, 'recipes');
