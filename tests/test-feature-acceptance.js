@@ -687,6 +687,39 @@ describe('README Feature: Resident Lane Mode', () => {
   });
 });
 
+describe('README Feature: Repo Status', () => {
+  it('guardrail repo status reports untracked files alongside tracked changes', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    mkdirSync(repoDir, { recursive: true });
+    const runGit = (args) => {
+      const result = spawnSync('git', ['-C', repoDir, ...args], { encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      return result.stdout.trim();
+    };
+
+    runGit(['init', '-b', 'main']);
+    runGit(['config', 'user.name', 'Guardrail Test']);
+    runGit(['config', 'user.email', 'guardrail-test@example.com']);
+    writeFileSync(join(repoDir, 'tracked.txt'), 'base\n', 'utf8');
+    runGit(['add', 'tracked.txt']);
+    runGit(['commit', '-m', 'baseline']);
+
+    writeFileSync(join(repoDir, 'tracked.txt'), 'changed\n', 'utf8');
+    runGit(['add', 'tracked.txt']);
+    writeFileSync(join(repoDir, 'tracked.txt'), 'changed again\n', 'utf8');
+    writeFileSync(join(repoDir, 'artifact.txt'), 'new artifact\n', 'utf8');
+
+    const r = run(`${CLI} repo status --path ${repoDir} --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.branch, 'main');
+    assert.equal(parsed.staged.length, 1);
+    assert.equal(parsed.unstaged.length, 1);
+    assert.deepEqual(parsed.untracked, ['artifact.txt']);
+  });
+});
+
 // ==========================================================================
 // README: "Traffic-light risk model"
 // ==========================================================================

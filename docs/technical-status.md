@@ -651,6 +651,7 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 | `lane send --id <id> --prompt "<text>"` | Done | Send one prompt through an existing resident lane |
 | `lane result --id <id> [--request-id <id>]` | Done | Read the stored output for the latest or named resident-lane request |
 | `lane stop --id <id>` | Done | Stop a resident lane and purge its key/FIFOs |
+| `repo status --path <repo>` | Done | Show staged, unstaged, and untracked repo changes in one proof-oriented view |
 | `workflow run --definition <path>` | Done | Execute a multi-step workflow |
 | `workflow lint --definition <path>` | Done | Lint a workflow definition |
 | `template lint\|explain\|schema\|simulate\|diff` | Done | Template inspection commands (5) |

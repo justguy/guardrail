@@ -644,6 +644,17 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.laneOpts.id, 'claude-live');
   });
 
+  it('parses repo status flags', () => {
+    const result = parseArgs([
+      'repo', 'status',
+      '--path', '/tmp/example-repo',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'repo-status');
+    assert.equal(result.repoOpts.path, '/tmp/example-repo');
+    assert.equal(result.json, true);
+  });
+
   it('parses template create flags', () => {
     const result = parseArgs([
       'template', 'create',

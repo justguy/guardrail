@@ -278,6 +278,7 @@ Practical agent rule:
 - transport/orchestration recipe if the tool only works in a different authenticated host runtime
 - resident lane if the workflow needs repeated messages or repeated monitoring after startup
 - if `lane send` returns `pending`, check `lane status` and then `lane result` before considering a restart
+- use `guardrail repo status --path <repo>` when you need a proof check that includes staged, unstaged, and untracked files in one view
 - raw host-surface inspection only after Guardrail-managed status/result/audit paths are exhausted
 - Guardrail transport state does not replace proof validation against the real branch state. Use Guardrail reports to narrow the path quickly, then still verify the actual branch/files before accepting the result.
 

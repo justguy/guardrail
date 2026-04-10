@@ -114,6 +114,7 @@ Commands:
   lane result [flags]                   Read the latest or named resident lane result
   lane status [flags]                   Show resident lane status and recovery hints
   lane stop [flags]                     Stop a resident interactive lane
+  repo status [--path <repo>]          Show tracked and untracked repo changes
   workflow run [flags]                  Run a workflow definition under Guardrail
   workflow lint --definition <path>     Lint a workflow definition for issues
   template lint --template <path>       Lint a template for issues
@@ -178,6 +179,7 @@ Examples:
   guardrail lane result --id claude-live
   guardrail lane result --id claude-live --request-id req-123
   guardrail lane stop --id claude-live
+  guardrail repo status --path .
   guardrail template lint --template ./templates/npm-publish.json
   guardrail template create --from-manifest .guardrail/approved.json --name npm-publish
   guardrail template list --json
@@ -498,7 +500,7 @@ export function parseArgs(argv) {
     return result;
   }
 
-  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify' && sub !== 'adapter' && sub !== 'lane') {
+  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify' && sub !== 'adapter' && sub !== 'lane' && sub !== 'repo') {
     return { error: 'usage' };
   }
 
@@ -648,6 +650,23 @@ export function parseArgs(argv) {
       '--timeout-ms': 'timeoutMs',
     });
     return error || result;
+  }
+
+  // --- repo subcommand ------------------------------------------------------
+
+  if (sub === 'repo') {
+    if (i >= argv.length || argv[i] !== 'status') {
+      return { error: 'usage' };
+    }
+    i++;
+    result.subcommand = 'repo-status';
+    result.repoOpts = { path: '.' };
+    while (i < argv.length) {
+      if (argv[i] === '--path') { i++; result.repoOpts.path = argv[i++]; continue; }
+      if (argv[i] === '--json') { result.json = true; i++; continue; }
+      return { error: 'usage' };
+    }
+    return result;
   }
 
   // --- create subcommand -----------------------------------------------------
@@ -1289,6 +1308,39 @@ async function main() {
       console.log(`  Request FIFO:       ${status.requestFifoPresent ? 'present' : 'missing'}`);
       console.log(`  Response FIFO:      ${status.responseFifoPresent ? 'present' : 'missing'}`);
       console.log(`  Recommended action: ${status.recommendedAction}`);
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'repo-status') {
+    const { getRepoStatusSummary } = await import('./repo-status.js');
+    const summary = getRepoStatusSummary(parsed.repoOpts?.path || '.');
+    if (parsed.json) {
+      console.log(JSON.stringify(summary, null, 2));
+    } else {
+      console.log(`Repo status: ${summary.clean ? 'clean' : 'changes present'}`);
+      console.log(`  Repo path:  ${summary.repoPath}`);
+      console.log(`  Branch:     ${summary.branch ?? 'detached'}`);
+      if (summary.upstream) {
+        console.log(`  Upstream:   ${summary.upstream}`);
+        console.log(`  Ahead:      ${summary.ahead}`);
+        console.log(`  Behind:     ${summary.behind}`);
+      }
+      console.log(`  Staged:     ${summary.staged.length}`);
+      console.log(`  Unstaged:   ${summary.unstaged.length}`);
+      console.log(`  Untracked:  ${summary.untracked.length}`);
+      if (summary.staged.length > 0) {
+        console.log('  Staged paths:');
+        for (const entry of summary.staged) console.log(`    ${entry.path} (${entry.indexStatus}${entry.worktreeStatus})`);
+      }
+      if (summary.unstaged.length > 0) {
+        console.log('  Unstaged paths:');
+        for (const entry of summary.unstaged) console.log(`    ${entry.path} (${entry.indexStatus}${entry.worktreeStatus})`);
+      }
+      if (summary.untracked.length > 0) {
+        console.log('  Untracked paths:');
+        for (const path of summary.untracked) console.log(`    ${path}`);
+      }
     }
     process.exit(0);
   }
