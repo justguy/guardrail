@@ -436,6 +436,33 @@ describe('README Feature: Template Mode', () => {
 });
 
 describe('README Feature: Resident Lane Mode', () => {
+  it('guardrail lane status reports a live resident lane', () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    mkdirSync(laneDir, { recursive: true });
+    const requestFifo = join(laneDir, 'requests.fifo');
+    const responseFifo = join(laneDir, 'responses.fifo');
+    assert.equal(spawnSync('mkfifo', [requestFifo]).status, 0);
+    assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
+    const keyPath = join(dir, 'lane.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      keyPath,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane status --lane-dir ${laneDir} --key-path ${keyPath} --json`);
+    assert.equal(r.exitCode, 0);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.status, 'ready');
+    assert.equal(parsed.alive, true);
+    assert.equal(parsed.recommendedAction, 'send');
+  });
+
   it('guardrail lane send writes one prompt through a resident lane FIFO', async () => {
     const dir = tmpDir();
     const laneDir = join(dir, 'lane');
@@ -521,6 +548,27 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(r.exitCode, 1);
     const parsed = JSON.parse(r.stdout);
     assert.equal(parsed.reason, 'lane_expired');
+  });
+
+  it('guardrail lane status reports expired lanes cleanly', () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    mkdirSync(laneDir, { recursive: true });
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'expired',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+    const keyPath = join(dir, 'missing.key');
+
+    const r = run(`${CLI} lane status --lane-dir ${laneDir} --key-path ${keyPath} --json`);
+    assert.equal(r.exitCode, 0);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.status, 'expired');
+    assert.equal(parsed.alive, false);
+    assert.equal(parsed.recommendedAction, 'start');
   });
 });
 

@@ -76,6 +76,7 @@ Commands:
   run --template <path> --input k=v     Run a template under Guardrail
   lane start [flags]                    Start a resident interactive lane
   lane send [flags]                     Send one message through a resident lane
+  lane status [flags]                   Show resident lane status and recovery hints
   lane stop [flags]                     Stop a resident interactive lane
   workflow run [flags]                  Run a workflow definition under Guardrail
   workflow lint --definition <path>     Lint a workflow definition for issues
@@ -574,7 +575,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'stop'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'status', 'stop'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -1149,6 +1150,34 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     } else {
       console.log(`Lane stopped: ${laneOpts.laneId || laneOpts.laneDir}`);
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-status') {
+    const { getResidentLaneStatus } = await import('./claude-resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane status');
+      process.exit(1);
+    }
+    const status = getResidentLaneStatus(laneOpts);
+    if (parsed.json) {
+      console.log(JSON.stringify(status, null, 2));
+    } else {
+      console.log(`Lane status: ${status.status}`);
+      if (laneOpts.laneId) console.log(`  Lane id:            ${laneOpts.laneId}`);
+      console.log(`  Lane dir:           ${status.laneDir}`);
+      if (status.sessionName) console.log(`  Session name:       ${status.sessionName}`);
+      if (status.sessionId) console.log(`  Session id:         ${status.sessionId}`);
+      console.log(`  Alive:              ${status.alive ? 'yes' : 'no'}`);
+      console.log(`  PID:                ${status.pid ?? 'n/a'}`);
+      console.log(`  Last request id:    ${status.lastRequestId ?? 'n/a'}`);
+      console.log(`  Last activity at:   ${status.lastActivityAt ?? 'n/a'}`);
+      console.log(`  Key present:        ${status.keyPresent ? 'yes' : 'no'}`);
+      console.log(`  Request FIFO:       ${status.requestFifoPresent ? 'present' : 'missing'}`);
+      console.log(`  Response FIFO:      ${status.responseFifoPresent ? 'present' : 'missing'}`);
+      console.log(`  Recommended action: ${status.recommendedAction}`);
     }
     process.exit(0);
   }
