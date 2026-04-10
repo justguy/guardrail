@@ -300,6 +300,7 @@ AI execution recipes:
 - `lane send` is the per-message step. It reads the host-side key through the Guardrail CLI, signs the request, writes the strict JSON payload into the lane FIFO, and reads the matching response back without reopening the outer transport/runtime hop.
 - `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
 - `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is alive, expired, stale, or stopped and tells you the safest next action (`send`, `start`, or `cleanup`).
+- If `lane send` times out client-side during a long Claude turn, do not report that as a proven execution failure. A timeout can mean the resident lane is still busy and the downstream Claude turn is still running in the host runtime.
 - The practical review-loop shape is:
   - start one approved Claude session with the full planned doc set in `input_files`
   - keep `system_prompt` fixed for the entire loop
@@ -314,6 +315,7 @@ AI execution recipes:
   - the current repo audit/log entries for the active trace/session
   - recipe/lane-managed status outputs
 - Do not jump straight to raw host-surface inspection commands just because a hosted run exited nonzero. Listing host surfaces, selecting runtimes, or capturing host-side output directly are escalation-only fallbacks and can trigger additional user approvals one command at a time.
+- Do not jump straight to raw host process inspection (`ps`, `lsof`, direct pane capture, etc.) just because a resident lane is busy or a client timed out. First use Guardrail-managed lane status and any lane-owned artifacts. Raw host inspection is a separate approval-bearing capability and will keep retriggering approvals.
 - The rule is: bounded surface first, raw surface second. Only fall back to direct host-surface commands when Guardrail does not already expose the needed state.
 - Treat host-runtime selection as an expected routing decision, not as a surprising late-stage workaround. If a tool is authenticated or functional only in a different launcher, terminal surface, remote shell, container, or similar runtime, choose that runtime early and explain it plainly as “this tool must run in the already-working host runtime,” not as a mysterious new failure after several retries.
 - When switching runtimes, name the reason in one sentence: same tool contract, different host runtime. Example: “the guarded Claude wrapper is unchanged; only the host runtime changes because the authenticated terminal surface is where Claude CLI login is currently valid.”
@@ -346,6 +348,7 @@ AI execution recipes:
   - do not just say `blocked` without naming whether the block is Guardrail policy or downstream tool auth
 - Repeated reuse of the same host-runtime lane is still a separate problem. Current composition gives one approval per composed run, not "approve the lane once and trigger it forever." If the workflow needs that shape, treat it as a not-yet-shipped resident transport/session feature rather than assuming the composed recipe already covers it.
 - For repeated interaction or repeated monitoring in the same authenticated host runtime, prefer the resident FIFO lane over repeated transport recipe launches or repeated raw host-surface inspection. The FIFO lane exists specifically to avoid paying another approval-bearing host-surface hop for every send/capture/debug turn.
+- Guardrail transcripts and execution reports are accelerators, not proof. Before accepting a result, validate the actual branch state, changed files, and requested proof artifacts rather than trusting the session narrative alone.
 - Path-bearing inputs like `guardrail_repo`, `working_dir`, `input_files`, `add_dirs`, or output-file paths usually use relative-path policy and often block `..`. If Guardrail lives in one repo and the target run lives in a sibling repo, choose a current working directory where both can be named without `..` segments.
 - Omit optional tool-capability knobs unless the caller actually needs them. Extra inputs widen the approval surface and create more drift opportunities.
 - When a structured command needs multiple files, use an exact `{{inputs.some_list}}` placeholder in the args array so the validated list expands into multiple structured argv entries. Do not fall back to a freeform string of space-separated paths.
