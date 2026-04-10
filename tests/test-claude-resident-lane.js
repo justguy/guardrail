@@ -570,4 +570,24 @@ describe('Claude resident lane', () => {
     assert.equal(status.failureReason, 'bootstrap crashed');
     assert.equal(status.failureStage, 'bootstrap');
   });
+
+  it('infers a post-start failure from stale startup state with no recorded failure metadata', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    mkdirSync(laneDir, { recursive: true });
+    writeFileSync(lanePaths(laneDir).statePath, JSON.stringify({
+      pid: 12345,
+      status: 'ready',
+      laneId: 'math',
+      sessionName: 'math-live-session',
+      startedConversation: false,
+      lastActivityAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const status = getResidentLaneStatus({ laneDir, guardrailRepo: dir, laneId: 'math' });
+    assert.equal(status.status, 'failed');
+    assert.equal(status.failureStage, 'post_start');
+    assert.match(status.failureReason, /first request/i);
+  });
 });

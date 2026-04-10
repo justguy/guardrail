@@ -654,6 +654,50 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.failureStage, 'bootstrap');
   });
 
+  it('guardrail lane status infers post-start failure from stale startup state', () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    mkdirSync(laneDir, { recursive: true });
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: 12345,
+      status: 'ready',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      startedConversation: false,
+      lastActivityAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane status --lane-dir ${laneDir} --json`);
+    assert.equal(r.exitCode, 0);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.status, 'failed');
+    assert.equal(parsed.failureStage, 'post_start');
+  });
+
+  it('guardrail lane send returns lane_failed when the lane has already failed before first request', () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    mkdirSync(laneDir, { recursive: true });
+    const keyPath = join(dir, 'lane.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: 12345,
+      status: 'ready',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      startedConversation: false,
+      lastActivityAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane send --lane-dir ${laneDir} --key-path ${keyPath} --prompt "2x3=?" --json`);
+    assert.equal(r.exitCode, 1);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.reason, 'lane_failed');
+    assert.equal(parsed.failureStage, 'post_start');
+  });
+
   it('guardrail lane result returns the stored output for a completed request', () => {
     const dir = tmpDir();
     const laneDir = join(dir, 'lane');

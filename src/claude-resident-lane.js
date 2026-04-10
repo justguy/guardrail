@@ -683,6 +683,23 @@ function classifyLaneStatus(state, keyPresent, requestFifoPresent, responseFifoP
   return { status: 'missing', alive: false, recommendedAction: 'start' };
 }
 
+function inferImplicitFailure(status, state) {
+  if (!state) return null;
+  if (status.status !== 'stale') return null;
+  if (state.failureReason || state.failureStage) return null;
+  if (state.startedConversation) return null;
+  if (state.currentRequestId || state.lastCompletedRequestId) return null;
+  if (state.status !== 'ready' && state.status !== 'busy') return null;
+
+  return {
+    status: 'failed',
+    alive: false,
+    recommendedAction: 'start',
+    failureStage: 'post_start',
+    failureReason: 'Resident lane daemon exited before processing the first request.',
+  };
+}
+
 export function getResidentLaneStatus(rawOptions) {
   if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
   const guardrailRepo = rawOptions.guardrailRepo
@@ -695,7 +712,9 @@ export function getResidentLaneStatus(rawOptions) {
   const keyPresent = !!(keyPath && existsSync(keyPath));
   const requestFifoPresent = isFifo(paths.requestFifo);
   const responseFifoPresent = isFifo(paths.responseFifo);
-  const derived = classifyLaneStatus(state, keyPresent, requestFifoPresent, responseFifoPresent);
+  const classified = classifyLaneStatus(state, keyPresent, requestFifoPresent, responseFifoPresent);
+  const implicitFailure = inferImplicitFailure(classified, state);
+  const derived = implicitFailure || classified;
 
   return {
     laneDir,
@@ -724,8 +743,8 @@ export function getResidentLaneStatus(rawOptions) {
     responseFifoPresent,
     startedConversation: state?.startedConversation ?? false,
     authMode: state?.authMode ?? null,
-    failureReason: state?.failureReason ?? null,
-    failureStage: state?.failureStage ?? null,
+    failureReason: state?.failureReason ?? derived.failureReason ?? null,
+    failureStage: state?.failureStage ?? derived.failureStage ?? null,
     recommendedAction: derived.recommendedAction,
   };
 }

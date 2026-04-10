@@ -79,6 +79,19 @@ function buildLaneExpiredResponse() {
   };
 }
 
+function buildLaneFailedResponse(status) {
+  return {
+    status: 'error',
+    reason: 'lane_failed',
+    message: 'The resident lane failed before it could process a request.',
+    failureReason: status.failureReason || null,
+    failureStage: status.failureStage || null,
+    logPath: status.logPath || null,
+    ok: false,
+    exitCode: 1,
+  };
+}
+
 function buildLaneStartFailureResponse(err) {
   const details = err?.details || {};
   return {
@@ -1193,6 +1206,24 @@ async function main() {
         console.log(JSON.stringify(expired, null, 2));
       } else {
         console.error(expired.message);
+      }
+      process.exit(1);
+    }
+    const preflightStatus = getResidentLaneStatus(laneOpts);
+    if (preflightStatus.status === 'failed') {
+      const failed = buildLaneFailedResponse(preflightStatus);
+      await appendLaneAuditEntry(laneOpts, 'lane_send', {
+        request_id: laneOpts.requestId || null,
+        status: 'error',
+        reason: failed.reason,
+      });
+      if (parsed.json) {
+        console.log(JSON.stringify(failed, null, 2));
+      } else {
+        console.error(failed.message);
+        if (failed.failureReason) console.error(`Failure reason: ${failed.failureReason}`);
+        if (failed.failureStage) console.error(`Failure stage: ${failed.failureStage}`);
+        if (failed.logPath) console.error(`Log path: ${failed.logPath}`);
       }
       process.exit(1);
     }
