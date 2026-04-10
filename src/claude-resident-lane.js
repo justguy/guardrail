@@ -2,6 +2,7 @@ import {
   chmodSync,
   closeSync,
   constants as fsConstants,
+  existsSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -19,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+const MAX_TRACKED_REQUEST_IDS = 1024;
 const MAX_REQUEST_BYTES = 50_000;
 const MAX_PROMPT_CHARS = 32_000;
 const MAX_REQUEST_ID_CHARS = 128;
@@ -281,6 +283,8 @@ function buildState(options, pid, startedConversation = false, extra = {}) {
     lastRequestId: extra.lastRequestId || null,
     lastActivityAt: extra.lastActivityAt || new Date().toISOString(),
     createdAt: extra.createdAt || new Date().toISOString(),
+    pollIntervalMs: options.pollIntervalMs,
+    idleTimeoutMs: options.idleTimeoutMs,
   };
 }
 
@@ -374,6 +378,32 @@ function validateLaneRequest(parsed, secret = '') {
   return parsed;
 }
 
+export function trackLaneRequestId(seenRequestIds, requestId, nowMs = Date.now(), ttlMs = DEFAULT_IDLE_TIMEOUT_MS) {
+  if (!(seenRequestIds instanceof Map)) {
+    throw new Error('seenRequestIds must be a Map');
+  }
+
+  for (const [seenId, seenAtMs] of seenRequestIds.entries()) {
+    if ((nowMs - seenAtMs) > ttlMs) {
+      seenRequestIds.delete(seenId);
+    }
+  }
+
+  if (seenRequestIds.has(requestId)) {
+    throw new Error('duplicate_request_id');
+  }
+
+  seenRequestIds.set(requestId, nowMs);
+
+  while (seenRequestIds.size > MAX_TRACKED_REQUEST_IDS) {
+    const oldest = seenRequestIds.keys().next().value;
+    if (oldest === undefined) break;
+    seenRequestIds.delete(oldest);
+  }
+
+  return seenRequestIds;
+}
+
 export async function runLaneRequest(options, request, state, deps = {}) {
   const runner = deps.runner || spawnClaudeWrapper;
   const lifecycle = state.startedConversation ? 'continue' : 'start';
@@ -439,6 +469,74 @@ function removeIfExists(path) {
   }
 }
 
+function isFifo(path) {
+  try {
+    return lstatSync(path).isFIFO();
+  } catch {
+    return false;
+  }
+}
+
+function classifyLaneStatus(state, keyPresent, requestFifoPresent, responseFifoPresent) {
+  const alive = !!(state?.pid && isPidAlive(state.pid) && state.status !== 'expired' && state.status !== 'stopped' && state.status !== 'failed');
+  const allArtifactsPresent = keyPresent && requestFifoPresent && responseFifoPresent;
+
+  if (!state && !keyPresent && !requestFifoPresent && !responseFifoPresent) {
+    return { status: 'missing', alive: false, recommendedAction: 'start' };
+  }
+  if (state?.status === 'expired' || state?.status === 'stopped') {
+    return { status: state.status, alive: false, recommendedAction: 'start' };
+  }
+  if (state?.status === 'failed') {
+    return { status: 'failed', alive: false, recommendedAction: allArtifactsPresent ? 'cleanup' : 'start' };
+  }
+  if (alive) {
+    return { status: state?.status || 'ready', alive: true, recommendedAction: 'send' };
+  }
+  if (state || keyPresent || requestFifoPresent || responseFifoPresent) {
+    return { status: 'stale', alive: false, recommendedAction: allArtifactsPresent ? 'cleanup' : 'start' };
+  }
+  return { status: 'missing', alive: false, recommendedAction: 'start' };
+}
+
+export function getResidentLaneStatus(rawOptions) {
+  if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
+  const guardrailRepo = rawOptions.guardrailRepo
+    ? resolve(process.cwd(), rawOptions.guardrailRepo)
+    : process.cwd();
+  const laneDir = resolve(guardrailRepo, rawOptions.laneDir);
+  const keyPath = rawOptions.keyPath ? resolve(process.cwd(), rawOptions.keyPath) : '';
+  const paths = lanePaths(laneDir);
+  const state = readJson(paths.statePath, null);
+  const keyPresent = !!(keyPath && existsSync(keyPath));
+  const requestFifoPresent = isFifo(paths.requestFifo);
+  const responseFifoPresent = isFifo(paths.responseFifo);
+  const derived = classifyLaneStatus(state, keyPresent, requestFifoPresent, responseFifoPresent);
+
+  return {
+    laneDir,
+    statePath: paths.statePath,
+    status: derived.status,
+    alive: derived.alive,
+    pid: state?.pid ?? null,
+    laneId: state?.laneId ?? rawOptions.laneId ?? null,
+    sessionName: state?.sessionName ?? rawOptions.sessionName ?? null,
+    sessionId: state?.sessionId ?? rawOptions.sessionId ?? null,
+    lastRequestId: state?.lastRequestId ?? null,
+    lastActivityAt: state?.lastActivityAt ?? null,
+    createdAt: state?.createdAt ?? null,
+    pollIntervalMs: state?.pollIntervalMs ?? null,
+    idleTimeoutMs: state?.idleTimeoutMs ?? null,
+    keyPath: keyPath || state?.keyPath || null,
+    keyPresent,
+    requestFifoPresent,
+    responseFifoPresent,
+    startedConversation: state?.startedConversation ?? false,
+    authMode: state?.authMode ?? null,
+    recommendedAction: derived.recommendedAction,
+  };
+}
+
 function cleanupLaneArtifacts(options, status, extra = {}) {
   const paths = lanePaths(options.laneDir);
   const finalState = {
@@ -471,6 +569,7 @@ async function runResidentLaneDaemon(options) {
   let queue = Promise.resolve();
   let requestBuffer = '';
   let partialRequestAtMs = 0;
+  const seenRequestIds = new Map();
 
   const enqueueRequest = (request) => {
     queue = queue.then(async () => {
@@ -555,12 +654,18 @@ async function runResidentLaneDaemon(options) {
             if (!line) continue;
             try {
               const parsed = JSON.parse(line);
-              enqueueRequest(validateLaneRequest(parsed, authSecret));
+              const request = validateLaneRequest(parsed, authSecret);
+              trackLaneRequestId(seenRequestIds, request.id, Date.now(), options.idleTimeoutMs);
+              enqueueRequest(request);
             } catch (err) {
               writeResponse(responseFd, {
                 requestId: typeof err?.requestId === 'string' ? err.requestId : null,
                 ok: false,
-                error: err.message === 'invalid_request' || err.message === 'invalid_request_id' || err.message === 'invalid_prompt' || err.message === 'invalid_signature'
+                error: err.message === 'invalid_request'
+                  || err.message === 'invalid_request_id'
+                  || err.message === 'invalid_prompt'
+                  || err.message === 'invalid_signature'
+                  || err.message === 'duplicate_request_id'
                   ? err.message
                   : 'invalid_json',
               });

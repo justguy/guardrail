@@ -224,6 +224,9 @@ guardrail lane send \
   --id claude-live \
   --prompt "2x3=?"
 
+# Inspect whether the lane is still alive before restarting it
+guardrail lane status --id claude-live
+
 # Tear the lane down explicitly when done
 guardrail lane stop --id claude-live
 ```
@@ -233,10 +236,12 @@ Resident lanes are for direct interactive use when the executable boundary shoul
 - stores an ephemeral per-lane HMAC key outside the workspace at `~/.guardrail/lanes/<id>.key`
 - accepts only strict JSON requests with `id` and `prompt`
 - can require an HMAC signature delivered through an inherited file descriptor instead of env or workspace state
+- rejects duplicate request ids inside the active lane window to make signed FIFO sends one-shot
 - enforces prompt and payload size limits
 - expires after idle timeout, removes its key/FIFOs, and records lane state under `.guardrail/lanes/<name>/state.json`
 
 Lane startup still has to happen in a runtime where the downstream CLI auth already works. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again.
+Use `lane status` when you need to tell the difference between an alive lane, an expired lane, and stale leftover artifacts before deciding whether to send, restart, or clean up.
 
 ---
 

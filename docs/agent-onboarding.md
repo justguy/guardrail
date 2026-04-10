@@ -267,13 +267,16 @@ AI execution recipes:
 - For direct interactive chat that must survive repeated host-runtime turns, prefer the resident lane CLI surface over repeated outer transport launches:
   - `node src/cli.js lane start --id <lane-id> ...`
   - `node src/cli.js lane send --id <lane-id> --prompt "<message>"`
+  - `node src/cli.js lane status --id <lane-id>`
   - `node src/cli.js lane stop --id <lane-id>`
 - `lane start` is the one-time host-runtime step. It starts a detached daemon in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under `~/.guardrail/lanes/<id>.key`, and fixes the executable boundary for later messages.
 - `lane send` is the per-message step. It reads the host-side key through the Guardrail CLI, signs the request, writes the strict JSON payload into the lane FIFO, and reads the matching response back without reopening the outer transport/runtime hop.
 - `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
+- `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is alive, expired, stale, or stopped and tells you the safest next action (`send`, `start`, or `cleanup`).
 - The resident FIFO bridge is intentionally narrow:
   - request schema is exactly `{ "id": "...", "prompt": "..." }`
   - request ids are bounded and pattern-checked
+  - request ids are one-shot inside a live lane; duplicate ids are rejected as replay attempts
   - prompts are size-limited
   - oversized or malformed payloads are dropped
   - partial/incomplete writes time out and are discarded
