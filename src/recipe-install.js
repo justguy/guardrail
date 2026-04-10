@@ -4,8 +4,13 @@ import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadRecipe, loadRemoteRecipe, hashRecipe, loadRawJson, validateRecipe } from './recipe.js';
+import { isTrustedExecutionSource } from './org-policy.js';
 
 const execFileAsync = promisify(execFile);
+
+function getPolicyFromOpts(opts = {}) {
+  return opts.orgPolicy || null;
+}
 
 // ---------------------------------------------------------------------------
 // Registry directory management
@@ -160,6 +165,7 @@ export function installFromPath(filePath, opts = {}) {
  */
 export async function installFromUrl(url, opts = {}) {
   const config = loadConfig(opts.configPath);
+  const policy = getPolicyFromOpts(opts);
   if (!config.trusted_sources || config.trusted_sources.length === 0) {
     throw new Error(
       'No trusted sources configured for remote recipe install. ' +
@@ -170,6 +176,13 @@ export async function installFromUrl(url, opts = {}) {
     throw new Error(
       `Source "${url}" is not in trusted sources. ` +
       'Add a matching prefix to ~/.guardrail/config.json.'
+    );
+  }
+  if (!isTrustedExecutionSource(url, policy)) {
+    const policyLabel = policy?.name || 'active';
+    throw new Error(
+      `Source "${url}" is not in trusted execution sources for org policy "${policyLabel}". ` +
+      'Add a matching prefix to trusted_execution_sources.'
     );
   }
   const remoteLoader = opts.loadRemoteRecipe ?? loadRemoteRecipe;
@@ -387,6 +400,7 @@ export function pinPathForRecipePath(recipePath) {
  */
 export async function installFromGitHub(source, opts = {}) {
   const config = loadConfig(opts.configPath);
+  const policy = getPolicyFromOpts(opts);
   const configPath = opts.configPath || resolve(homedir(), '.guardrail', 'config.json');
 
   if (!config.trusted_sources || config.trusted_sources.length === 0) {
@@ -399,6 +413,13 @@ export async function installFromGitHub(source, opts = {}) {
     throw new Error(
       `Source "${source}" is not in trusted sources.\n` +
       `Add a matching prefix to ${configPath}.`
+    );
+  }
+  if (!isTrustedExecutionSource(source, policy)) {
+    const policyLabel = policy?.name || 'active';
+    throw new Error(
+      `Source "${source}" is not in trusted execution sources for org policy "${policyLabel}". ` +
+      'Add a matching prefix to trusted_execution_sources.'
     );
   }
 
