@@ -269,7 +269,8 @@ AI execution recipes:
   - `session_name` / `session_id`: session identity keys. Changing them changes the session boundary.
   - `lane start`: one-time host-runtime startup for a resident interactive lane.
   - `lane send`: later turn/message traffic through an existing resident lane.
-  - `lane status`: inspect whether the lane is alive, expired, stale, or stopped before sending again.
+  - `lane result`: read the stored output for the latest or named resident-lane request.
+  - `lane status`: inspect whether the lane is ready, busy, expired, stale, or stopped before sending again.
   - `lane stop`: explicit teardown of the resident lane.
 - Fast decision sequence for AI runtimes:
   - resolve the intended recipe source first; if Guardrail reports a duplicate-source collision, fix `cwd` or remove the duplicate source before doing anything else
@@ -294,13 +295,15 @@ AI execution recipes:
 - For direct interactive chat that must survive repeated host-runtime turns, prefer the resident lane CLI surface over repeated outer transport launches:
   - `node src/cli.js lane start --id <lane-id> ...`
   - `node src/cli.js lane send --id <lane-id> --prompt "<message>"`
+  - `node src/cli.js lane result --id <lane-id> [--request-id <id>]`
   - `node src/cli.js lane status --id <lane-id>`
   - `node src/cli.js lane stop --id <lane-id>`
 - `lane start` is the one-time host-runtime step. It starts a detached daemon in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under `~/.guardrail/lanes/<id>.key`, and fixes the executable boundary for later messages.
 - `lane send` is the per-message step. It reads the host-side key through the Guardrail CLI, signs the request, writes the strict JSON payload into the lane FIFO, and reads the matching response back without reopening the outer transport/runtime hop.
+- If a request outlives the client-side wait window, `lane send` now returns a structured `pending` result with the request id instead of reporting `lane_expired`. Treat that as “the lane accepted the request and it is still running,” not as proof that Claude failed.
+- `lane result` is the bounded recovery/read step for those cases. Use it to fetch the stored output for the latest or named request after a long-running turn completes.
 - `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
-- `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is alive, expired, stale, or stopped and tells you the safest next action (`send`, `start`, or `cleanup`).
-- If `lane send` times out client-side during a long Claude turn, do not report that as a proven execution failure. A timeout can mean the resident lane is still busy and the downstream Claude turn is still running in the host runtime.
+- `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is ready, busy, expired, stale, or stopped, includes the current request id/start time plus the last completed result path, and tells you the safest next action.
 - The practical review-loop shape is:
   - start one approved Claude session with the full planned doc set in `input_files`
   - keep `system_prompt` fixed for the entire loop
@@ -311,16 +314,17 @@ AI execution recipes:
 - Treat that as one Guardrail approval for the doc-set/session contract, not as a promise that no outer host-runtime approval will be needed to reach the authenticated runtime in the first place.
 - Workflow chaining is usually the wrong tool for that specific review loop because it is optimized for bounded multi-step execution, not for pause-and-review interaction between each doc slice.
 - If a guarded lane, transport recipe, or composed host-runtime recipe already exists, debug it through Guardrail-managed signals first:
+  - `lane result`
   - `lane status`
   - the current repo audit/log entries for the active trace/session
   - recipe/lane-managed status outputs
 - Do not jump straight to raw host-surface inspection commands just because a hosted run exited nonzero. Listing host surfaces, selecting runtimes, or capturing host-side output directly are escalation-only fallbacks and can trigger additional user approvals one command at a time.
-- Do not jump straight to raw host process inspection (`ps`, `lsof`, direct pane capture, etc.) just because a resident lane is busy or a client timed out. First use Guardrail-managed lane status and any lane-owned artifacts. Raw host inspection is a separate approval-bearing capability and will keep retriggering approvals.
+- Do not jump straight to raw host process inspection (`ps`, `lsof`, direct pane capture, etc.) just because a resident lane is busy or a client timed out. First use `lane status`, `lane result`, and any lane-owned artifacts. Raw host inspection is a separate approval-bearing capability and will keep retriggering approvals.
 - The rule is: bounded surface first, raw surface second. Only fall back to direct host-surface commands when Guardrail does not already expose the needed state.
 - Treat host-runtime selection as an expected routing decision, not as a surprising late-stage workaround. If a tool is authenticated or functional only in a different launcher, terminal surface, remote shell, container, or similar runtime, choose that runtime early and explain it plainly as “this tool must run in the already-working host runtime,” not as a mysterious new failure after several retries.
 - When switching runtimes, name the reason in one sentence: same tool contract, different host runtime. Example: “the guarded Claude wrapper is unchanged; only the host runtime changes because the authenticated terminal surface is where Claude CLI login is currently valid.”
 - Do not present a runtime switch as if Guardrail has changed its approval model or as if the user must infer hidden state. The agent should make the boundary explicit: exec contract stays the same, host runtime changes, and the switch is to avoid repeating known-failing paths in an unauthenticated shell.
-- Resident lane CLI actions also append lifecycle entries to the repo audit log: `lane_start`, `lane_send`, and `lane_stop`. Use `.guardrail/audit.jsonl` when you need to reconstruct whether a lane was started, reused, expired, or explicitly torn down.
+- Resident lane CLI actions also append lifecycle entries to the repo audit log: `lane_start`, `lane_send`, `lane_result`, and `lane_stop`. Use `.guardrail/audit.jsonl` when you need to reconstruct whether a lane was started, reused, queried for results, expired, or explicitly torn down.
 - The resident FIFO bridge is intentionally narrow:
   - request schema is exactly `{ "id": "...", "prompt": "..." }`
   - request ids are bounded and pattern-checked

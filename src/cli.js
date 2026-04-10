@@ -63,6 +63,22 @@ function isLikelyLaneAlive(laneDir) {
   }
 }
 
+function isLaneExpiredError(err) {
+  return err?.code === 'ENOENT'
+    || err?.code === 'ENXIO'
+    || err?.code === 'EPIPE';
+}
+
+function buildLaneExpiredResponse() {
+  return {
+    status: 'error',
+    reason: 'lane_expired',
+    message: 'The resident lane has idled out. Run `guardrail lane start` to initialize a new session.',
+    ok: false,
+    exitCode: 1,
+  };
+}
+
 async function appendLaneAuditEntry(laneOpts, event, details = {}) {
   try {
     const { createAuditLog } = await import('./audit.js');
@@ -95,6 +111,7 @@ Commands:
   run --template <path> --input k=v     Run a template under Guardrail
   lane start [flags]                    Start a resident interactive lane
   lane send [flags]                     Send one message through a resident lane
+  lane result [flags]                   Read the latest or named resident lane result
   lane status [flags]                   Show resident lane status and recovery hints
   lane stop [flags]                     Stop a resident interactive lane
   workflow run [flags]                  Run a workflow definition under Guardrail
@@ -158,6 +175,8 @@ Examples:
   guardrail run --template ./templates/npm-publish.json --input package_dir=packages/my-lib --input tag=beta
   guardrail lane start --id claude-live
   guardrail lane send --id claude-live --prompt "2x3=?"
+  guardrail lane result --id claude-live
+  guardrail lane result --id claude-live --request-id req-123
   guardrail lane stop --id claude-live
   guardrail template lint --template ./templates/npm-publish.json
   guardrail template create --from-manifest .guardrail/approved.json --name npm-publish
@@ -597,7 +616,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'status', 'stop'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'result', 'status', 'stop'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -1100,6 +1119,7 @@ async function main() {
 
   if (parsed.subcommand === 'lane-send') {
     const { sendResidentLaneMessage } = await import('./claude-resident-lane-client.js');
+    const { getResidentLaneResult, getResidentLaneStatus } = await import('./claude-resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     if (!laneOpts.laneId && !laneOpts.laneDir) {
       console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane send');
@@ -1110,11 +1130,7 @@ async function main() {
       process.exit(1);
     }
     if (laneOpts.keyPath && !existsSync(laneOpts.keyPath)) {
-      const expired = {
-        status: 'error',
-        reason: 'lane_expired',
-        message: 'The resident lane has idled out. Run `guardrail lane start` to initialize a new session.',
-      };
+      const expired = buildLaneExpiredResponse();
       await appendLaneAuditEntry(laneOpts, 'lane_send', {
         request_id: laneOpts.requestId || null,
         status: 'error',
@@ -1140,22 +1156,39 @@ async function main() {
         ...(keyFd !== null ? ['--auth-fd', String(keyFd)] : []),
       ]);
     } catch (err) {
-      const expired = err?.code === 'ENOENT' || err?.code === 'ENXIO' || err?.code === 'EPIPE' || String(err?.message || '').includes('timed out');
-      if (!expired) throw err;
-      response = {
-        status: 'error',
-        reason: 'lane_expired',
-        message: 'The resident lane has idled out. Run `guardrail lane start` to initialize a new session.',
-        ok: false,
-        exitCode: 1,
-      };
+      if (err?.code === 'LANE_TIMEOUT') {
+        const status = getResidentLaneStatus(laneOpts);
+        const result = getResidentLaneResult({ ...laneOpts, requestId });
+        if (result.status === 'completed') {
+          response = result.result;
+        } else if (!status.alive && status.status !== 'busy') {
+          response = buildLaneExpiredResponse();
+        } else {
+          response = {
+            status: 'pending',
+            reason: 'request_still_running',
+            message: 'Resident lane request is still running. Use `guardrail lane status` or `guardrail lane result` instead of restarting it.',
+            requestId,
+            currentRequestId: status.currentRequestId,
+            currentRequestStartedAt: status.currentRequestStartedAt,
+            lastActivityAt: status.lastActivityAt,
+            resultPath: result.resultPath,
+            ok: false,
+            exitCode: 0,
+          };
+        }
+      } else if (isLaneExpiredError(err)) {
+        response = buildLaneExpiredResponse();
+      } else {
+        throw err;
+      }
     } finally {
       if (keyFd !== null) closeSync(keyFd);
     }
 
     await appendLaneAuditEntry(laneOpts, 'lane_send', {
       request_id: requestId,
-      status: response.ok ? 'success' : 'error',
+      status: response.status === 'pending' ? 'pending' : (response.ok ? 'success' : 'error'),
       reason: response.reason || response.error || null,
       exit_code: response.exitCode ?? null,
     });
@@ -1164,11 +1197,40 @@ async function main() {
       console.log(JSON.stringify(response, null, 2));
     } else if (response.ok) {
       process.stdout.write(response.stdout || '');
+    } else if (response.status === 'pending') {
+      console.log(response.message);
+      if (response.requestId) console.log(`Request id: ${response.requestId}`);
+      if (response.resultPath) console.log(`Result path: ${response.resultPath}`);
     } else {
       console.error(response.error || response.stderr || 'Resident lane request failed');
     }
 
-    process.exit(response.ok ? 0 : (response.exitCode || 1));
+    process.exit(response.ok || response.status === 'pending' ? 0 : (response.exitCode || 1));
+  }
+
+  if (parsed.subcommand === 'lane-result') {
+    const { getResidentLaneResult } = await import('./claude-resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane result');
+      process.exit(1);
+    }
+    const result = getResidentLaneResult(laneOpts);
+    await appendLaneAuditEntry(laneOpts, 'lane_result', {
+      request_id: result.requestId || null,
+      status: result.status,
+      reason: result.reason || null,
+    });
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.status === 'completed') {
+      process.stdout.write(result.result?.stdout || '');
+    } else {
+      console.log(result.message);
+      if (result.requestId) console.log(`Request id: ${result.requestId}`);
+      if (result.resultPath) console.log(`Result path: ${result.resultPath}`);
+    }
+    process.exit(result.status === 'missing' ? 1 : 0);
   }
 
   if (parsed.subcommand === 'lane-stop') {
@@ -1217,6 +1279,11 @@ async function main() {
       console.log(`  Alive:              ${status.alive ? 'yes' : 'no'}`);
       console.log(`  PID:                ${status.pid ?? 'n/a'}`);
       console.log(`  Last request id:    ${status.lastRequestId ?? 'n/a'}`);
+      console.log(`  Current request id: ${status.currentRequestId ?? 'n/a'}`);
+      console.log(`  Request started at: ${status.currentRequestStartedAt ?? 'n/a'}`);
+      console.log(`  Last completed id:  ${status.lastCompletedRequestId ?? 'n/a'}`);
+      console.log(`  Last completed at:  ${status.lastCompletedAt ?? 'n/a'}`);
+      console.log(`  Last result path:   ${status.lastResultPath ?? 'n/a'}`);
       console.log(`  Last activity at:   ${status.lastActivityAt ?? 'n/a'}`);
       console.log(`  Key present:        ${status.keyPresent ? 'yes' : 'no'}`);
       console.log(`  Request FIFO:       ${status.requestFifoPresent ? 'present' : 'missing'}`);

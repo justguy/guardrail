@@ -569,6 +569,48 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.reason, 'lane_expired');
   });
 
+  it('guardrail lane send returns pending instead of lane_expired when a live lane is still running', () => {
+    const dir = tmpDir();
+    const guardrailRepo = join(dir, 'repo');
+    const laneDir = join(dir, 'lane');
+    mkdirSync(join(guardrailRepo, '.guardrail'), { recursive: true });
+    mkdirSync(join(laneDir, 'results'), { recursive: true });
+    const requestFifo = join(laneDir, 'requests.fifo');
+    const responseFifo = join(laneDir, 'responses.fifo');
+    assert.equal(spawnSync('mkfifo', [requestFifo]).status, 0);
+    assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
+    const keyPath = join(dir, 'lane.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'busy',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      currentRequestId: 'req-timeout',
+      currentRequestStartedAt: '2026-04-10T00:00:00.000Z',
+      lastRequestId: 'req-timeout',
+      lastActivityAt: new Date().toISOString(),
+      keyPath,
+    }), 'utf8');
+
+    const requestFd = openSync(requestFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK);
+    try {
+      const r = run(`${CLI} lane send --guardrail-repo ${guardrailRepo} --lane-dir ${laneDir} --key-path ${keyPath} --request-id req-timeout --prompt "2x3=?" --timeout-ms 5 --json`);
+      assert.equal(r.exitCode, 0, r.stderr);
+      const parsed = JSON.parse(r.stdout);
+      assert.equal(parsed.status, 'pending');
+      assert.equal(parsed.reason, 'request_still_running');
+      assert.equal(parsed.requestId, 'req-timeout');
+      const entries = queryAuditLog(join(guardrailRepo, '.guardrail', 'audit.jsonl'), {});
+      const laneSendEntry = entries.find((entry) => entry.event === 'lane_send');
+      assert.ok(laneSendEntry, 'expected lane_send audit entry');
+      assert.equal(laneSendEntry.status, 'pending');
+      assert.equal(laneSendEntry.reason, 'request_still_running');
+    } finally {
+      closeSync(requestFd);
+    }
+  });
+
   it('guardrail lane status reports expired lanes cleanly', () => {
     const dir = tmpDir();
     const laneDir = join(dir, 'lane');
@@ -588,6 +630,34 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.status, 'expired');
     assert.equal(parsed.alive, false);
     assert.equal(parsed.recommendedAction, 'start');
+  });
+
+  it('guardrail lane result returns the stored output for a completed request', () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    mkdirSync(join(laneDir, 'results'), { recursive: true });
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      lastRequestId: 'req-1',
+      lastCompletedRequestId: 'req-1',
+      lastResultPath: join(laneDir, 'results', 'req-1.json'),
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+    writeFileSync(join(laneDir, 'results', 'req-1.json'), JSON.stringify({
+      requestId: 'req-1',
+      ok: true,
+      exitCode: 0,
+      stdout: '6\n',
+    }), 'utf8');
+
+    const r = run(`${CLI} lane result --lane-dir ${laneDir} --request-id req-1 --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.status, 'completed');
+    assert.equal(parsed.result.stdout, '6\n');
   });
 
   it('guardrail lane stop appends an audit entry and removes the host key', () => {

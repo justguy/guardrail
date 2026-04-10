@@ -622,6 +622,19 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.json, true);
   });
 
+  it('parses lane result flags', () => {
+    const result = parseArgs([
+      'lane', 'result',
+      '--id', 'claude-live',
+      '--request-id', 'req-123',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-result');
+    assert.equal(result.laneOpts.id, 'claude-live');
+    assert.equal(result.laneOpts.requestId, 'req-123');
+    assert.equal(result.json, true);
+  });
+
   it('parses lane stop flags', () => {
     const result = parseArgs([
       'lane', 'stop',

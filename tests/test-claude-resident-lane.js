@@ -17,9 +17,11 @@ import { tmpdir } from 'node:os';
 
 import {
   lanePaths,
+  laneResultPath,
   parseResidentLaneArgs,
   normalizeResidentLaneOptions,
   runLaneRequest,
+  getResidentLaneResult,
   getResidentLaneStatus,
   launchResidentLane,
   signLaneRequest,
@@ -274,6 +276,33 @@ describe('Claude resident lane', () => {
     }
   });
 
+  it('returns a distinct timeout error when the lane does not answer in time', async () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    mkdirSync(laneDir, { recursive: true });
+    const paths = lanePaths(laneDir);
+    mkfifo(paths.requestFifo);
+    mkfifo(paths.responseFifo);
+
+    const requestFd = openSync(paths.requestFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK);
+    const responseFd = openSync(paths.responseFifo, fsConstants.O_RDWR);
+
+    try {
+      await assert.rejects(
+        sendResidentLaneMessage([
+          '--lane-dir', laneDir,
+          '--request-id', 'req-timeout',
+          '--prompt', '4x5=?',
+          '--timeout-ms', '10',
+        ]),
+        (err) => err?.code === 'LANE_TIMEOUT' && err?.requestId === 'req-timeout',
+      );
+    } finally {
+      closeSync(requestFd);
+      closeSync(responseFd);
+    }
+  });
+
   it('rejects duplicate request ids within the same active lane window', () => {
     const seen = new Map();
 
@@ -338,6 +367,85 @@ describe('Claude resident lane', () => {
     assert.equal(status.requestFifoPresent, true);
     assert.equal(status.responseFifoPresent, true);
     assert.equal(status.recommendedAction, 'send');
+  });
+
+  it('reports busy resident lane status with current request visibility', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    mkdirSync(laneDir, { recursive: true });
+    const paths = lanePaths(laneDir);
+    mkfifo(paths.requestFifo);
+    mkfifo(paths.responseFifo);
+    const keyPath = join(dir, 'math.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(paths.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'busy',
+      laneId: 'math',
+      sessionName: 'math-live-session',
+      currentRequestId: 'req-2',
+      currentRequestStartedAt: '2026-04-10T00:00:00.000Z',
+      lastRequestId: 'req-2',
+      lastActivityAt: new Date().toISOString(),
+      keyPath,
+    }), 'utf8');
+
+    const status = getResidentLaneStatus({ laneDir, keyPath, guardrailRepo: dir, laneId: 'math' });
+    assert.equal(status.status, 'busy');
+    assert.equal(status.alive, true);
+    assert.equal(status.currentRequestId, 'req-2');
+    assert.equal(status.currentRequestStartedAt, '2026-04-10T00:00:00.000Z');
+    assert.equal(status.recommendedAction, 'result');
+  });
+
+  it('returns completed resident lane results from stored result artifacts', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    mkdirSync(laneDir, { recursive: true });
+    const resultPath = laneResultPath(laneDir, 'req-3');
+    mkdirSync(lanePaths(laneDir).resultsDir, { recursive: true });
+    writeFileSync(resultPath, JSON.stringify({
+      requestId: 'req-3',
+      ok: true,
+      exitCode: 0,
+      stdout: '12\n',
+    }), 'utf8');
+    writeFileSync(lanePaths(laneDir).statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math',
+      sessionName: 'math-live-session',
+      lastRequestId: 'req-3',
+      lastCompletedRequestId: 'req-3',
+      lastResultPath: resultPath,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const result = getResidentLaneResult({ laneDir, guardrailRepo: dir, laneId: 'math', requestId: 'req-3' });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.result.stdout, '12\n');
+    assert.equal(result.resultPath, resultPath);
+  });
+
+  it('returns pending resident lane results while a request is still running', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    mkdirSync(laneDir, { recursive: true });
+    writeFileSync(lanePaths(laneDir).statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'busy',
+      laneId: 'math',
+      sessionName: 'math-live-session',
+      lastRequestId: 'req-4',
+      currentRequestId: 'req-4',
+      currentRequestStartedAt: '2026-04-10T00:00:00.000Z',
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const result = getResidentLaneResult({ laneDir, guardrailRepo: dir, laneId: 'math', requestId: 'req-4' });
+    assert.equal(result.status, 'pending');
+    assert.equal(result.reason, 'request_still_running');
+    assert.equal(result.requestId, 'req-4');
   });
 
   it('reports expired resident lane status when the key is gone', () => {

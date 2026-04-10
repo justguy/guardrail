@@ -83,6 +83,13 @@ function parseOptionalFd(value) {
   return parsed;
 }
 
+function createLaneTimeoutError(timeoutMs, requestId) {
+  const err = new Error(`Resident lane timed out after ${timeoutMs}ms`);
+  err.code = 'LANE_TIMEOUT';
+  err.requestId = requestId;
+  return err;
+}
+
 function readSecretFromFd(fd) {
   if (!Number.isInteger(fd) || fd < 3) return '';
   const chunks = [];
@@ -151,7 +158,7 @@ export async function sendResidentLaneMessage(rawOptions) {
     let buffer = '';
     for (;;) {
       if ((Date.now() - startedAt) > timeoutMs) {
-        throw new Error(`Resident lane timed out after ${timeoutMs}ms`);
+        throw createLaneTimeoutError(timeoutMs, parsed.requestId);
       }
 
       try {

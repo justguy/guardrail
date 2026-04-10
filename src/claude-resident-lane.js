@@ -211,7 +211,12 @@ export function lanePaths(laneDir) {
     statePath: join(laneDir, 'state.json'),
     launchPath: join(laneDir, 'launch.json'),
     logPath: join(laneDir, 'logs', 'lane.log'),
+    resultsDir: join(laneDir, 'results'),
   };
+}
+
+export function laneResultPath(laneDir, requestId) {
+  return join(lanePaths(laneDir).resultsDir, `${requestId}.json`);
 }
 
 function ensureFifo(path) {
@@ -236,6 +241,7 @@ function ensureFifo(path) {
 function ensureLaneLayout(laneDir) {
   mkdirSync(laneDir, { recursive: true });
   mkdirSync(join(laneDir, 'logs'), { recursive: true });
+  mkdirSync(join(laneDir, 'results'), { recursive: true });
   const paths = lanePaths(laneDir);
   ensureFifo(paths.requestFifo);
   ensureFifo(paths.responseFifo);
@@ -281,6 +287,12 @@ function buildState(options, pid, startedConversation = false, extra = {}) {
     pid,
     status: extra.status || 'ready',
     lastRequestId: extra.lastRequestId || null,
+    currentRequestId: extra.currentRequestId || null,
+    currentRequestStartedAt: extra.currentRequestStartedAt || null,
+    lastCompletedRequestId: extra.lastCompletedRequestId || null,
+    lastCompletedAt: extra.lastCompletedAt || null,
+    lastExitCode: extra.lastExitCode ?? null,
+    lastResultPath: extra.lastResultPath || null,
     lastActivityAt: extra.lastActivityAt || new Date().toISOString(),
     createdAt: extra.createdAt || new Date().toISOString(),
     pollIntervalMs: options.pollIntervalMs,
@@ -456,6 +468,12 @@ function updateStateFile(laneDir, state) {
   writeJson(lanePaths(laneDir).statePath, state);
 }
 
+function writeLaneResult(laneDir, response) {
+  const resultPath = laneResultPath(laneDir, response.requestId);
+  writeJson(resultPath, response);
+  return resultPath;
+}
+
 function writeResponse(fd, payload) {
   writeSync(fd, `${JSON.stringify(payload)}\n`, undefined, 'utf8');
 }
@@ -491,6 +509,9 @@ function classifyLaneStatus(state, keyPresent, requestFifoPresent, responseFifoP
     return { status: 'failed', alive: false, recommendedAction: allArtifactsPresent ? 'cleanup' : 'start' };
   }
   if (alive) {
+    if (state?.status === 'busy') {
+      return { status: 'busy', alive: true, recommendedAction: 'result' };
+    }
     return { status: state?.status || 'ready', alive: true, recommendedAction: 'send' };
   }
   if (state || keyPresent || requestFifoPresent || responseFifoPresent) {
@@ -523,6 +544,12 @@ export function getResidentLaneStatus(rawOptions) {
     sessionName: state?.sessionName ?? rawOptions.sessionName ?? null,
     sessionId: state?.sessionId ?? rawOptions.sessionId ?? null,
     lastRequestId: state?.lastRequestId ?? null,
+    currentRequestId: state?.currentRequestId ?? null,
+    currentRequestStartedAt: state?.currentRequestStartedAt ?? null,
+    lastCompletedRequestId: state?.lastCompletedRequestId ?? null,
+    lastCompletedAt: state?.lastCompletedAt ?? null,
+    lastExitCode: state?.lastExitCode ?? null,
+    lastResultPath: state?.lastResultPath ?? null,
     lastActivityAt: state?.lastActivityAt ?? null,
     createdAt: state?.createdAt ?? null,
     pollIntervalMs: state?.pollIntervalMs ?? null,
@@ -537,12 +564,68 @@ export function getResidentLaneStatus(rawOptions) {
   };
 }
 
+export function getResidentLaneResult(rawOptions) {
+  if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
+  const status = getResidentLaneStatus(rawOptions);
+  const requestId = rawOptions.requestId
+    || status.currentRequestId
+    || status.lastCompletedRequestId
+    || status.lastRequestId
+    || null;
+
+  if (!requestId) {
+    return {
+      status: 'missing',
+      reason: 'no_request_selected',
+      message: 'No resident lane request has been recorded yet.',
+      requestId: null,
+      resultPath: null,
+    };
+  }
+
+  const resultPath = laneResultPath(status.laneDir, requestId);
+  const result = readJson(resultPath, null);
+  if (result) {
+    return {
+      status: 'completed',
+      requestId,
+      resultPath,
+      result,
+    };
+  }
+
+  if (status.currentRequestId === requestId && status.status === 'busy') {
+    return {
+      status: 'pending',
+      reason: 'request_still_running',
+      message: 'Resident lane request is still running.',
+      requestId,
+      resultPath,
+      currentRequestStartedAt: status.currentRequestStartedAt,
+    };
+  }
+
+  return {
+    status: 'missing',
+    reason: 'result_not_found',
+    message: 'No stored resident lane result was found for that request.',
+    requestId,
+    resultPath,
+  };
+}
+
 function cleanupLaneArtifacts(options, status, extra = {}) {
   const paths = lanePaths(options.laneDir);
   const finalState = {
     ...buildState(options, process.pid, false, {
       status,
       lastRequestId: extra.lastRequestId || null,
+      currentRequestId: extra.currentRequestId || null,
+      currentRequestStartedAt: extra.currentRequestStartedAt || null,
+      lastCompletedRequestId: extra.lastCompletedRequestId || null,
+      lastCompletedAt: extra.lastCompletedAt || null,
+      lastExitCode: extra.lastExitCode ?? null,
+      lastResultPath: extra.lastResultPath || null,
       lastActivityAt: new Date().toISOString(),
       createdAt: extra.createdAt || undefined,
     }),
@@ -578,16 +661,25 @@ async function runResidentLaneDaemon(options) {
         ...state,
         status: 'busy',
         lastRequestId: request.id,
+        currentRequestId: request.id,
+        currentRequestStartedAt: new Date().toISOString(),
         lastActivityAt: new Date().toISOString(),
       };
       updateStateFile(options.laneDir, state);
 
       const response = await runLaneRequest(options, request, state);
+      const resultPath = writeLaneResult(options.laneDir, response);
       state = {
         ...state,
         startedConversation: state.startedConversation || response.ok,
         status: 'ready',
         lastRequestId: request.id,
+        currentRequestId: null,
+        currentRequestStartedAt: null,
+        lastCompletedRequestId: request.id,
+        lastCompletedAt: response.completedAt,
+        lastExitCode: response.exitCode,
+        lastResultPath: resultPath,
         lastActivityAt: response.completedAt,
       };
       updateStateFile(options.laneDir, state);
@@ -601,10 +693,17 @@ async function runResidentLaneDaemon(options) {
         error: err.message,
         completedAt: new Date().toISOString(),
       };
+      const resultPath = writeLaneResult(options.laneDir, failure);
       state = {
         ...state,
         status: 'ready',
         lastRequestId: request.id,
+        currentRequestId: null,
+        currentRequestStartedAt: null,
+        lastCompletedRequestId: request.id,
+        lastCompletedAt: failure.completedAt,
+        lastExitCode: failure.exitCode,
+        lastResultPath: resultPath,
         lastActivityAt: failure.completedAt,
       };
       updateStateFile(options.laneDir, state);
@@ -619,6 +718,12 @@ async function runResidentLaneDaemon(options) {
     try {
       cleanupLaneArtifacts(options, status, {
         lastRequestId: state.lastRequestId,
+        currentRequestId: state.currentRequestId,
+        currentRequestStartedAt: state.currentRequestStartedAt,
+        lastCompletedRequestId: state.lastCompletedRequestId,
+        lastCompletedAt: state.lastCompletedAt,
+        lastExitCode: state.lastExitCode,
+        lastResultPath: state.lastResultPath,
         createdAt: state.createdAt,
       });
     } finally {
@@ -807,6 +912,12 @@ export function stopResidentLane(rawOptions) {
   }
   cleanupLaneArtifacts(options, 'stopped', {
     lastRequestId: state?.lastRequestId || null,
+    currentRequestId: state?.currentRequestId || null,
+    currentRequestStartedAt: state?.currentRequestStartedAt || null,
+    lastCompletedRequestId: state?.lastCompletedRequestId || null,
+    lastCompletedAt: state?.lastCompletedAt || null,
+    lastExitCode: state?.lastExitCode ?? null,
+    lastResultPath: state?.lastResultPath || null,
     createdAt: state?.createdAt,
   });
   try {
