@@ -207,6 +207,8 @@ Bundled Guardrail recipes also resolve shipped wrapper helpers internally now, s
 
 Extra recipe roots remain opt-in, but they no longer bypass central governance: repo/user-configured `default_recipe_roots` and explicit extra roots are blocked when the active org policy does not trust them via `trusted_recipe_roots` in `.guardrail/org-policy.json` or `.guardrail/org-policies/default.json`.
 
+Workflow approvals now bind `recipe_ref` sources through portable source locators instead of absolute recipe file paths, so the same workflow can move between different checkout paths or runners without false drift from path changes alone. Guardrail still fails closed if the target machine cannot actually resolve the referenced recipe source.
+
 ### 4. Resident Lane Mode
 
 Keep an interactive AI session alive behind one bounded lane, then send later user messages without reopening the outer transport every turn:

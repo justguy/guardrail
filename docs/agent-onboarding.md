@@ -216,6 +216,7 @@ node src/cli.js recipe versions <recipe-id>
 
 - Recipe lookup locations: `recipes`, `node_modules/.guardrail/recipes`, `~/.guardrail/recipes`.
 - Workflow `recipe_ref` now uses those same default lookup roots automatically. Use `--recipe-search-dir` only for extra ad hoc roots outside those defaults.
+- Workflow approvals bind `recipe_ref` sources through portable source locators instead of absolute recipe file paths, so moving the same repo between laptop/CI/shared-runner checkout paths does not cause drift by itself.
 - Extra configured roots can now come from:
   - repo-local `.guardrail/config.json` via `"default_recipe_roots": ["../shared-recipes"]`
   - user-level `~/.guardrail/config.json` via `"default_recipe_roots": ["/abs/path/to/shared-recipes"]`
@@ -223,8 +224,12 @@ node src/cli.js recipe versions <recipe-id>
 - Configured default recipe roots are additional search roots, not silent overrides. Explicit `--recipe-search-dir` still wins, and missing configured roots fail closed.
 - If the active org policy defines `trusted_recipe_roots`, extra configured roots and explicit extra roots must stay inside that allowlist. Guardrail loads the active policy from `.guardrail/org-policy.json` or `.guardrail/org-policies/default.json` before accepting those extra roots.
 - If the same recipe id/version is discoverable from more than one root at the same precedence point, Guardrail fails closed with an explicit collision error instead of silently picking one candidate.
+- Workflow manifests bind `recipe_ref` source provenance through portable source locators (`sourceRootKind` + relative locator), not absolute checkout paths. That avoids false drift when the repo checkout path changes.
+- The source class still matters. If a workflow was approved against `node_modules/.guardrail/recipes` and later resolves the same recipe from local `recipes/` or an external root, Guardrail treats that as workflow drift and stops for reapproval.
+- When a recipe cannot be found, Guardrail now includes the current search order in the error. Use that before assuming the recipe id is wrong.
 
 - Standalone `run --recipe` resolves the local `recipes/` directory relative to the current working directory, not relative to `src/cli.js`.
+- Portability is not the same as availability: if another machine cannot resolve the referenced recipe from its local/default/shared roots, workflow normalization still fails closed until that recipe source exists there.
 - `--recipe-search-dir <path>` is workflow-only. Use it on `workflow lint` and `workflow run` for `recipe_ref` resolution, but do not expect `run --recipe`, `list`, or global CLI parsing to accept it.
 - If you need standalone recipe execution from a different working directory, either change cwd so the intended local `recipes/` directory resolves correctly, or install the recipe into `~/.guardrail/recipes` / make it available through `node_modules/.guardrail/recipes`.
 - Installing a bundled local recipe into the home registry is valid when you need standalone `run --recipe` from another cwd:

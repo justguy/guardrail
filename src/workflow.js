@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { dirname, relative, sep } from 'node:path';
 import { serializeStable, checkRegexSafety } from './contract.js';
 import { deepEqual, pretty, indexById, resolvePath } from './shared.js';
 import {
   buildRecipeSearchDirs,
+  classifyRecipeSourceRoot,
   resolveRecipeById,
   resolveInputs,
   parseRecipeSpecifier,
@@ -34,7 +36,6 @@ const SERVICE_STEP_TYPES = new Set([
   'service_stop',
   'service_restart',
 ]);
-
 const RUN_DEFAULTS = { mode: 'structured', timeoutMs: 60000 };
 const STEP_DEFAULTS = { validator: 'exit_code', updateSource: 'none' };
 const VALID_OUTPUT_TYPES = new Set(['string', 'number', 'boolean', 'json']);
@@ -581,6 +582,25 @@ function resolveRecipeAllowUnverified(step, options = {}) {
   return options.allowUnverified === true;
 }
 
+function toPortableRelativePath(rootPath, filePath) {
+  return relative(rootPath, filePath).split(sep).join('/');
+}
+
+function materializeRecipeRefForApproval(recipeRef = {}) {
+  const { sourcePath, sourceRoot, ...portableRecipeRef } = recipeRef;
+  return portableRecipeRef;
+}
+
+function materializeWorkflowStepsForApproval(steps = []) {
+  return steps.map((step) => {
+    if (step.type !== 'recipe_ref' || !step.recipeRef) return step;
+    return {
+      ...step,
+      recipeRef: materializeRecipeRefForApproval(step.recipeRef),
+    };
+  });
+}
+
 export function buildWorkflowRecipeSearchDirs(projectRoot, basePath, explicitSearchDirs = [], options = {}) {
   return buildRecipeSearchDirs({
     explicitSearchDirs: explicitSearchDirs || [],
@@ -641,6 +661,11 @@ function normalizeRecipeRefStep(step, projectRoot, options = {}) {
   const { version: requestedVersion } = parseRecipeSpecifier(step.recipe);
   const recipeHash = hashRecipe(resolvedRecipe.recipe);
   const trust = classifyTrust(resolvedRecipe.recipe);
+  const sourceRoot = resolvedRecipe.recipe._sourceRoot || dirname(resolvedRecipe.sourcePath);
+  const sourceRootKind = classifyRecipeSourceRoot(sourceRoot, {
+    projectRoot,
+    basePath: options.basePath ?? projectRoot,
+  });
   const flaggedInputs = (inputResult.flagged || []).map((entry) => ({
     key: entry.key,
     reasons: entry.reasons,
@@ -655,6 +680,8 @@ function normalizeRecipeRefStep(step, projectRoot, options = {}) {
     id: resolvedRecipe.recipe.id,
     requestedVersion,
     resolvedVersion: resolvedRecipe.version,
+    sourceRootKind,
+    sourceLocator: `${sourceRootKind}:${toPortableRelativePath(sourceRoot, resolvedRecipe.sourcePath)}`,
     sourcePath: normalizePathForRecipeLookup(resolvedRecipe.sourcePath),
     recipeHash,
     channel: trust.channel,
@@ -858,6 +885,12 @@ function diffRecipeRefTrustBoundary(stepId, cRecipeRef = {}, aRecipeRef = {}) {
   if (cRecipeRef.allowUnverified !== aRecipeRef.allowUnverified) {
     diffs.push(`~ Step ${stepId} recipeRef.allowUnverified: ${pretty(aRecipeRef.allowUnverified)} -> ${pretty(cRecipeRef.allowUnverified)}`);
   }
+  if (cRecipeRef.sourceRootKind !== aRecipeRef.sourceRootKind) {
+    diffs.push(`~ Step ${stepId} recipeRef.sourceRootKind: ${pretty(aRecipeRef.sourceRootKind)} -> ${pretty(cRecipeRef.sourceRootKind)}`);
+  }
+  if (cRecipeRef.sourceLocator !== aRecipeRef.sourceLocator) {
+    diffs.push(`~ Step ${stepId} recipeRef.sourceLocator: ${pretty(aRecipeRef.sourceLocator)} -> ${pretty(cRecipeRef.sourceLocator)}`);
+  }
 
   return diffs;
 }
@@ -960,7 +993,7 @@ export function hashWorkflow(normalizedWorkflow) {
     entryStep: normalizedWorkflow.entryStep,
     maxIterations: normalizedWorkflow.maxIterations,
     services: normalizedWorkflow.services,
-    steps: normalizedWorkflow.steps,
+    steps: materializeWorkflowStepsForApproval(normalizedWorkflow.steps),
     rollback_policy: normalizedWorkflow.rollback_policy,
     rollback: normalizedWorkflow.rollback,
   };
@@ -980,7 +1013,7 @@ export function createWorkflowManifest(normalizedWorkflow, workflowHash, riskAss
       entryStep: normalizedWorkflow.entryStep,
       maxIterations: normalizedWorkflow.maxIterations,
       services: normalizedWorkflow.services,
-      steps: normalizedWorkflow.steps,
+      steps: materializeWorkflowStepsForApproval(normalizedWorkflow.steps),
       rollback_policy: normalizedWorkflow.rollback_policy,
       rollback: normalizedWorkflow.rollback,
     },
@@ -998,9 +1031,11 @@ export function createWorkflowManifest(normalizedWorkflow, workflowHash, riskAss
 export function diffWorkflowManifests(candidate, approved) {
   const cWf = candidate.workflow ?? {};
   const aWf = approved.workflow ?? {};
+  const projectRootChanged = candidate.projectRoot !== approved.projectRoot;
+  const workflowChanged = candidate.workflowHash !== approved.workflowHash;
 
   return [
-    ...(candidate.projectRoot !== approved.projectRoot
+    ...(projectRootChanged && workflowChanged
       ? [`~ projectRoot: ${pretty(approved.projectRoot)} -> ${pretty(candidate.projectRoot)}`]
       : []),
     ...diffTopLevelFields(cWf, aWf),
@@ -1011,7 +1046,7 @@ export function diffWorkflowManifests(candidate, approved) {
       ? [`~ rollback_policy: ${pretty(aWf.rollback_policy)} -> ${pretty(cWf.rollback_policy)}`]
       : []),
     ...diffRiskAssessment(candidate.riskAssessment ?? {}, approved.riskAssessment ?? {}),
-    ...(candidate.workflowHash !== approved.workflowHash
+    ...(workflowChanged
       ? [`~ workflowHash: ${pretty(approved.workflowHash)} -> ${pretty(candidate.workflowHash)}`]
       : []),
   ];

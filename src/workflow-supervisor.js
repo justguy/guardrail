@@ -1070,9 +1070,12 @@ export async function runWorkflowSupervisor(options) {
     } catch (err) {
       logger.error('definition_load_error', { path: definitionPath, error: err.message });
       persistStateSafe(stateDir, state);
+      resultOpts.terminalReason = `Failed to load workflow definition: ${err.message}`;
+      state.terminalReason = resultOpts.terminalReason;
+      persistStateSafe(stateDir, state);
       const result = buildResult(runId, 'internal_error', resultOpts);
       emitExecutionEnd(progressSink, runId, result.status, {
-        message: `Failed to load workflow definition: ${err.message}`,
+        message: resultOpts.terminalReason,
       });
       return result;
     }

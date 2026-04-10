@@ -191,6 +191,21 @@ function formatSearchOrder(searchDirs) {
   return searchDirs.map((entry, i) => `${i + 1}. ${entry}`).join('\n');
 }
 
+export function classifyRecipeSourceRoot(rootPath, { projectRoot = null, basePath = process.cwd() } = {}) {
+  const normalizedRoot = normalizePathForRecipeLookup(rootPath, basePath);
+  const normalizedProjectRoot = projectRoot ? normalizePathForRecipeLookup(resolve(projectRoot, 'recipes')) : '';
+  const normalizedLocalRoot = normalizePathForRecipeLookup(resolve(basePath, 'recipes'));
+  const normalizedNodeModulesRoot = normalizePathForRecipeLookup(resolve(basePath, 'node_modules/.guardrail', 'recipes'));
+  const normalizedHomeRegistryRoot = normalizePathForRecipeLookup(resolve(homedir(), '.guardrail', 'recipes'));
+
+  if (normalizedRoot === normalizedHomeRegistryRoot) return 'home_registry';
+  if (normalizedRoot === normalizedNodeModulesRoot) return 'node_modules_registry';
+  if ((normalizedProjectRoot && normalizedRoot === normalizedProjectRoot) || normalizedRoot === normalizedLocalRoot) {
+    return 'local_recipes';
+  }
+  return 'external_root';
+}
+
 function buildRecipeCollisionError(id, version, matches, searchDirs) {
   const candidateLines = matches
     .map((match) => {
@@ -236,7 +251,7 @@ export function parseRecipeSpecifier(specifier) {
  *
  * @param {string} specifier  - Recipe ID or ID@version.
  * @param {string[]} [dirs]   - Directories to search.
- * @returns {{ recipe: object, sourcePath: string, version: string }}
+ * @returns {{ recipe: object, sourcePath: string, sourceRoot: string|null, version: string }}
  */
 export function resolveRecipeById(specifier, dirs) {
   const { id, version } = parseRecipeSpecifier(specifier);
@@ -246,10 +261,13 @@ export function resolveRecipeById(specifier, dirs) {
 
   if (!versions || versions.length === 0) {
     const allIds = [...versionIndex.keys()];
-    const hint = allIds.length > 0
+    const searchHint = searchDirs.length > 0
+      ? `\nSearch order:\n${formatSearchOrder(searchDirs)}`
+      : '\nNo search directories were available.';
+    const availabilityHint = allIds.length > 0
       ? `\nAvailable recipes: ${allIds.join(', ')}`
       : '\nNo recipes found in search directories.';
-    throw new Error(`Recipe "${id}" not found.${hint}`);
+    throw new Error(`Recipe "${id}" not found.${searchHint}${availabilityHint}`);
   }
 
   if (version) {
@@ -258,14 +276,19 @@ export function resolveRecipeById(specifier, dirs) {
     if (matches.length === 0) {
       const available = [...new Set(versions.map(v => v.version))].join(', ');
       throw new Error(
-        `Recipe "${id}" version ${version} not found.\nAvailable versions: ${available}`
+        `Recipe "${id}" version ${version} not found.\nSearch order:\n${formatSearchOrder(searchDirs)}\nAvailable versions: ${available}`
       );
     }
     if (matches.length > 1) {
       throw new Error(buildRecipeCollisionError(id, version, matches, searchDirs));
     }
     const match = matches[0];
-    return { recipe: match.recipe, sourcePath: match.source, version: match.version };
+    return {
+      recipe: match.recipe,
+      sourcePath: match.source,
+      sourceRoot: match.recipe._sourceRoot ?? null,
+      version: match.version,
+    };
   }
 
   // Latest version (first in sorted-newest-first list)
@@ -274,7 +297,12 @@ export function resolveRecipeById(specifier, dirs) {
   if (latestMatches.length > 1) {
     throw new Error(buildRecipeCollisionError(id, latest.version, latestMatches, searchDirs));
   }
-  return { recipe: latest.recipe, sourcePath: latest.source, version: latest.version };
+  return {
+    recipe: latest.recipe,
+    sourcePath: latest.source,
+    sourceRoot: latest.recipe._sourceRoot ?? null,
+    version: latest.version,
+  };
 }
 
 // ---------------------------------------------------------------------------

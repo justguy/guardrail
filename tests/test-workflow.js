@@ -684,14 +684,138 @@ describe('Workflow Manifest Save/Load', () => {
     assert.equal(result.diffs.length, 0);
   });
 
-  it('projectRoot drift is detected', () => {
+  it('projectRoot-only drift is ignored when workflow hash matches', () => {
     const def = makeDefinition();
     const m1 = buildManifest(def, tmpDir);
     const m2 = buildManifest(def, tmpDir);
     m2.projectRoot = join(tmpDir, 'other-root');
     const result = compareWorkflowManifests(m2, m1);
-    assert.equal(result.matches, false);
-    assert.ok(result.diffs.some(d => d.includes('projectRoot')));
+    assert.equal(result.matches, true);
+    assert.equal(result.diffs.length, 0);
+  });
+
+  it('recipe_ref manifests stay portable across different checkout roots for local recipes', () => {
+    const left = mkdtempSync(join(tmpdir(), 'wf-portable-local-left-'));
+    const right = mkdtempSync(join(tmpdir(), 'wf-portable-local-right-'));
+    const recipe = {
+      id: 'portable-local-recipe',
+      name: 'Portable Local Recipe',
+      description: 'Portable across checkout roots',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{
+        id: 'main',
+        description: 'echo portable',
+        run: { command: 'echo', args: ['portable'], mode: 'structured' },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    };
+
+    try {
+      mkdirSync(join(left, 'recipes'), { recursive: true });
+      mkdirSync(join(right, 'recipes'), { recursive: true });
+      writeRecipeFile(join(left, 'recipes'), recipe);
+      writeRecipeFile(join(right, 'recipes'), recipe);
+
+      const def = makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'portable-local-recipe',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      });
+
+      const leftNormalized = normalizeWorkflowDefinition(def, left);
+      const rightNormalized = normalizeWorkflowDefinition(def, right);
+      const leftManifest = createWorkflowManifest(
+        leftNormalized,
+        hashWorkflow(leftNormalized),
+        evaluateWorkflowRisk(leftNormalized, { trustClass: 'reviewed_internal', projectRoot: left }),
+        leftNormalized.projectRoot,
+      );
+      const rightManifest = createWorkflowManifest(
+        rightNormalized,
+        hashWorkflow(rightNormalized),
+        evaluateWorkflowRisk(rightNormalized, { trustClass: 'reviewed_internal', projectRoot: right }),
+        rightNormalized.projectRoot,
+      );
+
+      assert.equal(leftManifest.workflow.steps[0].recipeRef.sourceRootKind, 'local_recipes');
+      assert.equal(rightManifest.workflow.steps[0].recipeRef.sourceRootKind, 'local_recipes');
+      assert.equal(compareWorkflowManifests(rightManifest, leftManifest).matches, true);
+    } finally {
+      rmSync(left, { recursive: true, force: true });
+      rmSync(right, { recursive: true, force: true });
+    }
+  });
+
+  it('recipe_ref manifests stay portable across different checkout roots for node_modules registry recipes', () => {
+    const left = mkdtempSync(join(tmpdir(), 'wf-portable-node-left-'));
+    const right = mkdtempSync(join(tmpdir(), 'wf-portable-node-right-'));
+    const recipe = {
+      id: 'portable-installed-recipe',
+      name: 'Portable Installed Recipe',
+      description: 'Portable from node_modules registry',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{
+        id: 'main',
+        description: 'echo portable',
+        run: { command: 'echo', args: ['portable'], mode: 'structured' },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    };
+
+    try {
+      mkdirSync(join(left, 'node_modules', '.guardrail', 'recipes'), { recursive: true });
+      mkdirSync(join(right, 'node_modules', '.guardrail', 'recipes'), { recursive: true });
+      writeRecipeFile(join(left, 'node_modules', '.guardrail', 'recipes'), recipe);
+      writeRecipeFile(join(right, 'node_modules', '.guardrail', 'recipes'), recipe);
+
+      const def = makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'portable-installed-recipe',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      });
+
+      const leftNormalized = normalizeWorkflowDefinition(def, left);
+      const rightNormalized = normalizeWorkflowDefinition(def, right);
+      const leftManifest = createWorkflowManifest(
+        leftNormalized,
+        hashWorkflow(leftNormalized),
+        evaluateWorkflowRisk(leftNormalized, { trustClass: 'reviewed_internal', projectRoot: left }),
+        leftNormalized.projectRoot,
+      );
+      const rightManifest = createWorkflowManifest(
+        rightNormalized,
+        hashWorkflow(rightNormalized),
+        evaluateWorkflowRisk(rightNormalized, { trustClass: 'reviewed_internal', projectRoot: right }),
+        rightNormalized.projectRoot,
+      );
+
+      assert.equal(leftManifest.workflow.steps[0].recipeRef.sourceRootKind, 'node_modules_registry');
+      assert.equal(rightManifest.workflow.steps[0].recipeRef.sourceRootKind, 'node_modules_registry');
+      assert.equal(compareWorkflowManifests(rightManifest, leftManifest).matches, true);
+    } finally {
+      rmSync(left, { recursive: true, force: true });
+      rmSync(right, { recursive: true, force: true });
+    }
   });
 
   it('trust-class drift is detected even when risk level is unchanged', () => {
@@ -1448,6 +1572,8 @@ describe('Workflow Normalization', () => {
       assert.equal(step.recipeRef.resolvedVersion, '1.0.0');
       assert.equal(step.recipeRef.resolvedInputs.prompt_file, 'prompt.txt');
       assert.equal(step.recipeRef.inputContentHashes.prompt_file.path, 'prompt.txt');
+      assert.equal(step.recipeRef.sourceRootKind, 'local_recipes');
+      assert.equal(step.recipeRef.sourceLocator, 'local_recipes:recipe-step.recipe.json');
       assert.equal(step.recipeRef.channel, 'community');
       assert.equal(step.recipeRef.signature, null);
       assert.equal(step.recipeRef.trust.channel, 'community');
@@ -1498,6 +1624,8 @@ describe('Workflow Normalization', () => {
       });
 
       assert.equal(normalized.steps[0].recipeRef.id, 'external-recipe');
+      assert.equal(normalized.steps[0].recipeRef.sourceRootKind, 'external_root');
+      assert.equal(normalized.steps[0].recipeRef.sourceLocator, 'external_root:external-recipe.recipe.json');
       assert.ok(
         normalized.steps[0].recipeRef.sourcePath.endsWith('external-recipe.recipe.json'),
       );
@@ -1626,6 +1754,55 @@ describe('Workflow Normalization', () => {
       assert.equal(normalized.steps[0].recipeRef.id, 'configured-default-recipe');
       assert.ok(
         normalized.steps[0].recipeRef.sourcePath.endsWith('configured-default-recipe.recipe.json'),
+      );
+      assert.equal(normalized.steps[0].recipeRef.sourceRootKind, 'external_root');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('records node_modules registry provenance for recipe_ref steps', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-node-modules-root-'));
+    const workflowDir = join(dir, 'project');
+    const nodeModulesRecipesDir = join(workflowDir, 'node_modules', '.guardrail', 'recipes');
+
+    try {
+      mkdirSync(workflowDir, { recursive: true });
+      mkdirSync(nodeModulesRecipesDir, { recursive: true });
+
+      writeRecipeFile(nodeModulesRecipesDir, {
+        id: 'node-modules-recipe',
+        name: 'Node Modules Recipe',
+        description: 'Resolved from node_modules registry',
+        version: '1.0.0',
+        author: 'tester',
+        category: 'custom',
+        channel: 'community',
+        approval_required: true,
+        risk_level: 'low',
+        inputs: {},
+        steps: [{
+          id: 'main',
+          description: 'echo node-modules',
+          run: { command: 'echo', args: ['node-modules'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      });
+
+      const normalized = normalizeWorkflowDefinition(makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'node-modules-recipe',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      }), workflowDir);
+
+      assert.equal(normalized.steps[0].recipeRef.sourceRootKind, 'node_modules_registry');
+      assert.equal(
+        normalized.steps[0].recipeRef.sourceLocator,
+        'node_modules_registry:node-modules-recipe.recipe.json',
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1935,6 +2112,87 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
     assert.equal(result.status, 'approval_required');
     assert.equal(result.exitCode, STATUS_EXIT_CODES.approval_required);
     assert.match(result.terminalReason, /review_each_time/);
+  });
+
+  it('requires reapproval when recipe_ref source placement changes across runs', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-source-kind-drift-'));
+    const nodeModulesRecipesDir = join(dir, 'node_modules', '.guardrail', 'recipes');
+    const externalRecipesDir = join(dir, 'shared-recipes');
+
+    try {
+      mkdirSync(nodeModulesRecipesDir, { recursive: true });
+      writeRecipeFile(nodeModulesRecipesDir, {
+        id: 'source-kind-drift',
+        name: 'Source Kind Drift',
+        description: 'Source placement drift repro',
+        version: '1.0.0',
+        author: 'tester',
+        category: 'custom',
+        channel: 'community',
+        approval_required: true,
+        risk_level: 'low',
+        inputs: {},
+        steps: [{
+          id: 'main',
+          description: 'echo drift',
+          run: { command: 'echo', args: ['drift'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      });
+
+      const def = makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'source-kind-drift',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      });
+
+      const defPath = writeDefFile(dir, def, 'workflow-source-kind-drift.json');
+      const manifest = buildManifest(def, dir);
+      manifest.riskAssessment.acknowledgedBy = 'test';
+      manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+      const manifestPath = join(dir, 'approved.workflow.source-kind-drift.json');
+      saveManifest(manifest, manifestPath);
+
+      rmSync(nodeModulesRecipesDir, { recursive: true, force: true });
+      mkdirSync(externalRecipesDir, { recursive: true });
+      writeRecipeFile(externalRecipesDir, {
+        id: 'source-kind-drift',
+        name: 'Source Kind Drift',
+        description: 'Source placement drift repro',
+        version: '1.0.0',
+        author: 'tester',
+        category: 'custom',
+        channel: 'community',
+        approval_required: true,
+        risk_level: 'low',
+        inputs: {},
+        steps: [{
+          id: 'main',
+          description: 'echo drift',
+          run: { command: 'echo', args: ['drift'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      });
+
+      const result = await runWorkflowSupervisor({
+        definitionPath: defPath,
+        manifestPath,
+        nonInteractive: true,
+        jsonOutput: true,
+        trustClass: 'reviewed_internal',
+        recipeSearchDirs: [externalRecipesDir],
+      });
+
+      assert.equal(result.status, 'drift_detected');
+      assert.equal(result.exitCode, STATUS_EXIT_CODES.drift_detected);
+      assert.match(result.terminalReason, /workflow drift detected/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('executes chained recipe_ref steps under one approved workflow manifest', async () => {

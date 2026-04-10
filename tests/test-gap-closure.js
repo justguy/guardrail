@@ -276,7 +276,7 @@ describe('Recipe Runner: resolveRecipeById', () => {
     writeRecipe(dir, makeRecipe({ id: 'other-recipe' }));
     assert.throws(
       () => resolveRecipeById('nonexistent', [dir]),
-      (err) => err.message.includes('not found'),
+      (err) => err.message.includes('not found') && err.message.includes('Search order'),
     );
   });
 
