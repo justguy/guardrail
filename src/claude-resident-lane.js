@@ -7,10 +7,13 @@ import {
   openSync,
   readSync,
   readFileSync,
+  rmSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -56,9 +59,12 @@ export function parseResidentLaneArgs(argv) {
     systemPrompt: '',
     addDirs: '',
     inputFiles: '',
+    laneId: '',
+    keyPath: '',
     sessionName: '',
     sessionId: '',
     noSessionPersistence: '',
+    authFd: '',
     pollIntervalMs: '',
     idleTimeoutMs: '',
     daemon: false,
@@ -116,6 +122,14 @@ export function parseResidentLaneArgs(argv) {
         options.inputFiles = value;
         i += 1;
         break;
+      case '--lane-id':
+        options.laneId = value;
+        i += 1;
+        break;
+      case '--key-path':
+        options.keyPath = value;
+        i += 1;
+        break;
       case '--session-name':
         options.sessionName = value;
         i += 1;
@@ -126,6 +140,10 @@ export function parseResidentLaneArgs(argv) {
         break;
       case '--no-session-persistence':
         options.noSessionPersistence = value;
+        i += 1;
+        break;
+      case '--auth-fd':
+        options.authFd = value;
         i += 1;
         break;
       case '--poll-interval-ms':
@@ -172,9 +190,12 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     systemPrompt: rawOptions.systemPrompt || '',
     addDirs: splitCsv(rawOptions.addDirs).map((dir) => resolve(workingDir, dir)),
     inputFiles: splitCsv(rawOptions.inputFiles),
+    laneId: rawOptions.laneId || '',
+    keyPath: rawOptions.keyPath ? resolve(baseCwd, rawOptions.keyPath) : '',
     sessionName: rawOptions.sessionName,
     sessionId: rawOptions.sessionId || '',
     noSessionPersistence: shellTruthy(rawOptions.noSessionPersistence),
+    authFd: parseInteger(rawOptions.authFd, null, 'auth_fd', 3),
     pollIntervalMs: parseInteger(rawOptions.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, 'poll_interval_ms', 50),
     idleTimeoutMs: parseInteger(rawOptions.idleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS, 'idle_timeout_ms', 1000),
     daemon: rawOptions.daemon === true,
@@ -248,9 +269,12 @@ function buildState(options, pid, startedConversation = false, extra = {}) {
     responseFifo: paths.responseFifo,
     guardrailRepo: options.guardrailRepo,
     workingDir: options.workingDir,
+    laneId: options.laneId || null,
+    keyPath: options.keyPath || null,
     sessionName: options.sessionName,
     sessionId: options.sessionId || null,
     noSessionPersistence: options.noSessionPersistence,
+    authMode: options.authFd ? 'hmac_fd' : 'none',
     startedConversation,
     pid,
     status: extra.status || 'ready',
@@ -280,13 +304,52 @@ function buildWrapperArgs(options, request, lifecycle) {
   return args;
 }
 
-function validateLaneRequest(parsed) {
+function canonicalRequestPayload(request) {
+  return JSON.stringify({
+    id: request.id,
+    prompt: request.prompt,
+  });
+}
+
+function readSecretFromFd(fd) {
+  if (!Number.isInteger(fd) || fd < 3) return '';
+  const chunks = [];
+  const buffer = Buffer.alloc(4096);
+  for (;;) {
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+    if (bytesRead <= 0) break;
+    chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+  }
+  return Buffer.concat(chunks).toString('utf8').trim();
+}
+
+function signLaneRequest(request, secret) {
+  return createHmac('sha256', secret)
+    .update(canonicalRequestPayload(request))
+    .digest('hex');
+}
+
+function verifyLaneRequestSignature(request, secret) {
+  if (!secret) return true;
+  if (typeof request.signature !== 'string' || request.signature.length !== 64 || !/^[a-f0-9]{64}$/.test(request.signature)) {
+    throw new Error('invalid_signature');
+  }
+  const expected = Buffer.from(signLaneRequest(request, secret), 'utf8');
+  const actual = Buffer.from(request.signature, 'utf8');
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+    throw new Error('invalid_signature');
+  }
+  return true;
+}
+
+function validateLaneRequest(parsed, secret = '') {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('invalid_request');
   }
 
   const keys = Object.keys(parsed).sort();
-  if (keys.length !== 2 || keys[0] !== 'id' || keys[1] !== 'prompt') {
+  const expectedKeys = secret ? ['id', 'prompt', 'signature'] : ['id', 'prompt'];
+  if (keys.length !== expectedKeys.length || !expectedKeys.every((key, index) => keys[index] === key)) {
     throw new Error('invalid_request');
   }
 
@@ -307,6 +370,7 @@ function validateLaneRequest(parsed) {
     throw new Error('invalid_prompt');
   }
 
+  verifyLaneRequestSignature(parsed, secret);
   return parsed;
 }
 
@@ -366,11 +430,38 @@ function writeResponse(fd, payload) {
   writeSync(fd, `${JSON.stringify(payload)}\n`, undefined, 'utf8');
 }
 
+function removeIfExists(path) {
+  if (!path) return;
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+}
+
+function cleanupLaneArtifacts(options, status, extra = {}) {
+  const paths = lanePaths(options.laneDir);
+  const finalState = {
+    ...buildState(options, process.pid, false, {
+      status,
+      lastRequestId: extra.lastRequestId || null,
+      lastActivityAt: new Date().toISOString(),
+      createdAt: extra.createdAt || undefined,
+    }),
+    pid: process.pid,
+  };
+  writeJson(paths.statePath, finalState);
+  removeIfExists(options.keyPath);
+  removeIfExists(paths.requestFifo);
+  removeIfExists(paths.responseFifo);
+}
+
 async function runResidentLaneDaemon(options) {
   ensureLaneLayout(options.laneDir);
   const paths = lanePaths(options.laneDir);
 
   let state = buildState(options, process.pid, false);
+  const authSecret = options.authFd ? readSecretFromFd(options.authFd) : '';
   updateStateFile(options.laneDir, state);
 
   const requestFd = openSync(paths.requestFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK);
@@ -422,6 +513,27 @@ async function runResidentLaneDaemon(options) {
     });
   };
 
+  let shuttingDown = false;
+  const shutdown = (status) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      cleanupLaneArtifacts(options, status, {
+        lastRequestId: state.lastRequestId,
+        createdAt: state.createdAt,
+      });
+    } finally {
+      try { closeSync(requestFd); } catch {}
+      try { closeSync(responseFd); } catch {}
+      process.exit(0);
+    }
+  };
+
+  process.once('SIGINT', () => shutdown('stopped'));
+  process.once('SIGTERM', () => shutdown('stopped'));
+  process.once('uncaughtException', () => shutdown('failed'));
+  process.once('unhandledRejection', () => shutdown('failed'));
+
   try {
     const chunk = Buffer.alloc(4096);
     for (;;) {
@@ -443,12 +555,12 @@ async function runResidentLaneDaemon(options) {
             if (!line) continue;
             try {
               const parsed = JSON.parse(line);
-              enqueueRequest(validateLaneRequest(parsed));
+              enqueueRequest(validateLaneRequest(parsed, authSecret));
             } catch (err) {
               writeResponse(responseFd, {
                 requestId: typeof err?.requestId === 'string' ? err.requestId : null,
                 ok: false,
-                error: err.message === 'invalid_request' || err.message === 'invalid_request_id' || err.message === 'invalid_prompt'
+                error: err.message === 'invalid_request' || err.message === 'invalid_request_id' || err.message === 'invalid_prompt' || err.message === 'invalid_signature'
                   ? err.message
                   : 'invalid_json',
               });
@@ -466,19 +578,15 @@ async function runResidentLaneDaemon(options) {
       }
 
       if ((Date.now() - lastActivityAtMs) > options.idleTimeoutMs) {
-        state = {
-          ...state,
-          status: 'expired',
-          lastActivityAt: new Date().toISOString(),
-        };
-        updateStateFile(options.laneDir, state);
-        return;
+        shutdown('expired');
       }
       await sleep(options.pollIntervalMs);
     }
   } finally {
-    closeSync(requestFd);
-    closeSync(responseFd);
+    if (!shuttingDown) {
+      try { closeSync(requestFd); } catch {}
+      try { closeSync(responseFd); } catch {}
+    }
   }
 }
 
@@ -499,18 +607,23 @@ export async function launchResidentLane(rawOptions) {
       workingDir: existing.workingDir,
       statePath: paths.statePath,
       reused: true,
+      authMode: existing.authMode ?? 'none',
+      keyPath: existing.keyPath ?? options.keyPath ?? null,
     };
   }
 
   const selfPath = fileURLToPath(import.meta.url);
   const stdoutFd = openSync(paths.logPath, 'a');
   const stderrFd = openSync(paths.logPath, 'a');
+  const daemonAuthFd = options.authFd ? 3 : null;
   const daemonArgs = [
     selfPath,
     '--daemon',
     '--lane-dir', options.laneDir,
     '--guardrail-repo', options.guardrailRepo,
     '--working-dir', options.workingDir,
+    '--lane-id', options.laneId || '',
+    '--key-path', options.keyPath || '',
     '--session-name', options.sessionName,
     '--session-id', options.sessionId || '',
     '--no-session-persistence', String(options.noSessionPersistence),
@@ -526,11 +639,19 @@ export async function launchResidentLane(rawOptions) {
     '--add-dirs', options.addDirs.join(','),
     '--input-files', options.inputFiles.join(','),
   ];
+  if (daemonAuthFd !== null) {
+    daemonArgs.push('--auth-fd', String(daemonAuthFd));
+  }
+
+  const childStdio = ['ignore', stdoutFd, stderrFd];
+  if (options.authFd) {
+    childStdio.push(options.authFd);
+  }
 
   const child = spawn(process.execPath, daemonArgs, {
     cwd: options.guardrailRepo,
     detached: true,
-    stdio: ['ignore', stdoutFd, stderrFd],
+    stdio: childStdio,
     env: process.env,
   });
   child.unref();
@@ -544,10 +665,63 @@ export async function launchResidentLane(rawOptions) {
     sessionId: options.sessionId || null,
     workingDir: options.workingDir,
     statePath: paths.statePath,
+    authMode: options.authFd ? 'hmac_fd' : 'none',
+    laneId: options.laneId || null,
+    keyPath: options.keyPath || null,
   };
   writeJson(paths.launchPath, launchSummary);
   return launchSummary;
 }
+
+export function stopResidentLane(rawOptions) {
+  if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
+  const guardrailRepo = rawOptions.guardrailRepo
+    ? resolve(process.cwd(), rawOptions.guardrailRepo)
+    : process.cwd();
+  const laneDir = resolve(guardrailRepo, rawOptions.laneDir);
+  const keyPath = rawOptions.keyPath ? resolve(process.cwd(), rawOptions.keyPath) : '';
+  const options = {
+    laneDir,
+    keyPath,
+    guardrailRepo,
+    workingDir: rawOptions.workingDir ? resolve(guardrailRepo, rawOptions.workingDir) : guardrailRepo,
+    laneId: rawOptions.laneId || '',
+    sessionName: rawOptions.sessionName || rawOptions.laneId || '',
+    sessionId: rawOptions.sessionId || '',
+    noSessionPersistence: false,
+    authFd: null,
+  };
+  const paths = lanePaths(options.laneDir);
+  const state = readJson(paths.statePath, null);
+  if (state?.pid && isPidAlive(state.pid)) {
+    try {
+      process.kill(state.pid, 'SIGTERM');
+    } catch {
+      // fall through to local cleanup
+    }
+  }
+  cleanupLaneArtifacts(options, 'stopped', {
+    lastRequestId: state?.lastRequestId || null,
+    createdAt: state?.createdAt,
+  });
+  try {
+    rmSync(join(options.laneDir, 'logs'), { recursive: true, force: true });
+  } catch {}
+  return {
+    laneDir: options.laneDir,
+    statePath: paths.statePath,
+    keyPath: options.keyPath || null,
+    stopped: true,
+  };
+}
+
+export {
+  canonicalRequestPayload,
+  readSecretFromFd,
+  signLaneRequest,
+  verifyLaneRequestSignature,
+  validateLaneRequest,
+};
 
 async function main() {
   const raw = parseResidentLaneArgs(process.argv.slice(2));

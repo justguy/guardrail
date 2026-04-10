@@ -236,16 +236,19 @@ AI execution recipes:
 - `content_hash` and `review_each_time` are still stronger than bounded list reuse. If a file-bearing input is content-hash bound, changing the file set or file contents still causes drift/reapproval even when the input itself is a list.
 - Some AI recipes include other required prompt-bearing inputs, which can make the recipe effectively approval-per-run. Check the recipe file before assuming unattended reuse is possible.
 - For direct interactive chat that must survive repeated host-runtime turns, prefer the resident lane CLI surface over repeated outer transport launches:
-  - `node src/cli.js lane start --lane-dir .guardrail/lanes/<name> --session-name <name> ...`
-  - `node src/cli.js lane send --lane-dir .guardrail/lanes/<name> --prompt "<message>"`
-- `lane start` is the one-time host-runtime step. It starts a detached daemon in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), and fixes the executable boundary for later messages.
-- `lane send` is the per-message step. It writes a strict JSON request into the lane FIFO and reads the matching response back without reopening the outer transport/runtime hop.
+  - `node src/cli.js lane start --id <lane-id> ...`
+  - `node src/cli.js lane send --id <lane-id> --prompt "<message>"`
+  - `node src/cli.js lane stop --id <lane-id>`
+- `lane start` is the one-time host-runtime step. It starts a detached daemon in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under `~/.guardrail/lanes/<id>.key`, and fixes the executable boundary for later messages.
+- `lane send` is the per-message step. It reads the host-side key through the Guardrail CLI, signs the request, writes the strict JSON payload into the lane FIFO, and reads the matching response back without reopening the outer transport/runtime hop.
+- `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
 - The resident FIFO bridge is intentionally narrow:
   - request schema is exactly `{ "id": "...", "prompt": "..." }`
   - request ids are bounded and pattern-checked
   - prompts are size-limited
   - oversized or malformed payloads are dropped
   - partial/incomplete writes time out and are discarded
+- The host-side lane key is ephemeral by default. If the daemon idles out, crashes, or is stopped, the key is deleted. Later `lane send` calls should treat missing key/FIFO state as `lane_expired` and start a fresh lane instead of trying to resume stale secrets.
 - Treat lane startup as the approval-bearing/runtime-bearing step. Treat later `lane send` turns as bounded session traffic, not as a new launcher/surface request.
 - For bundled `claude-exec`, the current standalone recipe env handshake is: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TERM_PROGRAM`, `LANG`, `TMPDIR`, `PWD`, `XDG_CONFIG_HOME`, and `CLAUDE_CONFIG_DIR`. Pass them with repeated `--env-allow` flags when present in the runtime you are validating.
 - For bundled `claude-exec`, use the recipe path to prove the CLI runtime works and to establish the bounded approval/unit. In current shipped recipe mode, `prompt` is session-bound `interactive_message` while `system_prompt` remains `review_each_time`. That means later user messages can change inside the same persistent named session, but a changed `system_prompt` or a new session still re-prompts. If you need unattended reruns with a fixed `system_prompt`, switch to a local template that wraps `src/claude-exec-wrapper.js` directly.

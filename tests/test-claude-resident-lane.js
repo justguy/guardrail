@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   closeSync,
   constants as fsConstants,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   openSync,
@@ -20,6 +21,9 @@ import {
   normalizeResidentLaneOptions,
   runLaneRequest,
   launchResidentLane,
+  signLaneRequest,
+  stopResidentLane,
+  validateLaneRequest,
 } from '../src/claude-resident-lane.js';
 import { sendResidentLaneMessage } from '../src/claude-resident-lane-client.js';
 
@@ -204,5 +208,90 @@ describe('Claude resident lane', () => {
       closeSync(requestFd);
       closeSync(responseFd);
     }
+  });
+
+  it('signs and validates requests with an inherited auth fd secret', async () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    mkdirSync(laneDir, { recursive: true });
+    const paths = lanePaths(laneDir);
+    mkfifo(paths.requestFifo);
+    mkfifo(paths.responseFifo);
+
+    const secretPath = join(dir, 'lane.secret');
+    writeFileSync(secretPath, 'resident-secret\n', 'utf8');
+    const secretFd = openSync(secretPath, fsConstants.O_RDONLY);
+
+    const requestFd = openSync(paths.requestFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK);
+    const responseFd = openSync(paths.responseFifo, fsConstants.O_RDWR);
+    const serverDone = (async () => {
+      const chunk = Buffer.alloc(4096);
+      let buffer = '';
+      const startedAt = Date.now();
+      for (;;) {
+        if ((Date.now() - startedAt) > 5000) {
+          throw new Error('Timed out waiting for FIFO request');
+        }
+        try {
+          const bytesRead = readSync(requestFd, chunk, 0, chunk.length, null);
+          if (bytesRead > 0) {
+            buffer += chunk.toString('utf8', 0, bytesRead);
+            const newlineIndex = buffer.indexOf('\n');
+            if (newlineIndex >= 0) {
+              const request = JSON.parse(buffer.slice(0, newlineIndex));
+              assert.equal(
+                request.signature,
+                signLaneRequest({ id: request.id, prompt: request.prompt }, 'resident-secret'),
+              );
+              assert.doesNotThrow(() => validateLaneRequest(request, 'resident-secret'));
+              writeSync(responseFd, `${JSON.stringify({ requestId: request.id, ok: true, stdout: '25\n' })}\n`, undefined, 'utf8');
+              return;
+            }
+          }
+        } catch (err) {
+          if (err?.code !== 'EAGAIN') throw err;
+        }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+      }
+    })();
+
+    try {
+      const responsePromise = sendResidentLaneMessage([
+        '--lane-dir', laneDir,
+        '--request-id', 'req-signed',
+        '--prompt', '5x5=?',
+        '--auth-fd', String(secretFd),
+      ]);
+      const [response] = await Promise.all([responsePromise, serverDone]);
+      assert.equal(response.ok, true);
+      assert.equal(response.stdout, '25\n');
+    } finally {
+      closeSync(secretFd);
+      closeSync(requestFd);
+      closeSync(responseFd);
+    }
+  });
+
+  it('stopResidentLane removes FIFO endpoints and key path', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    mkdirSync(laneDir, { recursive: true });
+    const paths = lanePaths(laneDir);
+    mkfifo(paths.requestFifo);
+    mkfifo(paths.responseFifo);
+    const keyPath = join(dir, 'math.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+
+    const result = stopResidentLane({
+      laneDir,
+      keyPath,
+      guardrailRepo: dir,
+      laneId: 'math',
+    });
+
+    assert.equal(result.stopped, true);
+    assert.equal(existsSync(paths.requestFifo), false);
+    assert.equal(existsSync(paths.responseFifo), false);
+    assert.equal(existsSync(keyPath), false);
   });
 });

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
-import { readFileSync, existsSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { runSupervisor, STATUS_EXIT_CODES } from './supervisor.js';
 import { hasShellMetacharacters } from './contract.js';
@@ -20,6 +22,47 @@ function getVersion() {
   }
 }
 
+function defaultLaneDir(laneId) {
+  return `.guardrail/lanes/${laneId}`;
+}
+
+function defaultLaneKeyPath(laneId) {
+  return resolve(homedir(), '.guardrail', 'lanes', `${laneId}.key`);
+}
+
+function normalizeLaneCliOptions(raw = {}) {
+  const laneId = raw.id || raw.laneId || '';
+  const laneDir = raw.laneDir || (laneId ? defaultLaneDir(laneId) : '');
+  const keyPath = raw.keyPath || (laneId ? defaultLaneKeyPath(laneId) : '');
+  return {
+    ...raw,
+    laneId,
+    laneDir,
+    keyPath,
+    sessionName: raw.sessionName || laneId || '',
+    guardrailRepo: raw.guardrailRepo || '.',
+    workingDir: raw.workingDir || '.',
+  };
+}
+
+function ensureLaneKeyFile(keyPath) {
+  mkdirSync(dirname(keyPath), { recursive: true });
+  const secret = randomBytes(32).toString('hex');
+  writeFileSync(keyPath, `${secret}\n`, { mode: 0o600 });
+  chmodSync(keyPath, 0o600);
+}
+
+function isLikelyLaneAlive(laneDir) {
+  try {
+    const state = JSON.parse(readFileSync(resolve(laneDir, 'state.json'), 'utf8'));
+    if (!Number.isInteger(state?.pid) || state.pid <= 0) return false;
+    process.kill(state.pid, 0);
+    return state.status !== 'expired' && state.status !== 'stopped';
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Usage
 // ---------------------------------------------------------------------------
@@ -33,6 +76,7 @@ Commands:
   run --template <path> --input k=v     Run a template under Guardrail
   lane start [flags]                    Start a resident interactive lane
   lane send [flags]                     Send one message through a resident lane
+  lane stop [flags]                     Stop a resident interactive lane
   workflow run [flags]                  Run a workflow definition under Guardrail
   workflow lint --definition <path>     Lint a workflow definition for issues
   template lint --template <path>       Lint a template for issues
@@ -86,8 +130,9 @@ Examples:
   guardrail run "npm test"
   guardrail run --shell "npm test && npm run lint"
   guardrail run --template ./templates/npm-publish.json --input package_dir=packages/my-lib --input tag=beta
-  guardrail lane start --lane-dir .guardrail/lanes/claude-live --session-name claude-live
-  guardrail lane send --lane-dir .guardrail/lanes/claude-live --prompt "2x3=?"
+  guardrail lane start --id claude-live
+  guardrail lane send --id claude-live --prompt "2x3=?"
+  guardrail lane stop --id claude-live
   guardrail template lint --template ./templates/npm-publish.json
   guardrail template explain --template ./templates/npm-publish.json
   guardrail template simulate --template ./templates/npm-publish.json --input package_dir=packages/my-lib
@@ -465,14 +510,16 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'stop'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
     result.subcommand = `lane-${action}`;
     result.laneOpts = {};
     const error = parseMappedFlags(result.laneOpts, {
+      '--id': 'id',
       '--lane-dir': 'laneDir',
+      '--key-path': 'keyPath',
       '--guardrail-repo': 'guardrailRepo',
       '--working-dir': 'workingDir',
       '--model': 'model',
@@ -487,6 +534,7 @@ export function parseArgs(argv) {
       '--session-name': 'sessionName',
       '--session-id': 'sessionId',
       '--no-session-persistence': 'noSessionPersistence',
+      '--auth-fd': 'authFd',
       '--poll-interval-ms': 'pollIntervalMs',
       '--idle-timeout-ms': 'idleTimeoutMs',
       '--request-id': 'requestId',
@@ -914,21 +962,38 @@ async function main() {
 
   if (parsed.subcommand === 'lane-start') {
     const { launchResidentLane } = await import('./claude-resident-lane.js');
-    if (!parsed.laneOpts?.laneDir) {
-      console.error('Error: --lane-dir <path> is required for lane start');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane start');
       process.exit(1);
     }
-    if (!parsed.laneOpts?.sessionName) {
-      console.error('Error: --session-name <name> is required for lane start');
+    if (!laneOpts.sessionName) {
+      console.error('Error: --session-name <name> or --id <lane-id> is required for lane start');
       process.exit(1);
     }
-
-    const summary = await launchResidentLane(parsed.laneOpts);
+    if (laneOpts.keyPath && existsSync(laneOpts.keyPath) && !isLikelyLaneAlive(laneOpts.laneDir)) {
+      unlinkSync(laneOpts.keyPath);
+    }
+    if (laneOpts.keyPath && !existsSync(laneOpts.keyPath)) {
+      ensureLaneKeyFile(laneOpts.keyPath);
+    }
+    const keyFd = laneOpts.keyPath ? openSync(laneOpts.keyPath, 'r') : null;
+    let summary;
+    try {
+      summary = await launchResidentLane({
+        ...laneOpts,
+        authFd: keyFd ?? '',
+      });
+    } finally {
+      if (keyFd !== null) closeSync(keyFd);
+    }
     if (parsed.json) {
       console.log(JSON.stringify(summary, null, 2));
     } else {
       console.log(`Lane started: ${summary.sessionName}`);
+      if (laneOpts.laneId) console.log(`  Lane id:       ${laneOpts.laneId}`);
       console.log(`  Lane dir:      ${summary.laneDir}`);
+      if (summary.keyPath) console.log(`  Key path:      ${summary.keyPath}`);
       console.log(`  Request FIFO:  ${summary.requestFifo}`);
       console.log(`  Response FIFO: ${summary.responseFifo}`);
       console.log(`  State path:    ${summary.statePath}`);
@@ -942,22 +1007,53 @@ async function main() {
 
   if (parsed.subcommand === 'lane-send') {
     const { sendResidentLaneMessage } = await import('./claude-resident-lane-client.js');
-    if (!parsed.laneOpts?.laneDir) {
-      console.error('Error: --lane-dir <path> is required for lane send');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane send');
       process.exit(1);
     }
-    if (!parsed.laneOpts?.prompt) {
+    if (!laneOpts.prompt) {
       console.error('Error: --prompt <text> is required for lane send');
       process.exit(1);
     }
+    if (laneOpts.keyPath && !existsSync(laneOpts.keyPath)) {
+      const expired = {
+        status: 'error',
+        reason: 'lane_expired',
+        message: 'The resident lane has idled out. Run `guardrail lane start` to initialize a new session.',
+      };
+      if (parsed.json) {
+        console.log(JSON.stringify(expired, null, 2));
+      } else {
+        console.error(expired.message);
+      }
+      process.exit(1);
+    }
 
-    const requestId = parsed.laneOpts.requestId || `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const response = await sendResidentLaneMessage([
-      '--lane-dir', parsed.laneOpts.laneDir,
-      '--request-id', requestId,
-      '--prompt', parsed.laneOpts.prompt,
-      '--timeout-ms', parsed.laneOpts.timeoutMs || '30000',
-    ]);
+    const requestId = laneOpts.requestId || `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const keyFd = laneOpts.keyPath ? openSync(laneOpts.keyPath, 'r') : null;
+    let response;
+    try {
+      response = await sendResidentLaneMessage([
+        '--lane-dir', laneOpts.laneDir,
+        '--request-id', requestId,
+        '--prompt', laneOpts.prompt,
+        '--timeout-ms', laneOpts.timeoutMs || '30000',
+        ...(keyFd !== null ? ['--auth-fd', String(keyFd)] : []),
+      ]);
+    } catch (err) {
+      const expired = err?.code === 'ENOENT' || err?.code === 'ENXIO' || err?.code === 'EPIPE' || String(err?.message || '').includes('timed out');
+      if (!expired) throw err;
+      response = {
+        status: 'error',
+        reason: 'lane_expired',
+        message: 'The resident lane has idled out. Run `guardrail lane start` to initialize a new session.',
+        ok: false,
+        exitCode: 1,
+      };
+    } finally {
+      if (keyFd !== null) closeSync(keyFd);
+    }
 
     if (parsed.json) {
       console.log(JSON.stringify(response, null, 2));
@@ -968,6 +1064,29 @@ async function main() {
     }
 
     process.exit(response.ok ? 0 : (response.exitCode || 1));
+  }
+
+  if (parsed.subcommand === 'lane-stop') {
+    const { stopResidentLane } = await import('./claude-resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane stop');
+      process.exit(1);
+    }
+    const result = stopResidentLane(laneOpts);
+    if (laneOpts.keyPath) {
+      try {
+        unlinkSync(laneOpts.keyPath);
+      } catch (err) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
+    }
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`Lane stopped: ${laneOpts.laneId || laneOpts.laneDir}`);
+    }
+    process.exit(0);
   }
 
   // --- template lint -------------------------------------------------------

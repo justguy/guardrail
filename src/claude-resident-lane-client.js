@@ -7,6 +7,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { createHmac } from 'node:crypto';
 
 const MAX_PROMPT_CHARS = 32_000;
 const MAX_REQUEST_ID_CHARS = 128;
@@ -18,6 +19,7 @@ function parseArgs(argv) {
     responseFifo: '',
     requestId: '',
     prompt: '',
+    authFd: '',
     timeoutMs: '30000',
   };
 
@@ -45,6 +47,10 @@ function parseArgs(argv) {
         options.prompt = value;
         i += 1;
         break;
+      case '--auth-fd':
+        options.authFd = value;
+        i += 1;
+        break;
       case '--timeout-ms':
         options.timeoutMs = value;
         i += 1;
@@ -66,6 +72,33 @@ function parseArgs(argv) {
     throw new Error(`prompt must be ${MAX_PROMPT_CHARS} chars or fewer.`);
   }
   return options;
+}
+
+function parseOptionalFd(value) {
+  if (value === '' || value === undefined || value === null) return null;
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isInteger(parsed) || parsed < 3) {
+    throw new Error('auth_fd must be an integer >= 3.');
+  }
+  return parsed;
+}
+
+function readSecretFromFd(fd) {
+  if (!Number.isInteger(fd) || fd < 3) return '';
+  const chunks = [];
+  const buffer = Buffer.alloc(4096);
+  for (;;) {
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+    if (bytesRead <= 0) break;
+    chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+  }
+  return Buffer.concat(chunks).toString('utf8').trim();
+}
+
+function signLaneRequest(request, secret) {
+  return createHmac('sha256', secret)
+    .update(JSON.stringify({ id: request.id, prompt: request.prompt }))
+    .digest('hex');
 }
 
 function ensureFifo(path) {
@@ -94,12 +127,21 @@ export async function sendResidentLaneMessage(rawOptions) {
   const parsed = parseArgs(rawOptions);
   const { requestFifo, responseFifo } = resolveLanePaths(parsed);
   const timeoutMs = Number.parseInt(parsed.timeoutMs, 10);
+  const authFd = parseOptionalFd(parsed.authFd);
+  const authSecret = authFd ? readSecretFromFd(authFd) : '';
+  const requestPayload = {
+    id: parsed.requestId,
+    prompt: parsed.prompt,
+  };
+  if (authSecret) {
+    requestPayload.signature = signLaneRequest(requestPayload, authSecret);
+  }
 
   const responseFd = openSync(responseFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK);
   try {
     const requestFd = openSync(requestFifo, fsConstants.O_WRONLY);
     try {
-      writeSync(requestFd, `${JSON.stringify({ id: parsed.requestId, prompt: parsed.prompt })}\n`, undefined, 'utf8');
+      writeSync(requestFd, `${JSON.stringify(requestPayload)}\n`, undefined, 'utf8');
     } finally {
       closeSync(requestFd);
     }

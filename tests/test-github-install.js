@@ -551,14 +551,12 @@ describe('CLI bare recipe name detection', async () => {
   it('parses lane start flags', () => {
     const result = parseArgs([
       'lane', 'start',
-      '--lane-dir', '.guardrail/lanes/claude-live',
-      '--session-name', 'claude-live',
+      '--id', 'claude-live',
       '--system-prompt', 'Answer briefly.',
       '--json',
     ]);
     assert.equal(result.subcommand, 'lane-start');
-    assert.equal(result.laneOpts.laneDir, '.guardrail/lanes/claude-live');
-    assert.equal(result.laneOpts.sessionName, 'claude-live');
+    assert.equal(result.laneOpts.id, 'claude-live');
     assert.equal(result.laneOpts.systemPrompt, 'Answer briefly.');
     assert.equal(result.json, true);
   });
@@ -566,14 +564,23 @@ describe('CLI bare recipe name detection', async () => {
   it('parses lane send flags', () => {
     const result = parseArgs([
       'lane', 'send',
-      '--lane-dir', '.guardrail/lanes/claude-live',
+      '--id', 'claude-live',
       '--prompt', '2x3=?',
       '--timeout-ms', '5000',
     ]);
     assert.equal(result.subcommand, 'lane-send');
-    assert.equal(result.laneOpts.laneDir, '.guardrail/lanes/claude-live');
+    assert.equal(result.laneOpts.id, 'claude-live');
     assert.equal(result.laneOpts.prompt, '2x3=?');
     assert.equal(result.laneOpts.timeoutMs, '5000');
+  });
+
+  it('parses lane stop flags', () => {
+    const result = parseArgs([
+      'lane', 'stop',
+      '--id', 'claude-live',
+    ]);
+    assert.equal(result.subcommand, 'lane-stop');
+    assert.equal(result.laneOpts.id, 'claude-live');
   });
 });
 

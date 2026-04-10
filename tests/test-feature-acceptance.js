@@ -511,6 +511,17 @@ describe('README Feature: Resident Lane Mode', () => {
       closeSync(responseFd);
     }
   });
+
+  it('guardrail lane send returns lane_expired when the host key is missing', () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    mkdirSync(laneDir, { recursive: true });
+    const keyPath = join(dir, 'missing.key');
+    const r = run(`${CLI} lane send --lane-dir ${laneDir} --key-path ${keyPath} --prompt "2x3=?" --json`);
+    assert.equal(r.exitCode, 1);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.reason, 'lane_expired');
+  });
 });
 
 // ==========================================================================

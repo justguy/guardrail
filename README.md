@@ -181,23 +181,27 @@ Keep an interactive AI session alive behind one bounded lane, then send later us
 ```bash
 # Start the lane once from the authenticated host runtime
 guardrail lane start \
-  --lane-dir .guardrail/lanes/claude-live \
-  --session-name claude-live \
+  --id claude-live \
   --system-prompt "Answer directly and briefly."
 
 # Later turns go through the lane FIFO bridge
 guardrail lane send \
-  --lane-dir .guardrail/lanes/claude-live \
+  --id claude-live \
   --prompt "2x3=?"
+
+# Tear the lane down explicitly when done
+guardrail lane stop --id claude-live
 ```
 
 Resident lanes are for direct interactive use when the executable boundary should stay fixed but later user messages should not count as execution drift. The shipped Claude lane helper:
 - creates owner-only FIFOs (`0600`) under the lane directory
+- stores an ephemeral per-lane HMAC key outside the workspace at `~/.guardrail/lanes/<id>.key`
 - accepts only strict JSON requests with `id` and `prompt`
+- can require an HMAC signature delivered through an inherited file descriptor instead of env or workspace state
 - enforces prompt and payload size limits
-- expires after idle timeout and records lane state under `.guardrail/lanes/<name>/state.json`
+- expires after idle timeout, removes its key/FIFOs, and records lane state under `.guardrail/lanes/<name>/state.json`
 
-Lane startup still has to happen in a runtime where the downstream CLI auth already works. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time.
+Lane startup still has to happen in a runtime where the downstream CLI auth already works. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again.
 
 ---
 
