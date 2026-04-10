@@ -1,6 +1,44 @@
-import { readdirSync, readFileSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { readdirSync, existsSync } from 'node:fs';
+import { isAbsolute, join, normalize, resolve, sep } from 'node:path';
 import { loadRecipe, VALID_CATEGORIES } from './recipe.js';
+
+const LOOKUP_CASE_INSENSITIVE = process.platform === 'win32';
+
+// ---------------------------------------------------------------------------
+// Search directory normalization utilities
+// ---------------------------------------------------------------------------
+
+function toPortablePath(value) {
+  if (!value || typeof value !== 'string') return '';
+  const normalized = normalize(value);
+  const withSlash = normalized.split(sep).join('/');
+  return LOOKUP_CASE_INSENSITIVE ? withSlash.toLowerCase() : withSlash;
+}
+
+export function normalizeSearchDirectory(rawDir, basePath = process.cwd()) {
+  if (!rawDir || typeof rawDir !== 'string') return null;
+  return isAbsolute(rawDir) ? resolve(rawDir) : resolve(basePath, rawDir);
+}
+
+export function normalizeSearchDirectories(dirs, basePath = process.cwd()) {
+  const normalized = [];
+  const seen = new Set();
+  for (const rawDir of dirs || []) {
+    const resolved = normalizeSearchDirectory(rawDir, basePath);
+    if (!resolved) continue;
+    if (!existsSync(resolved)) continue;
+    const canonical = toPortablePath(resolved);
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    normalized.push(resolved);
+  }
+  return normalized;
+}
+
+export function normalizePathForRecipeLookup(rawPath, basePath = process.cwd()) {
+  if (!rawPath || typeof rawPath !== 'string') return '';
+  return toPortablePath(isAbsolute(rawPath) ? rawPath : resolve(basePath, rawPath));
+}
 
 // ---------------------------------------------------------------------------
 // Index building — scan directories for recipe files
@@ -15,9 +53,8 @@ import { loadRecipe, VALID_CATEGORIES } from './recipe.js';
  */
 export function buildIndex(dirs) {
   const entries = [];
-  for (const dir of dirs) {
-    const resolved = resolve(dir);
-    if (!existsSync(resolved)) continue;
+  const normalizedDirs = normalizeSearchDirectories(dirs);
+  for (const resolved of normalizedDirs) {
 
     const items = readdirSync(resolved, { withFileTypes: true });
 
@@ -27,22 +64,25 @@ export function buildIndex(dirs) {
         const idDir = join(resolved, item.name);
         const vFiles = readdirSync(idDir).filter(f => f.endsWith('.json'));
         for (const vf of vFiles) {
-          tryAddRecipe(entries, join(idDir, vf));
+          tryAddRecipe(entries, join(idDir, vf), resolved);
         }
       } else if (item.name.endsWith('.recipe.json')) {
         // Flat legacy: <id>.recipe.json
-        tryAddRecipe(entries, join(resolved, item.name));
+          tryAddRecipe(entries, join(resolved, item.name), resolved);
       }
     }
   }
   return entries;
 }
 
-function tryAddRecipe(entries, filePath) {
+function tryAddRecipe(entries, filePath, sourceRoot) {
   try {
     const recipe = loadRecipe(filePath);
     entries.push({
       ...recipe,
+      _sourceRoot: sourceRoot,
+      _canonicalSource: normalizePathForRecipeLookup(filePath),
+      _canonicalSourceRoot: normalizePathForRecipeLookup(sourceRoot),
       _source: filePath,
       category: recipe.category ?? 'custom',
       tags:     recipe.tags ?? [],

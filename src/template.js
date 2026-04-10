@@ -1,5 +1,11 @@
-import { readFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+} from 'node:fs';
 import { createHash } from 'node:crypto';
+import { basename, extname, resolve } from 'node:path';
 import { serializeStable, checkRegexSafety } from './contract.js';
 import { validateInputValue, inferApprovalMode } from './input-validator.js';
 
@@ -14,6 +20,14 @@ const VALID_INPUT_TYPES = new Set(['string', 'integer', 'boolean']);
 
 const INTERPOLATION_RE = /\{\{inputs\.([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g;
 const SHELL_METACHARACTERS = /[;|&$`()><\n]/;
+const SEMVER_RE = /^(v?)(\d+\.\d+\.\d+)(-[0-9A-Za-z-.]+)?$/;
+const PATH_HINT_RE = /(^\.{0,2}[\\/])|(^\/)|([\\/].*[\\/])/;
+const ENV_VALUE_SET = new Set(['dev', 'qa', 'staging', 'prod', 'production', 'test']);
+const NARROW_REASONS = {
+  low: 'green',
+  medium: 'yellow',
+  high: 'red',
+};
 
 const HIGH_RISK_ENV_PATTERNS = /secret|token|password|api[_-]?key|credential|auth|private[_-]?key/i;
 
@@ -25,6 +39,7 @@ const REDOS_INDICATORS = [
 ];
 
 const TEMPLATE_MANIFEST_VERSION = 1;
+const PLACEHOLDER_VALUE_FALLBACK = 'x';
 
 // ---------------------------------------------------------------------------
 // Validation error
@@ -687,8 +702,158 @@ export function hashTemplateExecution(templateDef, resolvedInputs, envIntersecti
 // Template manifest
 // ---------------------------------------------------------------------------
 
-function createTemplateDefinitionHash(templateDef) {
-  return createHash('sha256').update(serializeStable(templateDef)).digest('hex');
+function schemaFromValue(name, value) {
+  const inferredType = typeof value;
+
+  if (inferredType === 'boolean') {
+    return {
+      type: 'boolean',
+      default: value,
+      description: toInputDescription(name),
+    };
+  }
+
+  if (Number.isInteger(value)) {
+    return {
+      type: 'integer',
+      min: value,
+      max: value,
+      default: value,
+      description: toInputDescription(name),
+    };
+  }
+
+  if (typeof value === 'string') {
+    if (SEMVER_RE.test(value)) {
+      return {
+        type: 'string',
+        pattern: SEMVER_RE.source,
+        default: value,
+        description: toInputDescription(name),
+      };
+    }
+
+    if (ENV_VALUE_SET.has(value.toLowerCase())) {
+      return {
+        type: 'string',
+        enum: [...ENV_VALUE_SET],
+        default: value,
+        description: toInputDescription(name),
+      };
+    }
+
+    if (value === '.' || value === '..' || PATH_HINT_RE.test(value)) {
+      return {
+        type: 'string',
+        pattern: '^([.]{1,2}/|/).*$|^[^\\s]+\\.[^\\s]+$',
+        default: value,
+        description: toInputDescription(name),
+      };
+    }
+
+    return {
+      type: 'string',
+      enum: [value],
+      default: value,
+      description: toInputDescription(name),
+    };
+  }
+
+  if (Number.isFinite(value)) {
+    return {
+      type: 'integer',
+      min: value,
+      max: value,
+      default: value,
+      description: toInputDescription(name),
+    };
+  }
+
+  return {
+    type: 'string',
+    pattern: '^.*$',
+    description: toInputDescription(name),
+    default: PLACEHOLDER_VALUE_FALLBACK,
+  };
+}
+
+function normalizeToString(value) {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) return value.join(' ');
+  return String(value);
+}
+
+function mergeInputs(target, additions = {}) {
+  const result = { ...target };
+
+  for (const [name, schema] of Object.entries(additions || {})) {
+    if (!result[name]) {
+      result[name] = schema;
+    }
+  }
+
+  return result;
+}
+
+function inferTemplateInputsFromResolvedInputs(args, resolvedInputs = {}, existingInputs = {}, usedNames = new Set()) {
+  const mappedArgs = [...args];
+  const inferredInputs = {};
+
+  for (const [name, rawValue] of Object.entries(resolvedInputs || {})) {
+    const safeName = toInputName(name, usedNames);
+    const value = normalizeToString(rawValue);
+
+    if (!value) {
+      continue;
+    }
+
+    let replaced = false;
+    for (let i = 0; i < mappedArgs.length && !replaced; i += 1) {
+      if (mappedArgs[i] !== value) {
+        continue;
+      }
+
+      inferredInputs[safeName] = {
+        ...schemaFromValue(safeName, rawValue),
+        ...(Object.prototype.hasOwnProperty.call(existingInputs, name)
+          ? { default: existingInputs[name] }
+          : {}),
+      };
+      mappedArgs[i] = `{{inputs.${safeName}}}`;
+      replaced = true;
+    }
+
+    if (!replaced) {
+      continue;
+    }
+  }
+
+  return { args: mappedArgs, inputs: inferredInputs };
+}
+
+function toInputName(rawName, usedInputNames = new Set()) {
+  const fallback = rawName && String(rawName).trim().length > 0
+    ? rawName
+    : 'input';
+
+  const base = fallback
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/^_+/, '')
+    .replace(/_+$/, '');
+
+  return pickInputName(base || 'input', usedInputNames);
+}
+
+function dedupeStringList(values) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  const normalized = values
+    .filter((value) => typeof value === 'string')
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  return [...new Set(normalized)];
 }
 
 function buildInputApprovalEnvelope(schema) {
@@ -843,6 +1008,454 @@ function canReuseInteractiveMessage(candidate, approved) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Template bridge helpers
+// ---------------------------------------------------------------------------
+
+function normalizeTemplateName(rawName) {
+  if (typeof rawName !== 'string') {
+    return 'template-from-manifest';
+  }
+  const sanitized = rawName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '')
+    .replace(/-+/g, '-');
+
+  return sanitized.length > 0 ? sanitized : 'template-from-manifest';
+}
+
+function mapTemplateRisk(level) {
+  if (level === 'low') return 'green';
+  if (level === 'medium') return 'yellow';
+  if (level === 'high') return 'red';
+  if (level === 'green' || level === 'yellow' || level === 'red') {
+    return level;
+  }
+  return 'green';
+}
+
+function toInputDescription(name) {
+  return `TODO: describe this input (${name})`;
+}
+
+function pickInputName(base, usedInputs) {
+  if (!usedInputs.has(base)) {
+    usedInputs.add(base);
+    return base;
+  }
+  let idx = 2;
+  while (usedInputs.has(`${base}_${idx}`)) {
+    idx += 1;
+  }
+  const name = `${base}_${idx}`;
+  usedInputs.add(name);
+  return name;
+}
+
+function inferInputFromArg(arg, usedInputs) {
+  if (typeof arg !== 'string' || arg.trim().length === 0) {
+    return null;
+  }
+  const value = arg.trim();
+
+  if (SEMVER_RE.test(value)) {
+    const name = pickInputName('version', usedInputs);
+    return {
+      name,
+      schema: {
+        type: 'string',
+        pattern: SEMVER_RE.source,
+        description: toInputDescription(name),
+      },
+      defaultValue: value,
+    };
+  }
+
+  if (ENV_VALUE_SET.has(value.toLowerCase())) {
+    const name = pickInputName('target_env', usedInputs);
+    return {
+      name,
+      schema: {
+        type: 'string',
+        enum: [...ENV_VALUE_SET],
+        description: toInputDescription(name),
+      },
+      defaultValue: value,
+    };
+  }
+
+  if (value === '.' || value === '..' || PATH_HINT_RE.test(value)) {
+    const base = usedInputs.has('working_dir') ? 'path' : 'working_dir';
+    const name = pickInputName(base, usedInputs);
+    return {
+      name,
+      schema: {
+        type: 'string',
+        pattern: '^([.]{1,2}/|/).*$|^[^\\s]+\\.[^\\s]+$',
+        description: toInputDescription(name),
+      },
+      defaultValue: value,
+    };
+  }
+
+  return null;
+}
+
+function inferTemplateInputsFromArgs(args, existingInputs = {}) {
+  const resolvedInputMap = {};
+  for (const [name, value] of Object.entries(existingInputs || {})) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    resolvedInputMap[normalizeToString(value)] = name;
+  }
+
+  const usedInputNames = new Set(Object.keys(existingInputs || {}));
+  const inferredInputs = {};
+  const mappedArgs = [];
+
+  for (const arg of args || []) {
+    const existing = inferInputFromArg(arg, usedInputNames);
+    const exactResolvedName = resolvedInputMap[normalizeToString(arg)];
+
+    if (exactResolvedName) {
+      const exactName = usedInputNames.has(exactResolvedName)
+        ? exactResolvedName
+        : pickInputName(exactResolvedName, usedInputNames);
+
+      if (!inferredInputs[exactName]) {
+        inferredInputs[exactName] = {
+          ...(schemaFromValue(exactName, existingInputs[exactResolvedName])),
+          default: existingInputs[exactResolvedName],
+        };
+      }
+      mappedArgs.push(`{{inputs.${exactName}}}`);
+      continue;
+    }
+
+    if (!existing) {
+      mappedArgs.push(arg);
+      continue;
+    }
+    if (!inferredInputs[existing.name]) {
+      const inputDefault = existingInputs?.[existing.name];
+      inferredInputs[existing.name] = {
+        ...existing.schema,
+        ...(inputDefault !== undefined ? { default: inputDefault } : {}),
+      };
+    }
+    mappedArgs.push(`{{inputs.${existing.name}}}`);
+  }
+
+  return { inputs: inferredInputs, args: mappedArgs };
+}
+
+function buildTemplateFromArgInference(manifestArgs, resolvedInputs, existingInputs = {}) {
+  const argInference = inferTemplateInputsFromArgs(manifestArgs, existingInputs);
+  const resolvedInference = inferTemplateInputsFromResolvedInputs(
+    argInference.args,
+    resolvedInputs,
+    existingInputs,
+    new Set(Object.keys(argInference.inputs)),
+  );
+
+  return {
+    args: resolvedInference.args,
+    inputs: mergeInputs(argInference.inputs, resolvedInference.inputs),
+  };
+}
+
+function sourceFromManifest(manifest) {
+  if (manifest?._source) {
+    return {
+      type: manifest._source.type || 'imported',
+      source: manifest._source.source || null,
+      content_hash: manifest._source.content_hash,
+      trust_class:
+        manifest._source.trust_class
+        || manifest.riskAssessment?.trustClass
+        || manifest.riskAssessment?.trust_class
+        || 'reviewed_internal',
+      installed_at: manifest._source.installed_at || new Date().toISOString(),
+    };
+  }
+
+  if (manifest?.kind === 'recipe' && manifest.recipeHash) {
+    return {
+      type: 'recipe',
+      source: manifest.recipe?.id || null,
+      content_hash: manifest.recipeHash,
+      trust_class: manifest.riskAssessment?.trustClass || 'pinned_external',
+      installed_at: new Date().toISOString(),
+    };
+  }
+
+  if (manifest?.kind === 'command' && manifest.contract) {
+    return {
+      type: 'command',
+      source: manifest.contract.command || null,
+      content_hash: manifest.contractHash || manifest.contract?.contractHash || null,
+      trust_class: manifest.riskAssessment?.trustClass || 'reviewed_internal',
+      installed_at: new Date().toISOString(),
+    };
+  }
+
+  return undefined;
+}
+
+function buildTemplateFromCommandManifest(manifest, options = {}) {
+  if (!manifest?.contract?.command) {
+    throw new Error('Approved command manifest does not include a command');
+  }
+
+  const args = manifest.contract.args || [];
+  const resolvedInputs = manifest.resolvedInputs || {};
+  const existingInputs = manifest.resolvedInputs || {};
+  const inference = buildTemplateFromArgInference(args, resolvedInputs, existingInputs);
+  const inferredInputs = inference.inputs;
+  const inferredArgs = inference.args;
+
+  const requiresEnv = dedupeStringList([
+    ...(manifest.contract.envPolicy?.allow || []),
+    ...(manifest.contract.env?.allow || []),
+    ...(manifest.contract.envPolicy?.allowIfSet || []),
+    ...(manifest.requires_env || []),
+  ]);
+
+  return {
+    version: 1,
+    kind: 'template',
+    name: normalizeTemplateName(options.name || manifest.template || manifest.contract.command),
+    description: `Template generated from approved manifest ${basename(options.sourcePath || 'manifest')}`,
+    trust_class: 'reviewed_internal',
+    risk: mapTemplateRisk(manifest.riskAssessment?.riskLevel || manifest.contract?.risk || 'green'),
+    risk_reasons: manifest.riskAssessment?.reasons || [],
+    inputs: inferredInputs,
+    run: {
+      command: manifest.contract.command,
+      args: inferredArgs,
+      mode: 'structured',
+      env: {
+        allow: dedupeStringList([
+          ...(manifest.contract.envPolicy?.allow || []),
+          ...(manifest.contract.env?.allow || []),
+        ]),
+      },
+    },
+    idempotent: true,
+    ...(requiresEnv.length > 0 ? { requires_env: requiresEnv } : {}),
+    ...(options.source ? { _source: options.source } : {}),
+  };
+}
+
+function buildTemplateFromRecipeManifest(manifest, options = {}) {
+  const recipe = manifest.recipe;
+  if (!recipe || !Array.isArray(recipe.steps) || recipe.steps.length === 0) {
+    throw new Error('Approved recipe manifest is missing steps');
+  }
+
+  const existingInputs = manifest.resolvedInputs || {};
+  const steps = [];
+  const mergedInputs = {};
+
+  for (let i = 0; i < recipe.steps.length; i += 1) {
+    const step = recipe.steps[i];
+    if (!step?.run?.command || !Array.isArray(step.run.args)) {
+      throw new Error(`Recipe step ${i} is missing a structured command`);
+    }
+    const inferred = inferTemplateInputsFromArgs(step.run.args, existingInputs);
+    for (const key of Object.keys(inferred.inputs)) {
+      if (!mergedInputs[key]) {
+        mergedInputs[key] = inferred.inputs[key];
+      }
+    }
+
+    steps.push({
+      id: step.id,
+      description: step.description || `Run ${step.run.command}`,
+      run: {
+        command: step.run.command,
+        args: inferred.args,
+        mode: 'structured',
+        env: {
+          allow: dedupeStringList([
+            ...(step.run.env?.allow || []),
+            ...(step.run.envPolicy?.allow || []),
+          ]),
+        },
+      },
+      idempotent: step.idempotent !== false,
+      validator: step.validator || null,
+    });
+  }
+
+  const envFromManifest = manifest.requires_env || [];
+  const envFromSteps = new Set();
+  for (const step of recipe.steps) {
+    const stepEnv = step.run?.env?.allow || step.run?.envPolicy?.allow;
+    if (Array.isArray(stepEnv)) {
+      for (const key of stepEnv) {
+        envFromSteps.add(key);
+      }
+    }
+  }
+  const requiresEnv = [...new Set([...envFromManifest, ...envFromSteps])];
+
+  return {
+    version: 1,
+    kind: 'workflow_template',
+    name: normalizeTemplateName(options.name || manifest.recipe?.id || recipe.id || recipe.name || 'recipe-template'),
+    description: `Template generated from approved recipe ${recipe.id || recipe.name || 'recipe'}`,
+    trust_class: 'reviewed_internal',
+    risk: mapTemplateRisk(manifest.riskAssessment?.riskLevel || recipe.risk_level || 'yellow'),
+    risk_reasons: manifest.riskAssessment?.reasons || [],
+    inputs: Object.keys(mergedInputs).length > 0 ? mergedInputs : {},
+    steps,
+    ...(requiresEnv.length > 0 ? { requires_env: requiresEnv } : {}),
+    ...(options.source ? { _source: options.source } : {}),
+  };
+}
+
+function loadManifestFile(manifestPath) {
+  let raw;
+  try {
+    raw = readFileSync(manifestPath, 'utf8');
+  } catch (err) {
+    throw new Error(`Cannot read approved manifest at ${manifestPath}: ${err.message}`);
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`Invalid JSON in approved manifest at ${manifestPath}: ${err.message}`);
+  }
+}
+
+export function buildTemplateFromApprovedManifest(manifestOrPath, options = {}) {
+  const manifest = typeof manifestOrPath === 'string'
+    ? loadManifestFile(resolve(manifestOrPath))
+    : manifestOrPath;
+
+  if (!manifest || typeof manifest !== 'object') {
+    throw new Error('Approved manifest must be an object or JSON file path');
+  }
+
+  const source = sourceFromManifest(manifest);
+
+  if (manifest.kind === 'command') {
+    return buildTemplateFromCommandManifest(manifest, {
+      ...options,
+      source,
+      sourcePath: options.sourcePath || manifestPathOrUnknown(manifestOrPath),
+    });
+  }
+
+  if (manifest.kind === 'recipe') {
+    return buildTemplateFromRecipeManifest(manifest, { ...options, source });
+  }
+
+  if (manifest.kind === 'template') {
+    throw new Error('Template manifests do not require conversion');
+  }
+
+  throw new Error(`Unsupported manifest kind: ${manifest.kind}`);
+}
+
+function manifestPathOrUnknown(manifestOrPath) {
+  return typeof manifestOrPath === 'string' ? manifestOrPath : 'manifest';
+}
+
+export function templateDefinitionMatchesSource(templateDef) {
+  if (!templateDef || typeof templateDef !== 'object') {
+    return false;
+  }
+  const source = templateDef._source;
+  if (!source || !source.content_hash || typeof source.content_hash !== 'string') {
+    return false;
+  }
+  return hashTemplateDefinition(templateDef) === source.content_hash;
+}
+
+export function resolveTemplateTrustClass(templateDef, fallbackTrustClass = 'reviewed_internal') {
+  if (!templateDef || typeof templateDef !== 'object') {
+    return fallbackTrustClass;
+  }
+  const base = templateDef.trust_class || fallbackTrustClass;
+  if (!templateDef._source?.content_hash) return base;
+  return templateDefinitionMatchesSource(templateDef)
+    ? (templateDef._source.trust_class || base)
+    : 'reviewed_internal';
+}
+
+export function hashTemplateDefinition(templateDef) {
+  const { _source, ...content } = templateDef || {};
+  return createHash('sha256').update(serializeStable(content)).digest('hex');
+}
+
+export function listTemplates(templatesDir = '.guardrail/templates') {
+  const resolvedDir = resolve(templatesDir);
+  if (!existsSync(resolvedDir)) return [];
+
+  const stats = statSync(resolvedDir);
+  if (!stats.isDirectory()) {
+    throw new Error(`Template directory is not a directory: ${resolvedDir}`);
+  }
+
+  const entries = readdirSync(resolvedDir, { withFileTypes: true });
+  const rows = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile() || extname(entry.name).toLowerCase() !== '.json') continue;
+
+    const filePath = resolve(resolvedDir, entry.name);
+    let raw;
+    try {
+      raw = readFileSync(filePath, 'utf8');
+    } catch {
+      continue;
+    }
+
+    let def;
+    try {
+      def = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+
+    if (def.version !== 1 || !TEMPLATE_KINDS.has(def.kind)) continue;
+
+    try {
+      validateTemplate(def);
+    } catch {
+      continue;
+    }
+
+    rows.push({
+      path: filePath,
+      name: def.name,
+      kind: def.kind,
+      trustClass: def.trust_class,
+      effectiveTrustClass: resolveTemplateTrustClass(def, def.trust_class),
+      source: def._source
+        ? {
+          type: def._source.type || 'imported',
+          source: def._source.source || null,
+          trust_class: def._source.trust_class || def.trust_class,
+          content_hash: def._source.content_hash || null,
+          installed_at: def._source.installed_at || null,
+        }
+        : null,
+      sourceMatch: def._source ? templateDefinitionMatchesSource(def) : null,
+    });
+  }
+
+  rows.sort((left, right) => left.name.localeCompare(right.name));
+  return rows;
+}
+
 /**
  * Create a template approval manifest.
  */
@@ -856,7 +1469,7 @@ export function createTemplateManifest(templateDef, templateHash, riskAssessment
     templateKind: templateDef.kind,
     approvedAt: new Date().toISOString(),
     templateHash,
-    templateDefHash: createTemplateDefinitionHash(templateDef),
+    templateDefHash: hashTemplateDefinition(templateDef),
     resolvedInputs,
     inputApprovalEnvelopes,
     envIntersection,
@@ -1138,13 +1751,20 @@ export function simulateTemplate(def, userInputs, callerAllow) {
 export function evaluateTemplateRisk(def, envIntersection) {
   const reasons = [...(def.risk_reasons || [])];
   let riskLevel = def.risk;
-  const trustClass = def.trust_class;
+  const trustClass = resolveTemplateTrustClass(def, def.trust_class);
 
   // Escalation: trust class
   if (trustClass === 'generated' || trustClass === 'unknown') {
     riskLevel = 'red';
     if (!reasons.includes('untrusted provenance')) {
       reasons.push('untrusted provenance');
+    }
+  }
+
+  if (def?._source?.content_hash && !templateDefinitionMatchesSource(def)) {
+    const reason = 'template modified from source provenance';
+    if (!reasons.includes(reason)) {
+      reasons.push(reason);
     }
   }
 

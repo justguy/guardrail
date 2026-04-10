@@ -612,6 +612,7 @@ export function createRecipeManifest(recipe, recipeHash, riskAssessment, resolve
     envIntersection: options.envIntersection ?? [],
     inputApprovalEnvelopes,
     inputContentHashes: options.inputContentHashes ?? {},
+    executionDetails: options.executionDetails ?? null,
     composedRecipes: options.composedRecipes ?? [],
     riskAssessment: {
       trustClass:                 riskAssessment.trustClass   ?? 'unknown',
@@ -708,6 +709,14 @@ export function diffRecipeManifests(candidate, approved) {
     if (!deepEqual(cVal, aVal)) {
       diffs.push(`~ inputContentHashes "${key}": ${pretty(aVal)} -> ${pretty(cVal)}`);
     }
+  }
+
+  const candidateExecutionDetails = candidate.executionDetails ?? null;
+  const approvedExecutionDetails = approved.executionDetails ?? null;
+  if (!deepEqual(candidateExecutionDetails, approvedExecutionDetails)) {
+    diffs.push(
+      `~ executionDetails: ${pretty(approvedExecutionDetails)} -> ${pretty(candidateExecutionDetails)}`,
+    );
   }
 
   for (const field of ['trustClass', 'riskLevel', 'reasons', 'requiresStrongConfirmation']) {

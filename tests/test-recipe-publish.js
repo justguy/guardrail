@@ -267,6 +267,60 @@ describe('manifestToRecipe', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// templateToRecipe
+// ---------------------------------------------------------------------------
+
+describe('templateToRecipe', async () => {
+  const { templateToRecipe } = await import('../src/recipe-publish.js');
+  const { validateRecipe } = await import('../src/recipe.js');
+
+  function makeTemplate(overrides = {}) {
+    return {
+      version: 1,
+      kind: 'template',
+      name: 'npm-publish',
+      description: 'Publish a package',
+      trust_class: 'reviewed_internal',
+      risk: 'yellow',
+      inputs: {
+        package_dir: { type: 'string', pattern: '^packages/[a-z0-9-]+$' },
+      },
+      run: {
+        command: 'npm',
+        args: ['publish', '{{inputs.package_dir}}'],
+        mode: 'structured',
+      },
+      ...overrides,
+    };
+  }
+
+  it('converts a template to a valid recipe', () => {
+    const recipe = templateToRecipe(makeTemplate(), { name: 'npm-publish', category: 'packages' });
+    validateRecipe(recipe);
+    assert.equal(recipe.steps[0].run.command, 'npm');
+    assert.equal(recipe.risk_level, 'medium');
+  });
+
+  it('preserves requires_env when present', () => {
+    const recipe = templateToRecipe(
+      makeTemplate({ requires_env: ['NPM_TOKEN'] }),
+      { name: 'npm-publish', category: 'packages' },
+    );
+    assert.deepEqual(recipe.requires_env, ['NPM_TOKEN']);
+  });
+
+  it('rejects rollback-bearing templates for publish', () => {
+    assert.throws(
+      () => templateToRecipe(
+        makeTemplate({ rollback: { steps: [{ id: 'rb', run: { command: 'npm', args: ['unpublish'], mode: 'structured' } }] } }),
+        { name: 'npm-publish', category: 'packages' },
+      ),
+      /does not support templates with rollback steps/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // buildPRBody
 // ---------------------------------------------------------------------------
 

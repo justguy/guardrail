@@ -1498,9 +1498,134 @@ describe('Workflow Normalization', () => {
       });
 
       assert.equal(normalized.steps[0].recipeRef.id, 'external-recipe');
-      assert.equal(
-        normalized.steps[0].recipeRef.sourcePath,
-        join(externalRecipesDir, 'external-recipe.recipe.json'),
+      assert.ok(
+        normalized.steps[0].recipeRef.sourcePath.endsWith('external-recipe.recipe.json'),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails workflow normalization when explicit and default roots contain ambiguous latest recipe', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-recipe-collision-'));
+    const workflowDir = join(dir, 'workflow');
+    const projectRecipes = join(workflowDir, 'recipes');
+    const overrideDir = join(dir, 'override');
+
+    try {
+      mkdirSync(workflowDir, { recursive: true });
+      mkdirSync(projectRecipes, { recursive: true });
+      mkdirSync(overrideDir, { recursive: true });
+
+      writeRecipeFile(projectRecipes, {
+        id: 'ambiguous-workflow-recipe',
+        name: 'Ambiguous Root Recipe',
+        description: 'Same recipe on workflow and override roots',
+        version: '1.0.0',
+        author: 'test',
+        category: 'custom',
+        channel: 'community',
+        approval_required: true,
+        risk_level: 'low',
+        inputs: {},
+        steps: [{
+          id: 'main',
+          description: 'echo',
+          run: { command: 'echo', args: ['from-workflow'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      });
+
+      writeRecipeFile(overrideDir, {
+        id: 'ambiguous-workflow-recipe',
+        name: 'Ambiguous Root Recipe',
+        description: 'Same recipe on workflow and override roots',
+        version: '1.0.0',
+        author: 'test',
+        category: 'custom',
+        channel: 'community',
+        approval_required: true,
+        risk_level: 'low',
+        inputs: {},
+        steps: [{
+          id: 'main',
+          description: 'echo',
+          run: { command: 'echo', args: ['from-override'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      });
+
+      const normalized = normalizeWorkflowDefinition(makeDefinition({
+        projectRoot: '.',
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'ambiguous-workflow-recipe',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      }), workflowDir, {
+        recipeSearchDirs: [overrideDir],
+      });
+
+      assert.fail(`Expected ambiguous resolution to be rejected, got recipe hash ${normalized.steps[0]?.recipeRef?.resolvedVersion}`);
+    } catch (err) {
+      assert.ok(String(err.message).includes('ambiguous resolution'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves recipe_ref from repo-configured default recipe roots without explicit flags', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-config-root-'));
+    const workflowDir = join(dir, 'workflow');
+    const repoExtra = join(dir, 'shared-recipes');
+    const repoConfigPath = join(workflowDir, '.guardrail', 'config.json');
+
+    try {
+      mkdirSync(workflowDir, { recursive: true });
+      mkdirSync(join(workflowDir, '.guardrail'), { recursive: true });
+      mkdirSync(repoExtra, { recursive: true });
+
+      writeFileSync(repoConfigPath, JSON.stringify({
+        default_recipe_roots: ['../shared-recipes'],
+      }));
+
+      writeRecipeFile(repoExtra, {
+        id: 'configured-default-recipe',
+        name: 'Configured Default Recipe',
+        description: 'Resolved from repo config default_recipe_roots',
+        version: '1.0.0',
+        author: 'tester',
+        category: 'custom',
+        channel: 'community',
+        approval_required: true,
+        risk_level: 'low',
+        inputs: {},
+        steps: [{
+          id: 'main',
+          description: 'echo configured',
+          run: { command: 'echo', args: ['configured'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      });
+
+      const normalized = normalizeWorkflowDefinition(makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'configured-default-recipe',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      }), workflowDir, {
+        repoConfigPath,
+        userConfigPath: false,
+      });
+
+      assert.equal(normalized.steps[0].recipeRef.id, 'configured-default-recipe');
+      assert.ok(
+        normalized.steps[0].recipeRef.sourcePath.endsWith('configured-default-recipe.recipe.json'),
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });

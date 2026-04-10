@@ -2,10 +2,16 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { serializeStable, checkRegexSafety } from './contract.js';
 import { deepEqual, pretty, indexById, resolvePath } from './shared.js';
-import { resolveRecipeById, resolveInputs, parseRecipeSpecifier } from './recipe-runner.js';
+import {
+  buildRecipeSearchDirs,
+  resolveRecipeById,
+  resolveInputs,
+  parseRecipeSpecifier,
+} from './recipe-runner.js';
 import { hashRecipe } from './recipe.js';
 import { collectRecipeInputContentHashes } from './prompt-inputs.js';
 import { classifyTrust } from './recipe-channel.js';
+import { normalizePathForRecipeLookup } from './recipe-index.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -575,18 +581,24 @@ function resolveRecipeAllowUnverified(step, options = {}) {
   return options.allowUnverified === true;
 }
 
-export function buildWorkflowRecipeSearchDirs(projectRoot, basePath, explicitSearchDirs = []) {
-  const candidates = [
-    ...(Array.isArray(explicitSearchDirs) ? explicitSearchDirs : []),
-    resolvePath('recipes', projectRoot),
-    resolvePath('recipes', basePath),
-  ];
-
-  return [...new Set(candidates.map((entry) => resolvePath(entry, basePath)))];
+export function buildWorkflowRecipeSearchDirs(projectRoot, basePath, explicitSearchDirs = [], options = {}) {
+  return buildRecipeSearchDirs({
+    explicitSearchDirs: explicitSearchDirs || [],
+    projectRoot: resolvePath(projectRoot, basePath),
+    basePath,
+    includeDefaults: true,
+    repoConfigPath: options.repoConfigPath,
+    userConfigPath: options.userConfigPath,
+  });
 }
 
 function normalizeRecipeRefStep(step, projectRoot, options = {}) {
-  const searchDirs = buildWorkflowRecipeSearchDirs(projectRoot, options.basePath ?? projectRoot, options.recipeSearchDirs);
+  const searchDirs = buildWorkflowRecipeSearchDirs(
+    projectRoot,
+    options.basePath ?? projectRoot,
+    options.recipeSearchDirs,
+    options,
+  );
   let resolvedRecipe;
   try {
     resolvedRecipe = resolveRecipeById(step.recipe, searchDirs);
@@ -640,7 +652,7 @@ function normalizeRecipeRefStep(step, projectRoot, options = {}) {
     id: resolvedRecipe.recipe.id,
     requestedVersion,
     resolvedVersion: resolvedRecipe.version,
-    sourcePath: resolvedRecipe.sourcePath,
+    sourcePath: normalizePathForRecipeLookup(resolvedRecipe.sourcePath),
     recipeHash,
     channel: trust.channel,
     riskLevel: resolvedRecipe.recipe.risk_level,

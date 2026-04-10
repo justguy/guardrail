@@ -4,6 +4,10 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { parseGitHubUrl, pinPathForRecipePath, installFromGitHub, listInstalled, listVersions } from '../src/recipe-install.js';
+import { hashRecipe, loadRawJson } from '../src/recipe.js';
+import { verifyPinnedRecipeSource } from '../src/recipe-runner.js';
+import { parseArgs } from '../src/cli.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -41,9 +45,7 @@ function makeValidRecipe(overrides = {}) {
 // parseGitHubUrl
 // ---------------------------------------------------------------------------
 
-describe('parseGitHubUrl', async () => {
-  const { parseGitHubUrl } = await import('../src/recipe-install.js');
-
+describe('parseGitHubUrl', () => {
   it('parses valid github://owner/repo/path@sha', () => {
     const result = parseGitHubUrl('github://guardrail-dev/recipes/github/open-pr.json@a3f9c12e4b7d8f0a1c2e3d4f5a6b7c8d9e0f1a2b');
     assert.equal(result.owner, 'guardrail-dev');
@@ -130,9 +132,7 @@ describe('parseGitHubUrl', async () => {
 // pinPathForRecipePath
 // ---------------------------------------------------------------------------
 
-describe('pinPathForRecipePath', async () => {
-  const { pinPathForRecipePath } = await import('../src/recipe-install.js');
-
+describe('pinPathForRecipePath', () => {
   it('returns .pins/<version>.json under recipe directory', () => {
     const result = pinPathForRecipePath('/home/user/.guardrail/recipes/open-pr/1.0.0.json');
     assert.equal(result, '/home/user/.guardrail/recipes/open-pr/.pins/1.0.0.json');
@@ -148,9 +148,7 @@ describe('pinPathForRecipePath', async () => {
 // installFromGitHub
 // ---------------------------------------------------------------------------
 
-describe('installFromGitHub', async () => {
-  const { installFromGitHub, parseGitHubUrl } = await import('../src/recipe-install.js');
-  const { hashRecipe } = await import('../src/recipe.js');
+describe('installFromGitHub', () => {
   let tempDir;
 
   beforeEach(() => {
@@ -191,7 +189,6 @@ describe('installFromGitHub', async () => {
     assert.ok(result.pin.rawUrl.includes('raw.githubusercontent.com'));
 
     // Verify pin file exists on disk
-    const { pinPathForRecipePath } = await import('../src/recipe-install.js');
     const pinPath = pinPathForRecipePath(result.path);
     assert.ok(existsSync(pinPath), 'pin metadata file should exist');
     const pinData = JSON.parse(readFileSync(pinPath, 'utf8'));
@@ -297,8 +294,7 @@ describe('installFromGitHub', async () => {
 // listInstalled / listVersions ignore .pins
 // ---------------------------------------------------------------------------
 
-describe('listInstalled and listVersions ignore .pins', async () => {
-  const { listInstalled, listVersions } = await import('../src/recipe-install.js');
+describe('listInstalled and listVersions ignore .pins', () => {
   let tempDir;
 
   beforeEach(() => {
@@ -332,10 +328,7 @@ describe('listInstalled and listVersions ignore .pins', async () => {
 // verifyPinnedRecipeSource
 // ---------------------------------------------------------------------------
 
-describe('verifyPinnedRecipeSource', async () => {
-  const { verifyPinnedRecipeSource } = await import('../src/recipe-runner.js');
-  const { hashRecipe } = await import('../src/recipe.js');
-  const { pinPathForRecipePath } = await import('../src/recipe-install.js');
+describe('verifyPinnedRecipeSource', () => {
   let tempDir;
 
   beforeEach(() => {
@@ -472,9 +465,7 @@ describe('verifyPinnedRecipeSource', async () => {
 // CLI bare recipe name detection
 // ---------------------------------------------------------------------------
 
-describe('CLI bare recipe name detection', async () => {
-  const { parseArgs } = await import('../src/cli.js');
-
+describe('CLI bare recipe name detection', () => {
   it('parses github:// source as recipe-install', () => {
     // This only tests argument parsing — not execution
     const sha = 'a'.repeat(40);
@@ -582,15 +573,58 @@ describe('CLI bare recipe name detection', async () => {
     assert.equal(result.subcommand, 'lane-stop');
     assert.equal(result.laneOpts.id, 'claude-live');
   });
+
+  it('parses template create flags', () => {
+    const result = parseArgs([
+      'template', 'create',
+      '--from-manifest', '.guardrail/approved.json',
+      '--name', 'npm-publish',
+      '--output', '.guardrail/templates/npm-publish.json',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'template-create');
+    assert.equal(result.manifestPath, '.guardrail/approved.json');
+    assert.equal(result.name, 'npm-publish');
+    assert.equal(result.outputPath, '.guardrail/templates/npm-publish.json');
+    assert.equal(result.json, true);
+  });
+
+  it('parses template list flags', () => {
+    const result = parseArgs([
+      'template', 'list',
+      '--templates-dir', '.guardrail/templates',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'template-list');
+    assert.equal(result.templatesDir, '.guardrail/templates');
+    assert.equal(result.json, true);
+  });
+
+  it('parses template publish flags', () => {
+    const result = parseArgs([
+      'template', 'publish',
+      '--template', '.guardrail/templates/npm-publish.json',
+      '--name', 'npm-publish',
+      '--category', 'packages',
+      '--version', '1.2.0',
+      '--author', 'me',
+      '--dry-run',
+    ]);
+    assert.equal(result.subcommand, 'template-publish');
+    assert.equal(result.template, '.guardrail/templates/npm-publish.json');
+    assert.equal(result.name, 'npm-publish');
+    assert.equal(result.category, 'packages');
+    assert.equal(result.version, '1.2.0');
+    assert.equal(result.author, 'me');
+    assert.equal(result.dryRun, true);
+  });
 });
 
 // ---------------------------------------------------------------------------
 // loadRawJson (basic tests without real network)
 // ---------------------------------------------------------------------------
 
-describe('loadRawJson', async () => {
-  const { loadRawJson } = await import('../src/recipe.js');
-
+describe('loadRawJson', () => {
   it('rejects on network error (unresolvable host)', async () => {
     await assert.rejects(
       () => loadRawJson('https://localhost:1/nonexistent', { timeout: 1000 }),
@@ -598,8 +632,7 @@ describe('loadRawJson', async () => {
     );
   });
 
-  it('exported from recipe.js', async () => {
-    const mod = await import('../src/recipe.js');
-    assert.equal(typeof mod.loadRawJson, 'function');
+  it('exported from recipe.js', () => {
+    assert.equal(typeof loadRawJson, 'function');
   });
 });

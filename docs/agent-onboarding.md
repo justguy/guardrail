@@ -146,6 +146,21 @@ Non-interactive reuse:
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js run --template <TEMPLATE_PATH> --input message=hello --non-interactive --approved-manifest <APPROVED_TEMPLATE_MANIFEST_PATH>
 ```
 
+Template authoring and publishing:
+
+```bash
+cd /Users/adilevinshtein/Documents/dev/Guardian
+node src/cli.js template create --from-manifest .guardrail/approved.json --name my-template
+node src/cli.js template list
+node src/cli.js template publish --template .guardrail/templates/my-template.json --name my-template --category custom
+```
+
+Template bridge rules:
+
+- `template create --from-manifest` can generate a starter template from an approved command manifest or approved recipe manifest.
+- Generated templates record source provenance. If the template later drifts from its recorded source hash, Guardrail demotes source trust instead of silently preserving it.
+- `template publish` currently supports command-shaped templates. If a template includes rollback steps, stop and author the target recipe manually.
+
 ## Recipe Mode
 
 Interactive approval:
@@ -200,6 +215,13 @@ node src/cli.js recipe versions <recipe-id>
 - For required inputs and defaults on a bundled recipe, read the local recipe file itself (`recipes/<id>.recipe.json`). Do not infer the canonical input shape from old logs or plan docs.
 
 - Recipe lookup locations: `recipes`, `node_modules/.guardrail/recipes`, `~/.guardrail/recipes`.
+- Workflow `recipe_ref` now uses those same default lookup roots automatically. Use `--recipe-search-dir` only for extra ad hoc roots outside those defaults.
+- Extra configured roots can now come from:
+  - repo-local `.guardrail/config.json` via `"default_recipe_roots": ["../shared-recipes"]`
+  - user-level `~/.guardrail/config.json` via `"default_recipe_roots": ["/abs/path/to/shared-recipes"]`
+- `recipe_roots` is still accepted as a compatibility alias for `default_recipe_roots`.
+- Configured default recipe roots are additional search roots, not silent overrides. Explicit `--recipe-search-dir` still wins, and missing configured roots fail closed.
+- If the same recipe id/version is discoverable from more than one root at the same precedence point, Guardrail fails closed with an explicit collision error instead of silently picking one candidate.
 
 - Standalone `run --recipe` resolves the local `recipes/` directory relative to the current working directory, not relative to `src/cli.js`.
 - `--recipe-search-dir <path>` is workflow-only. Use it on `workflow lint` and `workflow run` for `recipe_ref` resolution, but do not expect `run --recipe`, `list`, or global CLI parsing to accept it.
@@ -228,6 +250,7 @@ AI execution recipes:
 - Use recipe mode when an agent needs a bounded wrapper around an external AI CLI instead of calling that tool directly.
 - Treat the selected local recipe file (`recipes/<id>.recipe.json`) as the source of truth for required inputs, defaults, enums, and path rules. Do not infer the live shape from old logs, plan docs, or another recipe.
 - Read the recipe description and guardrails for tool-specific auth/runtime notes. Bundled AI recipes may require a pre-authenticated CLI runtime even though recipe mode itself does not perform auth preflight.
+- Bundled Guardrail recipes now resolve shipped wrapper helpers through internal bundled-wrapper aliases. Do not assume `guardrail_repo` is required just because older examples passed it; keep it only when a specific recipe still declares it as an optional override or compatibility input.
 - If the recipe declares `requires_env`, pass the matching vars with repeated `--env-allow` flags. The approved recipe manifest binds to the resolved env intersection, so widening that list later triggers re-approval.
 - If the recipe declares `input_files`, those files are prompt-bearing context owned by Guardrail. In current bundled wrappers they are read by the wrapper and injected into the initial prompt payload directly, so do not add a second instruction telling the downstream tool to open them just to provide the same context.
 - Keep stable prompt material in `input_files` when the recipe supports it. Inline prompt-bearing inputs marked `review_each_time` require fresh approval every run, even if unchanged.
@@ -317,6 +340,14 @@ Bundled git commit recipe:
 - it stages only the approved `paths` list, fails closed if unrelated staged changes already exist, and returns a clean no-op when approved paths have no staged diff
 - it reads the commit text from `message_file`, which is content-hash bound at approval time and rechecked before execution
 - this recipe does not push; use a separate approval unit if push behavior is needed later
+
+Bundled commit-plan recipe:
+
+- `recipes/git-commit-from-plan.recipe.json` wraps bounded commit execution through `src/git-commit-plan-wrapper.js`
+- it accepts a content-hash-bound `plan_file` plus a content-hash-bound `message_file`
+- Guardrail approval stores derived execution details from the plan: repo path, exact resolved file list, approved bounds, and message file path
+- the wrapper rejects any mismatch between `plan.message_file` and the recipe input `message_file`
+- use this path when an earlier workflow step proposes a reviewed commit slice after the final changed file set becomes known
 
 Example interactive run:
 

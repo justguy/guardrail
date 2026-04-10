@@ -1,22 +1,161 @@
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
-import { buildIndex, buildVersionIndex, deduplicateLatest } from './recipe-index.js';
+import {
+  buildVersionIndex,
+  normalizeSearchDirectories,
+  normalizePathForRecipeLookup,
+} from './recipe-index.js';
 import { executeRecipe, dryRun } from './recipe-executor.js';
 import { hashRecipe, loadRemoteRecipe } from './recipe.js';
 import { validateInputValue, inferApprovalMode } from './input-validator.js';
 import { classifyBucket, summarizeCapabilities, escalateTraits } from './risk-traits.js';
-import { pinPathForRecipePath, loadGitHubRecipeFromApi } from './recipe-install.js';
+import { loadConfig, pinPathForRecipePath, loadGitHubRecipeFromApi } from './recipe-install.js';
 
 // ---------------------------------------------------------------------------
-// Default search directories for recipe resolution
+// Canonical search directory builders
 // ---------------------------------------------------------------------------
 
-function defaultSearchDirs() {
-  const dirs = ['recipes', 'node_modules/.guardrail/recipes'];
-  const home = resolve(homedir(), '.guardrail', 'recipes');
-  if (existsSync(home)) dirs.push(home);
-  return dirs;
+function defaultSearchDirs(basePath = process.cwd()) {
+  const dirs = [
+    'node_modules/.guardrail/recipes',
+    resolve(homedir(), '.guardrail', 'recipes'),
+  ];
+  return normalizeSearchDirectories(dirs, basePath);
+}
+
+function normalizeConfiguredRecipeRoot(rawRoot, baseDir, sourceLabel) {
+  if (typeof rawRoot !== 'string' || rawRoot.trim().length === 0) {
+    throw new Error(`Configured recipe root from ${sourceLabel} must be a non-empty string.`);
+  }
+  const resolvedRoot = normalizePathForRecipeLookup(rawRoot, baseDir);
+  if (!existsSync(resolvedRoot)) {
+    throw new Error(`Configured recipe root "${rawRoot}" from ${sourceLabel} does not exist: ${resolvedRoot}`);
+  }
+  return resolvedRoot;
+}
+
+export function loadConfiguredRecipeRoots({
+  projectRoot = null,
+  basePath = process.cwd(),
+  repoConfigPath = null,
+  userConfigPath = null,
+} = {}) {
+  const repoRoots = [];
+  const userRoots = [];
+  const repoBase = projectRoot ? resolve(projectRoot) : resolve(basePath);
+  const effectiveRepoConfigPath = repoConfigPath === false
+    ? null
+    : (repoConfigPath || resolve(repoBase, '.guardrail', 'config.json'));
+  const effectiveUserConfigPath = userConfigPath === false
+    ? null
+    : (userConfigPath || resolve(homedir(), '.guardrail', 'config.json'));
+
+  if (effectiveRepoConfigPath && existsSync(effectiveRepoConfigPath)) {
+    const repoConfig = loadConfig(effectiveRepoConfigPath, { strict: true });
+    const repoConfiguredRoots = repoConfig.default_recipe_roots || repoConfig.recipe_roots || [];
+    for (const root of repoConfiguredRoots) {
+      repoRoots.push(
+        normalizeConfiguredRecipeRoot(root, repoBase, `repo config ${effectiveRepoConfigPath}`),
+      );
+    }
+  }
+
+  if (effectiveUserConfigPath && existsSync(effectiveUserConfigPath)) {
+    const userConfig = loadConfig(effectiveUserConfigPath, { strict: true });
+    const userConfiguredRoots = userConfig.default_recipe_roots || userConfig.recipe_roots || [];
+    for (const root of userConfiguredRoots) {
+      userRoots.push(
+        normalizeConfiguredRecipeRoot(root, homedir(), `user config ${effectiveUserConfigPath}`),
+      );
+    }
+  }
+
+  return { repoRoots, userRoots };
+}
+
+export function buildRecipeSearchDirs({
+  explicitSearchDirs = [],
+  projectRoot = null,
+  basePath = process.cwd(),
+  includeDefaults = true,
+  repoConfigPath = null,
+  userConfigPath = null,
+} = {}) {
+  const { repoRoots, userRoots } = loadConfiguredRecipeRoots({
+    projectRoot,
+    basePath,
+    repoConfigPath,
+    userConfigPath,
+  });
+  const candidates = [
+    ...(explicitSearchDirs || []),
+  ];
+
+  if (projectRoot) {
+    candidates.push(resolve(projectRoot, 'recipes'));
+  }
+  candidates.push(resolve(basePath, 'recipes'));
+  candidates.push(...repoRoots);
+
+  if (includeDefaults) {
+    candidates.push(resolve(basePath, 'node_modules/.guardrail', 'recipes'));
+    candidates.push(...userRoots);
+    candidates.push(resolve(homedir(), '.guardrail', 'recipes'));
+  }
+
+  return normalizeSearchDirectories(candidates, basePath);
+}
+
+function resolveSearchDirs(inputDirs) {
+  if (!inputDirs) return buildRecipeSearchDirs();
+  if (Array.isArray(inputDirs)) {
+    return buildRecipeSearchDirs({
+      explicitSearchDirs: inputDirs,
+      basePath: process.cwd(),
+      includeDefaults: true,
+    });
+  }
+  if (Array.isArray(inputDirs.searchDirs)) {
+    return buildRecipeSearchDirs({
+      explicitSearchDirs: inputDirs.searchDirs,
+      projectRoot: inputDirs.projectRoot || null,
+      basePath: inputDirs.basePath || process.cwd(),
+      includeDefaults: true,
+      repoConfigPath: Object.prototype.hasOwnProperty.call(inputDirs, 'repoConfigPath') ? inputDirs.repoConfigPath : null,
+      userConfigPath: Object.prototype.hasOwnProperty.call(inputDirs, 'userConfigPath') ? inputDirs.userConfigPath : null,
+    });
+  }
+  if (
+    Array.isArray(inputDirs.explicitSearchDirs)
+    || inputDirs.projectRoot
+    || inputDirs.basePath
+    || Object.prototype.hasOwnProperty.call(inputDirs, 'repoConfigPath')
+    || Object.prototype.hasOwnProperty.call(inputDirs, 'userConfigPath')
+  ) {
+    return buildRecipeSearchDirs(inputDirs);
+  }
+  return buildRecipeSearchDirs();
+}
+
+function formatSearchOrder(searchDirs) {
+  return searchDirs.map((entry, i) => `${i + 1}. ${entry}`).join('\n');
+}
+
+function buildRecipeCollisionError(id, version, matches, searchDirs) {
+  const candidateLines = matches
+    .map((match) => {
+      const root = match.recipe._sourceRoot ? normalizePathForRecipeLookup(match.recipe._sourceRoot) : normalizePathForRecipeLookup(match.source);
+      const source = normalizePathForRecipeLookup(match.source);
+      return `- ${match.version}: ${source} (root: ${root})`;
+    })
+    .join('\n');
+
+  return (
+    `Recipe "${id}" has ambiguous resolution for version ${version}.\n` +
+    `Search order:\n${formatSearchOrder(searchDirs)}\n` +
+    `Candidates:\n${candidateLines}`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -52,7 +191,7 @@ export function parseRecipeSpecifier(specifier) {
  */
 export function resolveRecipeById(specifier, dirs) {
   const { id, version } = parseRecipeSpecifier(specifier);
-  const searchDirs = dirs || defaultSearchDirs();
+  const searchDirs = resolveSearchDirs(dirs);
   const versionIndex = buildVersionIndex(searchDirs);
   const versions = versionIndex.get(id);
 
@@ -66,18 +205,26 @@ export function resolveRecipeById(specifier, dirs) {
 
   if (version) {
     // Exact version match
-    const match = versions.find(v => v.version === version);
-    if (!match) {
+    const matches = versions.filter(v => v.version === version);
+    if (matches.length === 0) {
       const available = [...new Set(versions.map(v => v.version))].join(', ');
       throw new Error(
         `Recipe "${id}" version ${version} not found.\nAvailable versions: ${available}`
       );
     }
+    if (matches.length > 1) {
+      throw new Error(buildRecipeCollisionError(id, version, matches, searchDirs));
+    }
+    const match = matches[0];
     return { recipe: match.recipe, sourcePath: match.source, version: match.version };
   }
 
   // Latest version (first in sorted-newest-first list)
   const latest = versions[0];
+  const latestMatches = versions.filter(v => v.version === latest.version);
+  if (latestMatches.length > 1) {
+    throw new Error(buildRecipeCollisionError(id, latest.version, latestMatches, searchDirs));
+  }
   return { recipe: latest.recipe, sourcePath: latest.source, version: latest.version };
 }
 

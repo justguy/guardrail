@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
+  buildTemplateFromApprovedManifest,
   validateTemplate,
   lintTemplate,
   loadTemplate,
@@ -17,10 +18,14 @@ import {
   createTemplateManifest,
   diffTemplateManifests,
   compareTemplateManifests,
+  hashTemplateDefinition,
   explainTemplate,
   describeSchema,
+  listTemplates,
   simulateTemplate,
+  resolveTemplateTrustClass,
   evaluateTemplateRisk,
+  templateDefinitionMatchesSource,
   TemplateValidationError,
 } from '../src/template.js';
 
@@ -897,6 +902,191 @@ describe('Template Manifest', () => {
     const result = diffTemplateManifests(candidate, oldApproved);
     assert.ok(result.some(d => /package_dir/.test(d)));
     assert.ok(result.some(d => /templateHash/.test(d)));
+  });
+});
+
+describe('Template Bridge From Manifest', () => {
+  it('converts an approved command manifest into a reusable template', () => {
+    const manifest = {
+      version: 1,
+      kind: 'command',
+      contract: {
+        command: 'npm',
+        args: ['publish', './tmp/workspace', '1.2.3', 'staging'],
+      },
+      contractHash: 'abc123',
+      riskAssessment: {
+        trustClass: 'reviewed_internal',
+        riskLevel: 'yellow',
+        reasons: ['community command execution'],
+      },
+      resolvedInputs: {
+        working_dir: './tmp/workspace',
+        version: '1.2.3',
+        target_env: 'staging',
+      },
+      requires_env: ['NPM_TOKEN'],
+    };
+
+    const template = buildTemplateFromApprovedManifest(manifest, {
+      name: 'demo-command-template',
+      sourcePath: '/abs/path/manifest.json',
+    });
+
+    assert.equal(template.kind, 'template');
+    assert.equal(template.name, 'demo-command-template');
+    assert.deepEqual(template.run.args, [
+      'publish',
+      '{{inputs.working_dir}}',
+      '{{inputs.version}}',
+      '{{inputs.target_env}}',
+    ]);
+    assert.equal(template.risk, 'yellow');
+    assert.equal(template.trust_class, 'reviewed_internal');
+    assert.equal(template.requires_env[0], 'NPM_TOKEN');
+    assert.ok(template._source);
+    assert.equal(template._source.type, 'command');
+    assert.equal(template._source.content_hash, 'abc123');
+  });
+
+  it('converts an approved recipe manifest into a workflow template', () => {
+    const manifest = {
+      version: 1,
+      kind: 'recipe',
+      recipeHash: 'def456',
+      recipe: {
+        id: 'publish-release',
+        steps: [
+          {
+            id: 'build',
+            run: {
+              command: 'npm',
+              args: ['run', 'build', '--', './packages/app'],
+              envPolicy: {
+                allow: ['NODE_AUTH_TOKEN'],
+              },
+            },
+          },
+          {
+            id: 'publish',
+            run: {
+              command: 'npm',
+              args: ['publish', './packages/app'],
+              env: { allow: ['NPM_TOKEN'] },
+            },
+          },
+        ],
+      },
+      riskAssessment: {
+        trustClass: 'pinned_external',
+        riskLevel: 'medium',
+        reasons: ['writes to npm'],
+      },
+      resolvedInputs: {
+        package_path: './packages/app',
+      },
+      requires_env: ['NPM_TOKEN'],
+    };
+
+    const template = buildTemplateFromApprovedManifest(manifest, {
+      name: 'demo-workflow-template',
+      sourcePath: '/abs/path/manifest.json',
+    });
+
+    assert.equal(template.kind, 'workflow_template');
+    assert.equal(template.name, 'demo-workflow-template');
+    assert.equal(template.steps.length, 2);
+    assert.ok(Array.isArray(template.requires_env));
+    assert.equal(template.steps[0].run.args[3], '{{inputs.package_path}}');
+    assert.equal(template.steps[1].run.args[1], '{{inputs.package_path}}');
+    assert.equal(template._source.type, 'recipe');
+    assert.equal(template._source.content_hash, 'def456');
+  });
+
+  it('computes definition hash independent of _source for provenance checks', () => {
+    const base = makeIndividualTemplate({ name: 'provenance-template' });
+    const hash = hashTemplateDefinition(base);
+    const sourceAware = {
+      ...base,
+      _source: {
+        type: 'recipe',
+        source: 'recipes/open-pr.json',
+        content_hash: hash,
+        trust_class: 'pinned_external',
+        installed_at: '2026-01-01T00:00:00Z',
+      },
+    };
+
+    const mutated = {
+      ...sourceAware,
+      run: {
+        ...sourceAware.run,
+        args: ['src-modified'],
+      },
+    };
+
+    assert.equal(templateDefinitionMatchesSource(sourceAware), true);
+    assert.equal(templateDefinitionMatchesSource(mutated), false);
+    assert.equal(resolveTemplateTrustClass(sourceAware), 'pinned_external');
+    assert.equal(resolveTemplateTrustClass(mutated), 'reviewed_internal');
+  });
+
+  it('lists only valid local templates and reports provenance metadata', () => {
+    const tmpTemplateDir = mkdtempSync(join(tmpdir(), 'guardrail-template-list-'));
+    const validBase = makeIndividualTemplate();
+    const validSourceBase = {
+      ...validBase,
+      name: 'alpha',
+    };
+    const validSourceHash = hashTemplateDefinition(validSourceBase);
+    const validWithSource = {
+      ...validSourceBase,
+      name: 'alpha',
+      _source: {
+        type: 'recipe',
+        source: 'recipes/alpha.json',
+        content_hash: validSourceHash,
+        trust_class: 'pinned_external',
+        installed_at: '2026-01-01T00:00:00Z',
+      },
+    };
+    const editedWithSource = {
+      ...validWithSource,
+      name: 'beta',
+      run: {
+        ...validWithSource.run,
+        args: ['lint', 'changed'],
+      },
+      _source: {
+        ...validWithSource._source,
+        content_hash: validSourceHash,
+      },
+    };
+
+    writeFileSync(
+      join(tmpTemplateDir, 'alpha.json'),
+      JSON.stringify(validWithSource),
+    );
+    writeFileSync(
+      join(tmpTemplateDir, 'beta.json'),
+      JSON.stringify(editedWithSource),
+    );
+    writeFileSync(
+      join(tmpTemplateDir, 'invalid.json'),
+      JSON.stringify({ version: 1, kind: 'template' }),
+    );
+
+    const rows = listTemplates(tmpTemplateDir);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].name, 'alpha');
+    assert.equal(rows[1].name, 'beta');
+    assert.equal(rows[0].sourceMatch, true);
+    assert.equal(rows[1].sourceMatch, false);
+    assert.equal(rows[0].effectiveTrustClass, 'pinned_external');
+    assert.equal(rows[1].effectiveTrustClass, 'reviewed_internal');
+    assert.equal(rows[0].source.type, 'recipe');
+
+    rmSync(tmpTemplateDir, { recursive: true, force: true });
   });
 });
 

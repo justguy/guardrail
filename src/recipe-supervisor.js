@@ -14,6 +14,7 @@ import {
   collectRecipeInputContentHashes,
   verifyRecipeInputContentHashes,
 } from './prompt-inputs.js';
+import { loadCommitPlan } from './commit-plan.js';
 import {
   emitProgress,
   emitExecutionEnd,
@@ -155,7 +156,15 @@ function defaultRecipeManifestPath(cwd, recipeId) {
   return resolve(cwd, '.guardrail', 'recipes', `${recipeId}.approved.json`);
 }
 
-function printRecipeApprovalSummary(recipe, resolvedInputs, riskAssessment, sourcePath, requestedVersion, envIntersection = []) {
+function printRecipeApprovalSummary(
+  recipe,
+  resolvedInputs,
+  riskAssessment,
+  sourcePath,
+  requestedVersion,
+  envIntersection = [],
+  executionDetails = null,
+) {
   const line = (text = '') => process.stdout.write(text + '\n');
   const sep = () => line(colorize('─'.repeat(56), 'dim'));
   const lv = (label, value) => {
@@ -177,6 +186,15 @@ function printRecipeApprovalSummary(recipe, resolvedInputs, riskAssessment, sour
   if (envIntersection.length > 0) {
     line(lv('Env vars passed', envIntersection.join(', ')));
   }
+  if (executionDetails?.type === 'commit_plan') {
+    line(lv('Commit plan', executionDetails.planFile));
+    line(lv('Commit repo', executionDetails.repoPath));
+    line(lv('Commit files', JSON.stringify(executionDetails.paths || [])));
+    line(lv('Message file', executionDetails.messageFile));
+    if (executionDetails.bounds) {
+      line(lv('Commit bounds', JSON.stringify(executionDetails.bounds)));
+    }
+  }
   sep();
   line(lv('Trust class', riskAssessment.trustClass));
   line(lv('Risk level', colorize(riskAssessment.riskLevel.toUpperCase(), riskColor(riskAssessment.riskLevel))));
@@ -195,6 +213,37 @@ function printRecipeApprovalSummary(recipe, resolvedInputs, riskAssessment, sour
   line(colorize('  Guardrail highlights risk; it does not certify safety.', 'dim'));
   line(colorize('  The approved manifest becomes the reusable approval record.', 'dim'));
   line();
+}
+
+function deriveRecipeExecutionDetails(recipe, resolvedInputs, resolvedCwd) {
+  if (recipe?.id !== 'git-commit-from-plan') return null;
+
+  const planFile = resolvedInputs?.plan_file;
+  const explicitMessageFile = resolvedInputs?.message_file;
+  if (typeof planFile !== 'string' || planFile.trim() === '') {
+    throw new Error('git-commit-from-plan requires plan_file.');
+  }
+  if (typeof explicitMessageFile !== 'string' || explicitMessageFile.trim() === '') {
+    throw new Error('git-commit-from-plan requires message_file.');
+  }
+
+  const plan = loadCommitPlan(planFile, { cwd: resolvedCwd });
+  if (plan.message_file !== explicitMessageFile) {
+    throw new Error(
+      `Commit plan message_file drift: ${plan.message_file} != ${explicitMessageFile}`,
+    );
+  }
+
+  return {
+    type: 'commit_plan',
+    planFile,
+    repoPath: plan.repo_path,
+    resolvedRepoPath: plan.resolved_repo_path,
+    paths: plan.paths,
+    messageFile: plan.message_file,
+    resolvedMessageFile: plan.resolved_message_file,
+    bounds: plan.bounds,
+  };
 }
 
 function printRecipeDrift(diffs) {
@@ -636,6 +685,21 @@ export async function runRecipeSupervisor(options) {
       return emitFinalResult('policy_violation', { ...resultOpts, reason });
     }
 
+    let executionDetails = null;
+    try {
+      executionDetails = deriveRecipeExecutionDetails(recipe, resolvedInputs, resolvedCwd);
+    } catch (err) {
+      const reason = err.message || String(err);
+      logger.error('recipe_execution_details_failed', { recipeId: recipe.id, error: reason });
+      state.terminalReason = reason;
+      persistStateSafe(stateDir, state);
+      emitRecipeProgress(progressSink, runId, 'approval_pending', { reason, message: reason });
+      if (!jsonOutput) {
+        printResult({ success: false, exitCode: 1, message: reason });
+      }
+      return emitFinalResult('validation_failed', { ...resultOpts, reason });
+    }
+
     const recipeHash = hashRecipe(recipe);
     resultOpts.recipeHash = recipeHash;
 
@@ -659,6 +723,7 @@ export async function runRecipeSupervisor(options) {
       allowUnverified,
       envIntersection: envResult.intersection,
       inputContentHashes,
+      executionDetails,
       composedRecipes: composedBindings.records.map((record) => record.manifestRecord),
     });
 
@@ -768,6 +833,7 @@ export async function runRecipeSupervisor(options) {
           sourcePath,
           requestedVersion,
           envResult.intersection,
+          executionDetails,
         );
         printComposedRecipeSummary(composedBindings.records);
         if (reviewEachTimeReason) {

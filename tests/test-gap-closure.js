@@ -1,12 +1,19 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, realpathSync, mkdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 
-import { resolveRecipeById, resolveInputs, runRecipeById, parseRecipeSpecifier, runRunbook } from '../src/recipe-runner.js';
+import {
+  resolveRecipeById,
+  resolveInputs,
+  runRecipeById,
+  parseRecipeSpecifier,
+  runRunbook,
+  buildRecipeSearchDirs,
+} from '../src/recipe-runner.js';
 import { ensureRegistryDir, installFromPath, installFromUrl, listInstalled, listVersions, loadConfig, checkTrustedSource } from '../src/recipe-install.js';
 import { runRecipeSupervisor } from '../src/recipe-supervisor.js';
 import { createRecipeManifest, hashRecipe } from '../src/recipe.js';
@@ -56,6 +63,128 @@ describe('Recipe Runner: resolveRecipeById', () => {
     const { recipe, sourcePath } = resolveRecipeById('my-recipe', [dir]);
     assert.equal(recipe.id, 'my-recipe');
     assert.ok(sourcePath.endsWith('.recipe.json'));
+  });
+
+  it('deduplicates search roots with equivalent normalized paths', () => {
+    const dir = tmpDir();
+    const nested = join(dir, 'recipes');
+    mkdirSync(nested, { recursive: true });
+    writeRecipe(nested, makeRecipe({ id: 'norm', version: '1.0.0' }));
+    const result = resolveRecipeById('norm', [nested, resolve(nested, '.')]);
+    assert.equal(result.version, '1.0.0');
+  });
+
+  it('fails closed when same recipe/version exists in multiple active roots', () => {
+    const left = mkdtempSync(join(tmpdir(), 'gr-collision-a-'));
+    const right = mkdtempSync(join(tmpdir(), 'gr-collision-b-'));
+    writeRecipe(left, makeRecipe({ id: 'ambiguous', version: '1.0.0' }));
+    writeRecipe(right, makeRecipe({ id: 'ambiguous', version: '1.0.0' }));
+    assert.throws(
+      () => resolveRecipeById('ambiguous', [left, right]),
+      (err) => err.message.includes('ambiguous resolution')
+    );
+  });
+
+  it('builds canonical workflow/standalone discovery roots deterministically', () => {
+    const base = mkdtempSync(join(tmpdir(), 'gr-roots-'));
+    const project = join(base, 'project');
+    const override = join(base, 'override');
+    const global = join(base, 'recipes');
+    const sharedDefaults = join(base, 'node_modules/.guardrail/recipes');
+    mkdirSync(project, { recursive: true });
+    mkdirSync(join(project, 'recipes'), { recursive: true });
+    mkdirSync(override, { recursive: true });
+    mkdirSync(global, { recursive: true });
+    mkdirSync(sharedDefaults, { recursive: true });
+
+    const roots = buildRecipeSearchDirs({
+      explicitSearchDirs: [override],
+      projectRoot: project,
+      basePath: base,
+      includeDefaults: true,
+    });
+
+    assert.equal(roots[0], resolve(override));
+    assert.equal(roots[1], resolve(project, 'recipes'));
+    assert.equal(roots[2], resolve(base, 'recipes'));
+    assert.equal(roots[3], resolve(sharedDefaults));
+    assert.equal(roots[4], resolve(homedir(), '.guardrail', 'recipes'));
+  });
+
+  it('includes configured repo and user recipe roots after local defaults', () => {
+    const base = mkdtempSync(join(tmpdir(), 'gr-config-roots-'));
+    const project = join(base, 'project');
+    const repoExtra = join(base, 'repo-extra');
+    const userHome = join(base, 'fake-home');
+    const userExtra = join(base, 'user-extra');
+    const localRecipes = join(base, 'recipes');
+    const repoConfigPath = join(project, '.guardrail', 'config.json');
+    const userConfigPath = join(userHome, '.guardrail', 'config.json');
+
+    mkdirSync(join(project, 'recipes'), { recursive: true });
+    mkdirSync(join(project, '.guardrail'), { recursive: true });
+    mkdirSync(localRecipes, { recursive: true });
+    mkdirSync(repoExtra, { recursive: true });
+    mkdirSync(userExtra, { recursive: true });
+    mkdirSync(join(base, 'node_modules/.guardrail/recipes'), { recursive: true });
+    mkdirSync(join(userHome, '.guardrail'), { recursive: true });
+
+    writeFileSync(repoConfigPath, JSON.stringify({ recipe_roots: [repoExtra] }));
+    writeFileSync(userConfigPath, JSON.stringify({ recipe_roots: [userExtra] }));
+
+    const roots = buildRecipeSearchDirs({
+      projectRoot: project,
+      basePath: base,
+      includeDefaults: true,
+      repoConfigPath,
+      userConfigPath,
+    });
+
+    assert.equal(roots[0], resolve(project, 'recipes'));
+    assert.equal(roots[1], resolve(base, 'recipes'));
+    assert.equal(roots[2], resolve(repoExtra));
+    assert.equal(roots[3], resolve(base, 'node_modules/.guardrail/recipes'));
+    assert.equal(roots[4], resolve(userExtra));
+    assert.equal(roots[5], resolve(homedir(), '.guardrail', 'recipes'));
+  });
+
+  it('resolves standalone recipes through repo-configured default roots', () => {
+    const base = mkdtempSync(join(tmpdir(), 'gr-standalone-config-root-'));
+    const project = join(base, 'project');
+    const repoExtra = join(base, 'shared-recipes');
+    const repoConfigPath = join(project, '.guardrail', 'config.json');
+
+    mkdirSync(join(project, '.guardrail'), { recursive: true });
+    mkdirSync(repoExtra, { recursive: true });
+    writeFileSync(repoConfigPath, JSON.stringify({ default_recipe_roots: ['../shared-recipes'] }));
+    writeRecipe(repoExtra, makeRecipe({ id: 'configured-standalone' }));
+
+    const { recipe, sourcePath } = resolveRecipeById('configured-standalone', {
+      basePath: project,
+      repoConfigPath,
+      userConfigPath: false,
+    });
+
+    assert.equal(recipe.id, 'configured-standalone');
+    assert.ok(sourcePath.endsWith('configured-standalone.recipe.json'));
+  });
+
+  it('fails closed on configured missing recipe roots', () => {
+    const base = mkdtempSync(join(tmpdir(), 'gr-bad-config-roots-'));
+    const project = join(base, 'project');
+    const repoConfigPath = join(project, '.guardrail', 'config.json');
+    mkdirSync(join(project, '.guardrail'), { recursive: true });
+    writeFileSync(repoConfigPath, JSON.stringify({ recipe_roots: ['./missing-recipes'] }));
+
+    assert.throws(
+      () => buildRecipeSearchDirs({
+        projectRoot: project,
+        basePath: base,
+        repoConfigPath,
+        userConfigPath: false,
+      }),
+      /Configured recipe root ".\/missing-recipes".*does not exist/,
+    );
   });
 
   it('throws on unknown ID', () => {
@@ -285,14 +414,20 @@ describe('Recipe Install: Trusted Sources', () => {
   it('loadConfig returns empty for missing file', () => {
     const config = loadConfig('/nonexistent/config.json');
     assert.deepEqual(config.trusted_sources, []);
+    assert.deepEqual(config.recipe_roots, []);
+    assert.deepEqual(config.default_recipe_roots, []);
   });
 
   it('loadConfig reads trusted_sources', () => {
     const dir = tmpDir();
     const configPath = join(dir, 'config.json');
-    writeFileSync(configPath, JSON.stringify({ trusted_sources: ['https://safe.dev'] }));
+    writeFileSync(configPath, JSON.stringify({
+      trusted_sources: ['https://safe.dev'],
+      default_recipe_roots: ['./recipes'],
+    }));
     const config = loadConfig(configPath);
     assert.deepEqual(config.trusted_sources, ['https://safe.dev']);
+    assert.deepEqual(config.default_recipe_roots, ['./recipes']);
   });
 
   it('checkTrustedSource: empty list rejects all remote sources', () => {

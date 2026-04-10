@@ -102,7 +102,15 @@ guardrail workflow lint --definition workflows/server-cycle.json
 
 Workflow steps can be regular `task` steps, service lifecycle steps, or `recipe_ref` steps. Use `recipe_ref` when you want one workflow approval to cover a bounded chain of recipe executions instead of approving each recipe separately.
 
-If a workflow lives in one repo but references recipes stored elsewhere, pass `--recipe-search-dir <path>` one or more times on both `workflow lint` and `workflow run`:
+Workflow recipe discovery now shares the same default roots as standalone recipe mode:
+- local `recipes/`
+- `node_modules/.guardrail/recipes`
+- `~/.guardrail/recipes`
+- extra configured roots from repo-local `.guardrail/config.json` or user-level `~/.guardrail/config.json` via `default_recipe_roots` (`recipe_roots` is still accepted as a compatibility alias)
+
+If the same recipe id/version appears in more than one root at the same precedence point, Guardrail fails closed with explicit collision diagnostics instead of silently choosing one.
+
+If a workflow lives in one repo but references recipes stored in additional roots outside those defaults, pass `--recipe-search-dir <path>` one or more times on both `workflow lint` and `workflow run`:
 
 ```bash
 guardrail workflow lint \
@@ -138,6 +146,20 @@ guardrail run \
 
 # Show diff from approved hash
 guardrail template diff --template ./templates/npm-publish.json
+
+# Generate a starter template from an approved manifest
+guardrail template create \
+  --from-manifest .guardrail/approved.json \
+  --name npm-publish
+
+# List local templates
+guardrail template list
+
+# Publish a command-shaped template through the recipe pipeline
+guardrail template publish \
+  --template .guardrail/templates/npm-publish.json \
+  --name npm-publish \
+  --category packages
 ```
 
 Templates support two kinds:
@@ -173,6 +195,15 @@ Minimal valid template JSON example:
 ```
 
 Template inputs are constrained by schema, but approval reuse is still exact-value based on the resolved input set recorded in the manifest.
+
+Guardrail can now bridge approved executions back into authoring flow:
+- `template create --from-manifest` turns an approved command or recipe manifest into a starter template with recorded source provenance
+- `template list` shows local templates plus whether recorded source trust still matches
+- `template publish` converts a command-shaped template into a publishable recipe
+
+Rollback-bearing workflow templates still need manual recipe authoring; `template publish` currently rejects templates with rollback steps.
+
+Bundled Guardrail recipes also resolve shipped wrapper helpers internally now, so cross-repo runs no longer need to thread checkout-path args just to find Guardrail-owned wrapper scripts.
 
 ### 4. Resident Lane Mode
 
@@ -294,6 +325,18 @@ guardrail run --recipe git-commit \
   --input paths=src/cli.js \
   --input paths=README.md \
   --input message_file=.guardrail/commit-message.txt
+
+# Create a bounded git commit from a reviewed commit-plan artifact
+guardrail run --recipe git-commit-from-plan \
+  --input plan_file=.guardrail/commit-plans/auth-slice.json \
+  --input message_file=.guardrail/commit-messages/auth-slice.txt
+
+# Turn an approved manifest back into a starter template and publish it
+guardrail template create --from-manifest .guardrail/approved.json --name npm-publish
+guardrail template publish --template .guardrail/templates/npm-publish.json --name npm-publish --category packages
+
+# List local templates and their current trust/provenance status
+guardrail template list
 
 ```
 

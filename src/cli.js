@@ -84,6 +84,9 @@ Commands:
   template schema --template <path>     Show template input schema
   template simulate --template <path>   Simulate a template run (no execution)
   template diff --template <path>       Show diff from approved hash
+  template create --from-manifest <p>   Create a starter template from an approved manifest
+  template list [--templates-dir <p>]   List local templates
+  template publish --template <path>    Publish a template through the recipe pipeline
   list [--category X] [--search Q]      List and filter available recipes
   pack <recipe.json> [--output <path>]   Package a recipe for distribution
   recipe validate <recipe.json>         Validate a recipe file
@@ -134,6 +137,8 @@ Examples:
   guardrail lane send --id claude-live --prompt "2x3=?"
   guardrail lane stop --id claude-live
   guardrail template lint --template ./templates/npm-publish.json
+  guardrail template create --from-manifest .guardrail/approved.json --name npm-publish
+  guardrail template list --json
   guardrail template explain --template ./templates/npm-publish.json
   guardrail template simulate --template ./templates/npm-publish.json --input package_dir=packages/my-lib
   guardrail run --non-interactive --approved-manifest .guardrail/approved.json -- npm test
@@ -180,11 +185,17 @@ export function parseArgs(argv) {
     result.inputs[key] = [result.inputs[key], value];
   };
 
+  const readFlagValue = () => {
+    i++;
+    if (i >= argv.length) return { error: 'usage' };
+    return { value: argv[i++] };
+  };
+
   const parseMappedFlags = (target, mappings) => {
     while (i < argv.length) {
       const arg = argv[i];
       if (arg === '--help') return { help: true };
-      if (arg === '--version') return { version: true };
+      if (arg === '--version' && action !== 'publish') return { version: true };
       if (arg === '--json') {
         result.json = true;
         i++;
@@ -217,7 +228,7 @@ export function parseArgs(argv) {
   // --- template subcommand --------------------------------------------------
 
   if (sub === 'template') {
-    if (i >= argv.length || !['lint', 'explain', 'schema', 'simulate', 'diff'].includes(argv[i])) {
+    if (i >= argv.length || !['lint', 'explain', 'schema', 'simulate', 'diff', 'create', 'list', 'publish'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -226,33 +237,86 @@ export function parseArgs(argv) {
     while (i < argv.length) {
       const arg = argv[i];
       if (arg === '--help') return { help: true };
-      if (arg === '--version') return { version: true };
+      if (arg === '--version' && action !== 'publish') return { version: true };
 
       if (arg === '--template') {
-        i++;
-        if (i >= argv.length) return { error: 'usage' };
-        result.template = argv[i++];
+        const next = readFlagValue();
+        if (next.error) return next;
+        result.template = next.value;
+        continue;
+      }
+      if (arg === '--from-manifest') {
+        const next = readFlagValue();
+        if (next.error) return next;
+        result.manifestPath = next.value;
+        continue;
+      }
+      if (arg === '--templates-dir') {
+        const next = readFlagValue();
+        if (next.error) return next;
+        result.templatesDir = next.value;
+        continue;
+      }
+      if (arg === '--output') {
+        const next = readFlagValue();
+        if (next.error) return next;
+        result.outputPath = next.value;
+        continue;
+      }
+      if (arg === '--name') {
+        const next = readFlagValue();
+        if (next.error) return next;
+        result.name = next.value;
+        continue;
+      }
+      if (arg === '--category') {
+        const next = readFlagValue();
+        if (next.error) return next;
+        result.category = next.value;
+        continue;
+      }
+      if (arg === '--description') {
+        const next = readFlagValue();
+        if (next.error) return next;
+        result.description = next.value;
+        continue;
+      }
+      if (arg === '--version') {
+        const next = readFlagValue();
+        if (next.error) return next;
+        result.version = next.value;
+        continue;
+      }
+      if (arg === '--author') {
+        const next = readFlagValue();
+        if (next.error) return next;
+        result.author = next.value;
         continue;
       }
       if (arg === '--input') {
-        i++;
-        if (i >= argv.length) return { error: 'usage' };
-        const kv = argv[i++];
+        const next = readFlagValue();
+        if (next.error) return next;
+        const kv = next.value;
         const eq = kv.indexOf('=');
         if (eq < 1) return { error: 'usage' };
         assignInputValue(kv.slice(0, eq), kv.slice(eq + 1));
         continue;
       }
       if (arg === '--env-allow') {
-        i++;
-        if (i >= argv.length) return { error: 'usage' };
-        result.envAllow.push(argv[i++]);
+        const next = readFlagValue();
+        if (next.error) return next;
+        result.envAllow.push(next.value);
         continue;
       }
       if (arg === '--manifest') {
+        const next = readFlagValue();
+        if (next.error) return next;
+        result.manifest = next.value;
+        continue;
+      }
+      if (arg === '--dry-run') {
+        result.dryRun = true;
         i++;
-        if (i >= argv.length) return { error: 'usage' };
-        result.manifest = argv[i++];
         continue;
       }
       if (arg === '--json') {
@@ -1089,6 +1153,99 @@ async function main() {
     process.exit(0);
   }
 
+  // --- template create -----------------------------------------------------
+
+  if (parsed.subcommand === 'template-create') {
+    if (!parsed.manifestPath) {
+      console.error('Error: --from-manifest <path> is required for template create');
+      process.exit(1);
+    }
+
+    const { buildTemplateFromApprovedManifest, lintTemplate } = await import('./template.js');
+
+    let templateDef;
+    try {
+      templateDef = buildTemplateFromApprovedManifest(parsed.manifestPath, {
+        name: parsed.name,
+        sourcePath: parsed.manifestPath,
+      });
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+
+    const outputPath = resolve(parsed.outputPath || `.guardrail/templates/${templateDef.name}.json`);
+    mkdirSync(dirname(outputPath), { recursive: true });
+    writeFileSync(outputPath, JSON.stringify(templateDef, null, 2) + '\n');
+
+    const warnings = lintTemplate(templateDef);
+    if (parsed.json) {
+      console.log(JSON.stringify({ path: outputPath, template: templateDef, warnings }, null, 2));
+    } else {
+      console.log(`Template created: ${outputPath}`);
+      if (warnings.length > 0) {
+        console.log('');
+        console.log('Warnings:');
+        for (const warning of warnings) {
+          console.log(`  - ${warning}`);
+        }
+      }
+    }
+    process.exit(0);
+  }
+
+  // --- template list -------------------------------------------------------
+
+  if (parsed.subcommand === 'template-list') {
+    const { listTemplates } = await import('./template.js');
+
+    let rows;
+    try {
+      rows = listTemplates(parsed.templatesDir || '.guardrail/templates');
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+
+    if (parsed.json) {
+      console.log(JSON.stringify(rows, null, 2));
+    } else if (rows.length === 0) {
+      console.log('No templates found.');
+    } else {
+      for (const row of rows) {
+        const provenance = row.source
+          ? `${row.source.type}${row.sourceMatch === false ? ' (modified)' : ''}`
+          : 'local';
+        console.log(`  ${row.name.padEnd(24)} ${row.kind.padEnd(18)} ${row.effectiveTrustClass.padEnd(18)} ${provenance}`);
+      }
+    }
+    process.exit(0);
+  }
+
+  // --- template publish ----------------------------------------------------
+
+  if (parsed.subcommand === 'template-publish') {
+    try {
+      const { publishTemplate } = await import('./recipe-publish.js');
+      const result = await publishTemplate({
+        templatePath: parsed.template,
+        name: parsed.name,
+        category: parsed.category,
+        description: parsed.description,
+        version: parsed.version,
+        author: parsed.author,
+        dryRun: parsed.dryRun,
+      });
+      if (parsed.json) {
+        console.log(JSON.stringify(result, null, 2));
+      }
+      process.exit(0);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  }
+
   // --- template lint -------------------------------------------------------
 
   if (parsed.subcommand === 'template-lint') {
@@ -1262,13 +1419,9 @@ async function main() {
 
   if (parsed.subcommand === 'list') {
     const { buildIndex, filterRecipes, formatRecipeList, deduplicateLatest } = await import('./recipe-index.js');
-    const { homedir } = await import('node:os');
-    const { resolve } = await import('node:path');
-    const { existsSync } = await import('node:fs');
+    const { buildRecipeSearchDirs } = await import('./recipe-runner.js');
 
-    const dirs = ['recipes', 'node_modules/.guardrail/recipes'];
-    const homeRecipes = resolve(homedir(), '.guardrail', 'recipes');
-    if (existsSync(homeRecipes)) dirs.push(homeRecipes);
+    const dirs = buildRecipeSearchDirs({ basePath: process.cwd(), includeDefaults: true });
     const index = buildIndex(dirs);
     const deduped = deduplicateLatest(index);
     const filtered = filterRecipes(deduped, parsed.listFilters);

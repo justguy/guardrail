@@ -528,6 +528,79 @@ describe('Recipe: Manifest Semantics', () => {
     assert.ok(comparison.diffs.some((diff) => diff.includes('envIntersection')));
   });
 
+  it('stores executionDetails in the approval manifest when provided', () => {
+    const recipe = makeRecipe();
+    const manifest = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello' },
+      {
+        cwd: '/repo',
+        projectRoot: '/repo',
+        sourcePath: '/repo/recipes/test.recipe.json',
+        executionDetails: {
+          type: 'commit_plan',
+          planFile: '.guardrail/commit-plans/auth.json',
+          repoPath: '.',
+          paths: ['src/auth.js'],
+          messageFile: '.guardrail/messages/auth.txt',
+          bounds: { allowed_roots: ['src'], max_files: 3 },
+        },
+      },
+    );
+
+    assert.equal(manifest.executionDetails.type, 'commit_plan');
+    assert.deepEqual(manifest.executionDetails.paths, ['src/auth.js']);
+  });
+
+  it('treats executionDetails changes as drift', () => {
+    const recipe = makeRecipe();
+    const base = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello' },
+      {
+        cwd: '/repo',
+        projectRoot: '/repo',
+        sourcePath: '/repo/recipes/test.recipe.json',
+        executionDetails: {
+          type: 'commit_plan',
+          planFile: '.guardrail/commit-plans/auth.json',
+          repoPath: '.',
+          paths: ['src/auth.js'],
+          messageFile: '.guardrail/messages/auth.txt',
+          bounds: { allowed_roots: ['src'], max_files: 3 },
+        },
+      },
+    );
+
+    const changed = createRecipeManifest(
+      recipe,
+      hashRecipe(recipe),
+      { trustClass: 'unknown', riskLevel: 'red', reasons: ['recipe declares medium risk'] },
+      { target: 'hello' },
+      {
+        cwd: '/repo',
+        projectRoot: '/repo',
+        sourcePath: '/repo/recipes/test.recipe.json',
+        executionDetails: {
+          type: 'commit_plan',
+          planFile: '.guardrail/commit-plans/auth.json',
+          repoPath: '.',
+          paths: ['src/auth.js', 'src/session.js'],
+          messageFile: '.guardrail/messages/auth.txt',
+          bounds: { allowed_roots: ['src'], max_files: 3 },
+        },
+      },
+    );
+
+    const comparison = compareRecipeManifests(changed, base);
+    assert.equal(comparison.matches, false);
+    assert.ok(comparison.diffs.some((diff) => diff.includes('executionDetails')));
+  });
+
   it('allows bounded enum input reuse within approved envelope', () => {
     const recipe = makeRecipe({
       inputs: {

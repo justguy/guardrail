@@ -3,6 +3,7 @@ import { resolve, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { loadManifest } from './manifest.js';
 import { validateRecipe, hashRecipe } from './recipe.js';
+import { loadTemplate, resolveTemplateTrustClass } from './template.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -142,6 +143,75 @@ export function manifestToRecipe(manifest, opts) {
   };
 
   if (opts.tags) recipe.tags = opts.tags;
+
+  return recipe;
+}
+
+function mapTemplateRiskToRecipeRisk(level) {
+  if (level === 'green') return 'low';
+  if (level === 'yellow') return 'medium';
+  return 'high';
+}
+
+export function templateToRecipe(templateDef, opts) {
+  const { name, category, description } = opts;
+
+  if (!name) throw new Error('--name is required for template publish');
+  if (!category) throw new Error('--category is required for template publish');
+  if (templateDef.rollback?.steps?.length > 0) {
+    throw new Error(
+      'template publish does not support templates with rollback steps yet.\n' +
+      'Remove rollback or author the recipe manually.'
+    );
+  }
+
+  const steps = templateDef.kind === 'template'
+    ? [{
+      id: 'main',
+      description: templateDef.description,
+      run: {
+        command: templateDef.run.command,
+        args: templateDef.run.args || [],
+        mode: 'structured',
+      },
+    }]
+    : (templateDef.steps || []).map((step) => ({
+      id: step.id,
+      description: step.description,
+      run: {
+        command: step.run.command,
+        args: step.run.args || [],
+        mode: 'structured',
+      },
+    }));
+
+  const effectiveTrustClass = resolveTemplateTrustClass(templateDef, templateDef.trust_class);
+  const recipe = {
+    id: name,
+    name: opts.displayName || name.replace(/-/g, ' '),
+    description: description || templateDef.description || `Recipe published from template ${templateDef.name}`,
+    version: opts.version || '1.0.0',
+    author: opts.author || 'author',
+    category,
+    channel: 'community',
+    risk_level: mapTemplateRiskToRecipeRisk(templateDef.risk || 'yellow'),
+    approval_required: (templateDef.risk || 'yellow') !== 'green',
+    inputs: templateDef.inputs || {},
+    steps,
+    guardrails: {
+      constraints: [
+        `published from local template ${templateDef.name}`,
+      ],
+      invariants: [
+        'mode: structured',
+        `template trust class at publish time: ${effectiveTrustClass}`,
+      ],
+    },
+  };
+
+  if (Array.isArray(templateDef.requires_env) && templateDef.requires_env.length > 0) {
+    recipe.requires_env = [...templateDef.requires_env];
+  }
 
   return recipe;
 }
@@ -303,6 +373,53 @@ export function createRecipePR(fork, recipe, opts) {
   return { prUrl, branch, filePath, hash };
 }
 
+function publishPreparedRecipe(recipe, opts = {}) {
+  const steps = [];
+  const log = opts.log || console.log;
+
+  validateRecipe(recipe);
+  steps.push('Lint passed');
+
+  const scrubbed = scrubPersonalData(recipe);
+  steps.push('Personal data scrubbed');
+
+  const hash = hashRecipe(scrubbed);
+  const filePath = `${scrubbed.category || 'custom'}/${scrubbed.id}.json`;
+  steps.push(`Recipe written: ${filePath}`);
+
+  if (opts.dryRun) {
+    log('');
+    for (const s of steps) log(`\u2713 ${s}`);
+    log('');
+    log(`Content hash: sha256:${hash}`);
+    log('');
+    log('Dry run \u2014 no GitHub operations performed.');
+    log('Recipe JSON:');
+    log(JSON.stringify(scrubbed, null, 2));
+    return { recipe: scrubbed, hash, steps, dryRun: true };
+  }
+
+  const fork = ensureFork();
+  steps.push(`Forked ${UPSTREAM_OWNER}/${UPSTREAM_REPO}`);
+
+  const pr = createRecipePR(fork, scrubbed, { fork });
+  steps.push(`Branch created: recipe/${scrubbed.id}`);
+  if (pr.updated) {
+    steps.push(`PR updated: ${pr.prUrl}`);
+  } else {
+    steps.push(`PR opened: ${pr.prUrl}`);
+  }
+
+  log('');
+  for (const s of steps) log(`\u2713 ${s}`);
+  log('');
+  log(`Content hash: sha256:${hash}`);
+  log('The maintainers will review your recipe.');
+  log("You'll get a GitHub notification when it's merged.");
+
+  return { recipe: scrubbed, hash, prUrl: pr.prUrl, steps };
+}
+
 // ---------------------------------------------------------------------------
 // PR body generation
 // ---------------------------------------------------------------------------
@@ -436,53 +553,21 @@ export async function publishRecipe(opts) {
   // 3. Convert manifest to recipe
   const recipe = manifestToRecipe(manifest, opts);
 
-  // 4. Lint (validates recipe schema)
-  validateRecipe(recipe);
-  steps.push('Lint passed');
+  const publishResult = publishPreparedRecipe(recipe, opts);
+  return {
+    ...publishResult,
+    steps: [...steps, ...(publishResult.steps || [])],
+  };
+}
 
-  // 5. Scrub personal data
-  const scrubbed = scrubPersonalData(recipe);
-  steps.push('Personal data scrubbed');
-
-  // 6. Compute hash
-  const hash = hashRecipe(scrubbed);
-
-  // 7. Write recipe file path for display
-  const filePath = `${scrubbed.category || 'custom'}/${scrubbed.id}.json`;
-  steps.push(`Recipe written: ${filePath}`);
-
-  if (opts.dryRun) {
-    log('');
-    for (const s of steps) log(`\u2713 ${s}`);
-    log('');
-    log(`Content hash: sha256:${hash}`);
-    log('');
-    log('Dry run \u2014 no GitHub operations performed.');
-    log('Recipe JSON:');
-    log(JSON.stringify(scrubbed, null, 2));
-    return { recipe: scrubbed, hash, steps, dryRun: true };
+export function publishTemplate(opts) {
+  const templatePath = opts.templatePath || opts.template;
+  if (!templatePath) throw new Error('--template <path> is required for template publish');
+  if (!opts.dryRun) {
+    requireGhCli();
   }
 
-  // 8. Fork
-  const fork = ensureFork();
-  steps.push(`Forked ${UPSTREAM_OWNER}/${UPSTREAM_REPO}`);
-
-  // 9. Branch + write + PR
-  const pr = createRecipePR(fork, scrubbed, { fork });
-  steps.push(`Branch created: recipe/${scrubbed.id}`);
-  if (pr.updated) {
-    steps.push(`PR updated: ${pr.prUrl}`);
-  } else {
-    steps.push(`PR opened: ${pr.prUrl}`);
-  }
-
-  // 10. Output
-  log('');
-  for (const s of steps) log(`\u2713 ${s}`);
-  log('');
-  log(`Content hash: sha256:${hash}`);
-  log('The maintainers will review your recipe.');
-  log("You'll get a GitHub notification when it's merged.");
-
-  return { recipe: scrubbed, hash, prUrl: pr.prUrl, steps };
+  const templateDef = loadTemplate(resolve(templatePath));
+  const recipe = templateToRecipe(templateDef, opts);
+  return publishPreparedRecipe(recipe, opts);
 }
