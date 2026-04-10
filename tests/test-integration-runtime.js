@@ -58,15 +58,15 @@ function writeDefFile(dir, def, filename = 'workflow.json') {
   return filePath;
 }
 
-function buildWorkflowManifest(def, basePath) {
-  const normalized = normalizeWorkflowDefinition(def, basePath);
+function buildWorkflowManifest(def, basePath, options = {}) {
+  const normalized = normalizeWorkflowDefinition(def, basePath, options);
   const hash = hashWorkflow(normalized);
   const risk = evaluateWorkflowRisk(normalized, { trustClass: 'reviewed_internal', projectRoot: basePath });
   return createWorkflowManifest(normalized, hash, risk, normalized.projectRoot);
 }
 
-function createAckedWorkflowManifest(def, basePath, manifestPath) {
-  const manifest = buildWorkflowManifest(def, basePath);
+function createAckedWorkflowManifest(def, basePath, manifestPath, options = {}) {
+  const manifest = buildWorkflowManifest(def, basePath, options);
   manifest.riskAssessment.acknowledgedBy = 'test';
   manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
   saveManifest(manifest, manifestPath);
@@ -795,6 +795,109 @@ describe('Integration: Workflow Supervisor Shared State', () => {
     assert.equal(result.status, 'validation_failed');
     assert.equal(result.failedStep, 'consumer');
     assert.match(result.terminalReason, /Recipe input validation failed/);
+  });
+
+  it('fails early when workflow recipe_ref auth prerequisite is missing', async () => {
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'recipes'), { recursive: true });
+
+    const recipe = makeRecipe({
+      id: 'workflow-auth-recipe',
+      requires_auth: [{ type: 'claude_login', env: ['HOME'], message: 'Claude login required for this workflow runtime.' }],
+    });
+    writeRecipeFile(join(dir, 'recipes'), recipe);
+
+    const def = makeWorkflowDef({
+      projectRoot: dir,
+      entryStep: 'consumer',
+      services: [],
+      steps: [
+        {
+          id: 'consumer',
+          type: 'recipe_ref',
+          recipe: recipe.id,
+          inputs: { target: 'hello' },
+          on: { success: 'done', validation_failed: 'abort', failure: 'abort' },
+        },
+      ],
+    });
+    const defPath = writeDefFile(dir, def, 'workflow-auth-preflight.json');
+    const manifestPath = join(dir, '.guardrail', 'workflows', 'workflow-auth-preflight.approved.json');
+    createAckedWorkflowManifest(def, dir, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+      authCheckFn: async () => ({ success: false, stderr: 'Not logged in' }),
+    });
+
+    assert.equal(result.failedStep, 'consumer');
+    assert.match(result.terminalReason || '', /missing_auth_prerequisite/);
+    assert.match(result.terminalReason || '', /Claude login required for this workflow runtime/);
+    assert.match(result.terminalReason || '', /Not logged in/);
+  });
+
+  it('passes declared recipe_ref env requirements through workflow execution', async () => {
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'recipes'), { recursive: true });
+
+    const original = process.env.GUARDRAIL_WORKFLOW_RECIPE_ENV_TEST;
+    process.env.GUARDRAIL_WORKFLOW_RECIPE_ENV_TEST = 'present';
+
+    try {
+      const recipe = makeRecipe({
+        id: 'workflow-env-recipe',
+        requires_env: ['GUARDRAIL_WORKFLOW_RECIPE_ENV_TEST'],
+        steps: [
+          {
+            id: 'step-1',
+            description: 'verify workflow env passthrough',
+            run: {
+              command: 'node',
+              args: ['-e', 'process.exit(process.env.GUARDRAIL_WORKFLOW_RECIPE_ENV_TEST === "present" ? 0 : 9)'],
+              mode: 'structured',
+              timeoutMs: 5000,
+            },
+          },
+        ],
+      });
+      writeRecipeFile(join(dir, 'recipes'), recipe);
+
+      const def = makeWorkflowDef({
+        projectRoot: dir,
+        entryStep: 'consumer',
+        services: [],
+        steps: [
+          {
+            id: 'consumer',
+            type: 'recipe_ref',
+            recipe: recipe.id,
+            inputs: { target: 'hello' },
+            on: { success: 'done', validation_failed: 'abort', failure: 'abort' },
+          },
+        ],
+      });
+      const defPath = writeDefFile(dir, def, 'workflow-env-pass.json');
+      const manifestPath = join(dir, '.guardrail', 'workflows', 'workflow-env-pass.approved.json');
+      createAckedWorkflowManifest(def, dir, manifestPath);
+
+      const result = await runWorkflowSupervisor({
+        definitionPath: defPath,
+        manifestPath,
+        nonInteractive: true,
+        jsonOutput: true,
+        trustClass: 'reviewed_internal',
+      });
+
+      assert.equal(result.status, 'success');
+      assert.equal(result.stepsExecuted, 1);
+    } finally {
+      if (original === undefined) delete process.env.GUARDRAIL_WORKFLOW_RECIPE_ENV_TEST;
+      else process.env.GUARDRAIL_WORKFLOW_RECIPE_ENV_TEST = original;
+    }
   });
 });
 

@@ -318,7 +318,7 @@ function formatComposedReviewEachTimeReason(stepId, record) {
   return `Fresh approval required for composed exec inputs: step "${stepId}" -> ${record.recipe.id}: ${keys.join(', ')}`;
 }
 
-async function preflightRecipeAuthRuntime({
+export async function preflightRecipeAuthRuntime({
   recipe,
   envAllow,
   cwd,

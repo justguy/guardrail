@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -104,15 +104,15 @@ function writeRecipeFile(dir, recipe, filename = `${recipe.id}.recipe.json`) {
 /**
  * Build a normalised workflow and its manifest for comparison tests.
  */
-function buildManifest(def, basePath) {
-  const normalized = normalizeWorkflowDefinition(def, basePath || tmpdir());
+function buildManifest(def, basePath, options = {}) {
+  const normalized = normalizeWorkflowDefinition(def, basePath || tmpdir(), options);
   const hash = hashWorkflow(normalized);
   const risk = evaluateWorkflowRisk(normalized, { trustClass: 'reviewed_internal', projectRoot: basePath || tmpdir() });
   return createWorkflowManifest(normalized, hash, risk, normalized.projectRoot);
 }
 
-function createAckedManifest(def, basePath, manifestPath) {
-  const manifest = buildManifest(def, basePath);
+function createAckedManifest(def, basePath, manifestPath, options = {}) {
+  const manifest = buildManifest(def, basePath, options);
   manifest.riskAssessment.acknowledgedBy = 'test';
   manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
   saveManifest(manifest, manifestPath);
@@ -660,7 +660,7 @@ describe('Workflow Manifest Save/Load', () => {
 
   it('create, save, and load round-trip', () => {
     const def = makeDefinition();
-    const manifest = buildManifest(def, tmpDir);
+    const manifest = buildManifest(def, tmpDir, { envAllow: ['HOME'] });
     const filePath = join(tmpDir, 'approved.json');
     saveManifest(manifest, filePath);
     const loaded = loadManifest(filePath);
@@ -2084,6 +2084,7 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
     });
 
     const def = makeDefinition({
+      projectRoot: tmpDir,
       entryStep: 'step_a',
       steps: [{
         id: 'step_a',
@@ -2112,6 +2113,182 @@ describe('Workflow Non-Interactive Approval Reuse', () => {
     assert.equal(result.status, 'approval_required');
     assert.equal(result.exitCode, STATUS_EXIT_CODES.approval_required);
     assert.match(result.terminalReason, /review_each_time/);
+  });
+
+  it('fails recipe_ref before launch when auth preflight uses declared runtime env and the prerequisite is still missing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-nonint-auth-mapping-'));
+    mkdirSync(join(dir, 'recipes'), { recursive: true });
+    const markerPath = join(dir, 'workflow-recipe-ref-mapping.marker');
+    rmSync(markerPath, { force: true });
+
+    writeRecipeFile(join(dir, 'recipes'), {
+      id: 'recipe-auth-mapping-required',
+      name: 'Recipe Auth Mapping Required',
+      description: 'requires auth mapping for workflow recipe_ref parity',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'verified',
+      approval_required: true,
+      risk_level: 'low',
+      requires_auth: [{ type: 'claude_login' }],
+      inputs: {},
+      steps: [{
+        id: 'main',
+        description: 'write marker',
+        run: {
+          command: 'node',
+          args: ['-e', `require("fs").writeFileSync("${markerPath}", "launched")`],
+          mode: 'structured',
+        },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    });
+
+    const def = makeDefinition({
+      projectRoot: dir,
+      entryStep: 'step_a',
+      steps: [{
+        id: 'step_a',
+        type: 'recipe_ref',
+        idempotent: true,
+        recipe: 'recipe-auth-mapping-required',
+        inputs: {},
+        on: { success: 'done', failure: 'abort' },
+      }],
+    });
+
+    const defPath = writeDefFile(dir, def, 'workflow-auth-mapping.json');
+    const manifest = buildManifest(def, dir);
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    const manifestPath = join(dir, 'approved.workflow.auth-mapping.json');
+    saveManifest(manifest, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+    });
+
+    assert.equal(result.status, 'policy_violation');
+    assert.equal(result.exitCode, STATUS_EXIT_CODES.policy_violation);
+    assert.match(result.terminalReason, /missing_auth_prerequisite/);
+    assert.match(result.terminalReason, /Claude CLI is not logged in for this runtime/);
+    assert.equal(result.stepsExecuted, 1);
+    assert.equal(false, existsSync(markerPath));
+  });
+
+  it('fails recipe_ref before launch when auth prerequisite check fails', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-nonint-auth-prereq-'));
+    mkdirSync(join(dir, 'recipes'), { recursive: true });
+    const markerPath = join(dir, 'workflow-recipe-ref-prerequisite.marker');
+    rmSync(markerPath, { force: true });
+
+    writeRecipeFile(join(dir, 'recipes'), {
+      id: 'recipe-auth-prerequisite-required',
+      name: 'Recipe Auth Prerequisite Required',
+      description: 'requires auth prerequisite for workflow recipe_ref parity',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'verified',
+      approval_required: true,
+      risk_level: 'low',
+      requires_auth: [{ type: 'claude_login', env: ['HOME'], message: 'Claude login required for this runtime.' }],
+      inputs: {},
+      steps: [{
+        id: 'main',
+        description: 'write marker',
+        run: {
+          command: 'node',
+          args: ['-e', `require("fs").writeFileSync("${markerPath}", "launched")`],
+          mode: 'structured',
+        },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    });
+
+    const def = makeDefinition({
+      projectRoot: dir,
+      entryStep: 'step_a',
+      steps: [{
+        id: 'step_a',
+        type: 'recipe_ref',
+        idempotent: true,
+        recipe: 'recipe-auth-prerequisite-required',
+        inputs: {},
+        on: { success: 'done', failure: 'abort' },
+      }],
+    });
+
+    const defPath = writeDefFile(dir, def, 'workflow-auth-prerequisite.json');
+    const manifest = buildManifest(def, dir, { envAllow: ['HOME'] });
+    manifest.riskAssessment.acknowledgedBy = 'test';
+    manifest.riskAssessment.acknowledgedAt = new Date().toISOString();
+    const manifestPath = join(dir, 'approved.workflow.auth-prerequisite.json');
+    saveManifest(manifest, manifestPath);
+
+    const result = await runWorkflowSupervisor({
+      definitionPath: defPath,
+      manifestPath,
+      nonInteractive: true,
+      jsonOutput: true,
+      trustClass: 'reviewed_internal',
+      envAllow: ['HOME'],
+    });
+
+    assert.equal(result.status, 'policy_violation');
+    assert.equal(result.exitCode, STATUS_EXIT_CODES.policy_violation);
+    assert.match(result.terminalReason, /missing_auth_prerequisite/);
+    assert.match(result.terminalReason, /Claude login required for this runtime/);
+    assert.equal(result.stepsExecuted, 1);
+    assert.equal(false, existsSync(markerPath));
+  });
+
+  it('tracks recipe_ref env intersection in the workflow manifest and drifts when it changes', () => {
+    mkdirSync(join(tmpDir, 'recipes'), { recursive: true });
+    writeRecipeFile(join(tmpDir, 'recipes'), {
+      id: 'recipe-env-contract',
+      name: 'Recipe Env Contract',
+      description: 'records workflow recipe_ref env intersection',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'verified',
+      approval_required: true,
+      risk_level: 'low',
+      requires_auth: [{ type: 'claude_login', env: ['HOME'] }],
+      inputs: {},
+      steps: [{
+        id: 'main',
+        description: 'echo ok',
+        run: { command: 'echo', args: ['ok'], mode: 'structured' },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    });
+
+    const def = makeDefinition({
+      entryStep: 'step_a',
+      steps: [{
+        id: 'step_a',
+        type: 'recipe_ref',
+        recipe: 'recipe-env-contract',
+        inputs: {},
+        on: { success: 'done', failure: 'abort' },
+      }],
+    });
+
+    const withoutEnv = buildManifest(def, tmpDir, { envAllow: [] });
+    const withEnv = buildManifest(def, tmpDir, { envAllow: ['HOME'] });
+
+    assert.deepEqual(withoutEnv.workflow.steps[0].recipeRef.envIntersection, []);
+    assert.deepEqual(withEnv.workflow.steps[0].recipeRef.envIntersection, ['HOME']);
+
+    const diffs = diffWorkflowManifests(withEnv, withoutEnv);
+    assert.match(diffs.join('\n'), /envIntersection/);
   });
 
   it('requires reapproval when recipe_ref source placement changes across runs', async () => {

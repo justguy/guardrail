@@ -1,7 +1,7 @@
 {
   "id": "cmux-claude-exec",
   "name": "CMUX Claude Exec",
-  "description": "Launch a fresh cmux workspace, execute the bundled claude-exec recipe directly inside that terminal runtime under one composed Guardrail approval, and capture the resulting pane state. This recipe keeps the host-runtime hop explicit while binding the inner Claude exec schema, trust, env, content-hash, review_each_time semantics, and hosted Claude auth preflight into the same approval unit. If the hosted Claude run fails with the same auth error as direct claude-exec, the fix is login in that target host runtime, not more Guardrail workaround hunting.",
+  "description": "Launch a fresh cmux workspace, execute the bundled claude-exec recipe directly inside that terminal runtime under one composed Guardrail approval, and capture the resulting pane state. This recipe keeps the host-runtime hop explicit while binding the inner Claude exec schema, trust, env, content-hash, review_each_time semantics, and hosted Claude auth preflight into the same approval unit. The same child auth/runtime contract is preserved if this recipe is reached through workflow `recipe_ref` execution. If the hosted Claude run fails with the same auth error as direct claude-exec, the fix is login in that target host runtime, not more Guardrail workaround hunting.",
   "version": "1.0.0",
   "author": {
     "name": "Guardrail Team",

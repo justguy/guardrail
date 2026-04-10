@@ -10,10 +10,11 @@ import {
   resolveInputs,
   parseRecipeSpecifier,
 } from './recipe-runner.js';
-import { hashRecipe } from './recipe.js';
+import { computeRecipeEnvIntersection, hashRecipe } from './recipe.js';
 import { collectRecipeInputContentHashes } from './prompt-inputs.js';
 import { classifyTrust } from './recipe-channel.js';
 import { normalizePathForRecipeLookup } from './recipe-index.js';
+import { deriveAuthEnvRequirements } from './adapter-auth.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -661,6 +662,11 @@ function normalizeRecipeRefStep(step, projectRoot, options = {}) {
   const { version: requestedVersion } = parseRecipeSpecifier(step.recipe);
   const recipeHash = hashRecipe(resolvedRecipe.recipe);
   const trust = classifyTrust(resolvedRecipe.recipe);
+  const requiredEnv = [
+    ...(resolvedRecipe.recipe.requires_env || []),
+    ...deriveAuthEnvRequirements(resolvedRecipe.recipe.requires_auth || [], options.currentEnv || process.env),
+  ];
+  const envIntersection = computeRecipeEnvIntersection(requiredEnv, options.envAllow || []).intersection;
   const sourceRoot = resolvedRecipe.recipe._sourceRoot || dirname(resolvedRecipe.sourcePath);
   const sourceRootKind = classifyRecipeSourceRoot(sourceRoot, {
     projectRoot,
@@ -692,6 +698,7 @@ function normalizeRecipeRefStep(step, projectRoot, options = {}) {
     allowUnverified,
     resolvedInputs: inputResult.resolved,
     flaggedInputs,
+    ...(requiredEnv.length > 0 ? { envIntersection } : {}),
     ...(Object.keys(templateInputRefs).length > 0 ? { templateInputs: templateInputRefs } : {}),
     inputContentHashes: collectRecipeInputContentHashes(resolvedRecipe.recipe, inputResult.resolved, {
       cwd: projectRoot,

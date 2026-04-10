@@ -46,6 +46,8 @@ import { createAuditLog } from './audit.js';
 import { resolveInputs, resolveRecipeById } from './recipe-runner.js';
 import { hashRecipe } from './recipe.js';
 import { executeRecipe } from './recipe-executor.js';
+import { preflightRecipeAuthRuntime } from './recipe-supervisor.js';
+import { deriveAuthEnvRequirements } from './adapter-auth.js';
 import { verifyRecipeInputContentHashes } from './prompt-inputs.js';
 import { classifyTrust } from './recipe-channel.js';
 import {
@@ -284,6 +286,7 @@ function loadAndPrepare(definitionPath, trustClass, logger, options = {}) {
   const workflow = normalizeWorkflowDefinition(definition, basePath, {
     recipeSearchDirs: options.recipeSearchDirs,
     allowUnverified: options.allowUnverified,
+    envAllow: options.envAllow,
   });
 
   logger.info('workflow_loaded', { name: workflow.name, entryStep: workflow.entryStep, maxIterations: workflow.maxIterations });
@@ -627,6 +630,7 @@ async function executeRecipeRefStep(stepDef, stepId, ctx, runtimeState) {
     runId,
     workflowHash,
     stateDir,
+    authCheckFn,
   } = ctx;
 
   const inputHashCheck = verifyRecipeInputContentHashes(stepDef.recipeRef?.inputContentHashes);
@@ -707,6 +711,28 @@ async function executeRecipeRefStep(stepDef, stepId, ctx, runtimeState) {
     return { outcome: 'validation_failed', terminalReason: `Recipe input validation failed for step "${stepId}": ${err.message}` };
   }
 
+  const recipeRuntime = await preflightRecipeAuthRuntime({
+    recipe: resolvedRecipe.recipe,
+    envAllow: [
+      ...(resolvedRecipe.recipe.requires_env || []),
+      ...deriveAuthEnvRequirements(resolvedRecipe.recipe.requires_auth || []),
+    ],
+    cwd: workflow.projectRoot,
+    authCheckFn,
+  });
+  if (!recipeRuntime.ok) {
+    logger.warn('recipe_ref_auth_preflight_failed', {
+      stepId,
+      code: recipeRuntime.code,
+      reason: recipeRuntime.reason,
+    });
+    return {
+      outcome: 'failure',
+      finalStatus: 'policy_violation',
+      terminalReason: `Recipe auth preflight failed for step "${stepId}": ${recipeRuntime.reason}`,
+    };
+  }
+
   const execution = await executeRecipe(resolvedRecipe.recipe, recipeInputs, {
     allowUnverified: stepDef.recipeRef.allowUnverified ?? false,
     cwd: workflow.projectRoot,
@@ -715,6 +741,7 @@ async function executeRecipeRefStep(stepDef, stepId, ctx, runtimeState) {
     traceId: runId,
     auditLog,
     manifestHash: workflowHash,
+    envAllow: recipeRuntime.envIntersection?.intersection ?? [],
   });
 
   if (execution.status === 'success') {
@@ -857,7 +884,7 @@ async function executeRollbackSteps(rollbackSteps, logger, jsonOutput) {
 
 async function executeWorkflow(workflow, {
   serviceRegistry, logger, jsonOutput, state, recipeSearchDirs,
-  auditLog, runId, workflowHash, stateDir, progressSink,
+  auditLog, runId, workflowHash, stateDir, progressSink, authCheckFn,
 }) {
   const stepMap = indexById(workflow.steps);
   const totalSteps = workflow.steps.length;
@@ -902,6 +929,7 @@ async function executeWorkflow(workflow, {
     if (!jsonOutput) printStepProgress(`[step ${stepsExecuted}/${totalSteps}] ${currentStep}`, stepDef.type, 'running');
 
     let outcome = 'success';
+    let forcedFinalStatus = null;
 
     // Dispatch by step type
     const isServiceStep = ['service_start', 'service_stop', 'service_restart'].includes(stepDef.type);
@@ -912,9 +940,10 @@ async function executeWorkflow(workflow, {
       outcome = svcResult.outcome;
     } else if (stepDef.type === 'recipe_ref') {
       const recipeResult = await executeRecipeRefStep(stepDef, currentStep, {
-        logger, workflow, recipeSearchDirs, auditLog, runId, workflowHash, stateDir,
+        logger, workflow, recipeSearchDirs, auditLog, runId, workflowHash, stateDir, authCheckFn,
       }, runtimeState);
       outcome = recipeResult.outcome;
+      forcedFinalStatus = recipeResult.finalStatus ?? null;
       if (recipeResult.terminalReason) terminalReason = recipeResult.terminalReason;
     } else if (stepDef.type === 'task') {
       const argsResult = resolveTaskArgs(stepDef.run.args, runtimeState);
@@ -970,6 +999,20 @@ async function executeWorkflow(workflow, {
       printStepProgress(`[step ${stepsExecuted}/${totalSteps}] ${currentStep}`, stepDef.type, 'done');
     } else if (!jsonOutput) {
       printStepProgress(`[step ${stepsExecuted}/${totalSteps}] ${currentStep}`, stepDef.type, 'failed');
+    }
+
+    if (forcedFinalStatus) {
+      failedStep = currentStep;
+      finalStatus = forcedFinalStatus;
+      terminalReason = terminalReason || `Step "${currentStep}" failed`;
+      emitProgress(progressSink, runId, 'step_blocked', {
+        stepId: currentStep,
+        stepType: stepDef.type,
+        message: terminalReason,
+        attempt: iteration,
+      });
+      logger.warn('workflow_step_policy_violation', { stepId: currentStep, finalStatus, terminalReason });
+      break;
     }
 
     // I-W4: Non-idempotent step failure forces rollback and abort
@@ -1066,6 +1109,7 @@ export async function runWorkflowSupervisor(options) {
       prepared = loadAndPrepare(definitionPath, trustClass, logger, {
         allowUnverified,
         recipeSearchDirs: options.recipeSearchDirs,
+        envAllow: options.envAllow,
       });
     } catch (err) {
       logger.error('definition_load_error', { path: definitionPath, error: err.message });
@@ -1206,7 +1250,7 @@ export async function runWorkflowSupervisor(options) {
 
     const execResult = await executeWorkflow(workflow, {
       serviceRegistry, logger, jsonOutput, state, recipeSearchDirs, auditLog, runId, workflowHash, stateDir,
-      progressSink,
+      progressSink, authCheckFn: options.authCheckFn,
     });
 
     resultOpts.attempt = execResult.stepsExecuted;

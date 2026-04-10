@@ -254,6 +254,7 @@ node src/cli.js recipe install recipes/<recipe-id>.recipe.json
 - Recipe availability is separate from approval reuse. If the recipe resolves but `.guardrail/recipes/<recipe-id>.approved.json` does not exist for the current repo, stop and run an interactive Guardrail approval instead of searching for another install path.
 - Workflow manifests under `.guardrail/workflows/*.approved.json` do not satisfy standalone recipe mode. For `run --recipe`, only the matching recipe manifest under `.guardrail/recipes/` counts.
 - Standalone `run --recipe` can now declare `requires_env` and bounded `requires_auth`. When a recipe does, pass the matching vars with repeated `--env-allow` flags and treat that env contract as part of approval drift.
+- Workflow `recipe_ref` steps now honor the same bounded auth/runtime contract as standalone recipe mode. Guardrail preflights declared `requires_auth` before the child recipe launches, passes the recipe's declared env requirements through the workflow execution contract, and stops with `missing_auth_prerequisite` instead of letting the downstream tool die late.
 - Recipe-mode `requires_auth` now fails before launch with `missing_auth_prerequisite` instead of letting the downstream tool die late. Do not go hunting for adapter-only auth flags when a recipe run blocks on that reason; fix auth in the selected runtime and rerun the same approved recipe.
 
 AI execution recipes:
@@ -490,7 +491,7 @@ Bounded auth preflight behavior:
 - The same env/auth preflight applies to `adapter probe` before the MCP stdio transport is launched. If the probe blocks on `missing_auth_mapping` or `missing_auth_prerequisite`, fix the runtime and rerun the probe; do not assume the probe can bypass adapter auth requirements.
 - Auth preflight returns blocked status and stops. It does not log the agent in for you; authentication must already exist in the same runtime (`claude auth login` / `gh auth status/login`).
 - Explicit env mapping may still be insufficient for CLIs whose login state lives in OS-managed secure stores or other process-identity-gated locations. In those cases the practical fix is to run Guardrail from the same working launcher/runtime, or to redo login from the exact shell/runtime that will later launch Guardrail.
-- The same bounded `requires_env` / `requires_auth` preflight now applies to standalone recipe mode too. For composed host-runtime recipes, env mapping is checked before launch and the child tool-auth preflight runs again inside the selected host runtime before the downstream CLI starts.
+- The same bounded `requires_env` / `requires_auth` preflight now applies to standalone recipe mode and workflow `recipe_ref` execution too. For composed host-runtime recipes, env mapping is checked before launch and the child tool-auth preflight runs again inside the selected host runtime before the downstream CLI starts.
 - MCP protocol profiles are intentionally blocked for `adapter run` in v0.2. Use `adapter probe` for bounded discovery or `adapter mcp call` for one explicit `tools/call`; do not reinterpret arbitrary shell commands as MCP requests.
 - Bare-name adapter-profile install is still intentionally blocked. The only shipped A1 groundwork is signed-index verification through `adapter profile index verify <path> --index-key <pubkey.pem>`, which is for local/team validation of index publishing rather than public-name discovery.
 
@@ -668,6 +669,7 @@ Recipe resolution inside workflows follows the same rules as standalone recipe m
 - `recipe: "name@1.2.3"` uses that exact available version from the recipe search dirs or fails.
 - `recipe: "name"` resolves the latest available version from the recipe search dirs at approval time.
 - The approved workflow pins the resolved recipe version and recipe hash. If the referenced recipe later changes, Guardrail treats that as workflow drift and stops for re-approval.
+- Workflow `recipe_ref` now carries the same bounded recipe auth/runtime preflight as standalone recipe mode. If the referenced recipe declares `requires_auth`, Guardrail checks that before the child recipe launches and fails closed with `missing_auth_prerequisite` when the workflow runtime is not ready.
 
 For the first pass, use the smallest real route set:
 

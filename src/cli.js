@@ -1972,6 +1972,7 @@ async function main() {
       def = loadWorkflowDefinition(parsed.definition);
       normalizeWorkflowDefinition(def, dirname(resolve(parsed.definition)), {
         recipeSearchDirs: parsed.recipeSearchDirs,
+        envAllow: parsed.envAllow,
       });
     } catch (err) {
       console.error(err.message);
@@ -2024,6 +2025,7 @@ async function main() {
       jsonOutput: parsed.json || parsed.jsonStream,
       trustClass: parsed.trust,
       recipeSearchDirs: parsed.recipeSearchDirs,
+      envAllow: parsed.envAllow,
       allowUnverified: parsed.allowUnverified || false,
       progressSink: parsed.jsonStream ? (event) => process.stdout.write(`${JSON.stringify(event)}\n`) : null,
     });
