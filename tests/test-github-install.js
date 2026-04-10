@@ -225,6 +225,52 @@ describe('installFromGitHub', () => {
     );
   });
 
+  it('rejects org-policy blocked source even if trusted_sources allows it', async () => {
+    const recipe = makeValidRecipe();
+    const configPath = makeConfigFile(['github://guardrail-dev/recipes/']);
+    const registryDir = join(tempDir, 'recipes');
+
+    await assert.rejects(
+      () => installFromGitHub(source, {
+        configPath,
+        registryDir,
+        loadRemoteRecipe: async () => recipe,
+        orgPolicy: {
+          name: 'exec-policy',
+          version: '1.0.0',
+          trusted_execution_sources: ['github://other-org/'],
+          forbidden_operations: [],
+          required_approvals: [],
+          allowed_actions: [],
+        },
+      }),
+      /not in trusted execution sources/,
+    );
+  });
+
+  it('allows org-policy trusted execution source', async () => {
+    const recipe = makeValidRecipe();
+    const configPath = makeConfigFile(['github://guardrail-dev/recipes/']);
+    const registryDir = join(tempDir, 'recipes');
+
+    const result = await installFromGitHub(source, {
+      configPath,
+      registryDir,
+      loadRemoteRecipe: async () => recipe,
+      orgPolicy: {
+        name: 'exec-policy',
+        version: '1.0.0',
+        trusted_execution_sources: ['github://guardrail-dev/'],
+        forbidden_operations: [],
+        required_approvals: [],
+        allowed_actions: [],
+      },
+    });
+
+    assert.equal(result.installed, true);
+    assert.equal(result.id, 'test-recipe');
+  });
+
   it('rejects when no trusted_sources configured', async () => {
     const configPath = makeConfigFile([]);
     const registryDir = join(tempDir, 'recipes');

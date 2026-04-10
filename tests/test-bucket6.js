@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 
 import { validateSharedManifest, createSharedManifest, hashSharedManifest, saveSharedManifest, loadSharedManifest, syncManifest, pinManifest, loadPin } from '../src/shared-manifest.js';
 import { createApprovalRequest, approveRequest, rejectRequest, requestChanges, saveRequest, loadRequest, listRequests, createApprovalChain, isChainComplete, currentStage, formatRequest } from '../src/approval-queue.js';
-import { validateOrgPolicy, enforceOrgPolicy, resolveHierarchy } from '../src/org-policy.js';
+import { validateOrgPolicy, enforceOrgPolicy, resolveHierarchy, isTrustedRecipeRoot, isTrustedExecutionSource } from '../src/org-policy.js';
 import { createUser, hasPermission, enforcePermission, rolePermissions, ROLES, PERMISSIONS } from '../src/rbac.js';
 import { createKeyStore } from '../src/key-management.js';
 import { createNotifier, NOTIFY_EVENTS } from '../src/notifications.js';
@@ -154,6 +154,22 @@ describe('Bucket 6: Org Policy Engine', () => {
     const effective = resolveHierarchy(org, team, null);
     assert.ok(effective.forbidden_operations.includes('rm'));
     assert.ok(effective.forbidden_operations.includes('sudo'));
+  });
+
+  it('validates trusted execution allowlists', () => {
+    const policy = {
+      trusted_execution_sources: ['github://guardrail-dev/recipes/', 'https://my.artifacts/'],
+    };
+    assert.equal(isTrustedExecutionSource('github://guardrail-dev/recipes/open-pr.json@abc', policy), true);
+    assert.equal(isTrustedExecutionSource('https://other.dev/thing', policy), false);
+  });
+
+  it('respects trusted recipe root boundaries', () => {
+    const policy = {
+      trusted_recipe_roots: ['/tmp/project/shared-recipes'],
+    };
+    assert.equal(isTrustedRecipeRoot('/tmp/project/shared-recipes', policy, '/tmp/project'), true);
+    assert.equal(isTrustedRecipeRoot('/tmp/project/blocked/recipes', policy, '/tmp/project'), false);
   });
 });
 

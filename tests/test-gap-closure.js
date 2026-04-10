@@ -169,6 +169,66 @@ describe('Recipe Runner: resolveRecipeById', () => {
     assert.ok(sourcePath.endsWith('configured-standalone.recipe.json'));
   });
 
+  it('allows repo-configured recipe roots when org policy trusts them', () => {
+    const base = mkdtempSync(join(tmpdir(), 'gr-config-roots-policy-'));
+    const project = join(base, 'project');
+    const repoExtra = join(base, 'shared-recipes');
+    const repoConfigPath = join(project, '.guardrail', 'config.json');
+
+    mkdirSync(join(project, '.guardrail'), { recursive: true });
+    mkdirSync(repoExtra, { recursive: true });
+    writeFileSync(repoConfigPath, JSON.stringify({ recipe_roots: [repoExtra] }));
+    writeRecipe(repoExtra, makeRecipe({ id: 'policy-allow-root' }));
+
+    const roots = buildRecipeSearchDirs({
+      projectRoot: project,
+      basePath: base,
+      includeDefaults: false,
+      repoConfigPath,
+      userConfigPath: false,
+      orgPolicy: {
+        name: 'policy-allow',
+        version: '1.0.0',
+        trusted_recipe_roots: [repoExtra],
+        forbidden_operations: [],
+        required_approvals: [],
+        allowed_actions: [],
+      },
+    });
+
+    assert.ok(roots.includes(resolve(repoExtra)));
+  });
+
+  it('blocks repo-configured recipe roots when org policy blocks them', () => {
+    const base = mkdtempSync(join(tmpdir(), 'gr-config-roots-policy-block-'));
+    const project = join(base, 'project');
+    const repoExtra = join(base, 'shared-recipes');
+    const repoConfigPath = join(project, '.guardrail', 'config.json');
+
+    mkdirSync(join(project, '.guardrail'), { recursive: true });
+    mkdirSync(repoExtra, { recursive: true });
+    writeFileSync(repoConfigPath, JSON.stringify({ recipe_roots: ['../shared-recipes'] }));
+
+    assert.throws(
+      () => buildRecipeSearchDirs({
+        projectRoot: project,
+        basePath: base,
+        includeDefaults: false,
+        repoConfigPath,
+        userConfigPath: false,
+        orgPolicy: {
+          name: 'policy-block',
+          version: '1.0.0',
+          trusted_recipe_roots: ['/tmp/blocked-recipes'],
+          forbidden_operations: [],
+          required_approvals: [],
+          allowed_actions: [],
+        },
+      }),
+      /blocked by org policy/,
+    );
+  });
+
   it('fails closed on configured missing recipe roots', () => {
     const base = mkdtempSync(join(tmpdir(), 'gr-bad-config-roots-'));
     const project = join(base, 'project');

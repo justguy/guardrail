@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Org Policy Engine — org-wide enforcement that overrides local settings
@@ -12,6 +12,8 @@ import { join, resolve } from 'node:path';
  * @property {string[]} allowed_actions
  * @property {string[]} forbidden_operations
  * @property {string[]} required_approvals
+ * @property {string[]} trusted_recipe_roots
+ * @property {string[]} trusted_execution_sources
  * @property {boolean} overrides_local - Always true for org policies.
  */
 
@@ -21,6 +23,8 @@ export function validateOrgPolicy(policy) {
   if (typeof policy.version !== 'string') errors.push('version required');
   if (!Array.isArray(policy.forbidden_operations)) errors.push('forbidden_operations must be an array');
   if (!Array.isArray(policy.required_approvals)) errors.push('required_approvals must be an array');
+  if (!Array.isArray(policy.trusted_recipe_roots || [])) errors.push('trusted_recipe_roots must be an array');
+  if (!Array.isArray(policy.trusted_execution_sources || [])) errors.push('trusted_execution_sources must be an array');
   return errors;
 }
 
@@ -85,6 +89,16 @@ export function resolveHierarchy(orgPolicy, teamPolicy, userPolicy) {
         ...(userPolicy?.required_approvals ?? []),
       ]),
     ],
+    trusted_recipe_roots: [
+      ...(orgPolicy?.trusted_recipe_roots ?? []),
+      ...(teamPolicy?.trusted_recipe_roots ?? []),
+      ...(userPolicy?.trusted_recipe_roots ?? []),
+    ],
+    trusted_execution_sources: [
+      ...(orgPolicy?.trusted_execution_sources ?? []),
+      ...(teamPolicy?.trusted_execution_sources ?? []),
+      ...(userPolicy?.trusted_execution_sources ?? []),
+    ],
     source: orgPolicy ? 'org' : teamPolicy ? 'team' : 'user',
   };
 
@@ -92,8 +106,41 @@ export function resolveHierarchy(orgPolicy, teamPolicy, userPolicy) {
   if (orgPolicy?.allowed_actions?.length > 0) {
     effective.allowed_actions = orgPolicy.allowed_actions;
   }
+  if (orgPolicy?.trusted_recipe_roots?.length > 0) {
+    effective.trusted_recipe_roots = orgPolicy.trusted_recipe_roots;
+  }
+  if (orgPolicy?.trusted_execution_sources?.length > 0) {
+    effective.trusted_execution_sources = orgPolicy.trusted_execution_sources;
+  }
 
   return effective;
+}
+
+// ---------------------------------------------------------------------------
+// Targeted trust boundaries
+// ---------------------------------------------------------------------------
+
+export function isTrustedRecipeRoot(rootPath, orgPolicy, baseDir = process.cwd()) {
+  const policyRoots = orgPolicy?.trusted_recipe_roots;
+  if (!Array.isArray(policyRoots) || policyRoots.length === 0) return true;
+
+  const normalizedCandidate = resolve(rootPath);
+  return policyRoots.some(rawRoot => {
+    if (typeof rawRoot !== 'string' || rawRoot.trim().length === 0) return false;
+    const normalizedPolicyRoot = resolve(baseDir, rawRoot);
+    return normalizedCandidate === normalizedPolicyRoot
+      || normalizedCandidate.startsWith(`${normalizedPolicyRoot}${sep}`);
+  });
+}
+
+export function isTrustedExecutionSource(source, orgPolicy) {
+  const policySources = orgPolicy?.trusted_execution_sources;
+  if (!Array.isArray(policySources) || policySources.length === 0) return true;
+  return policySources.some(rawSource => (
+    typeof rawSource === 'string'
+    && rawSource.length > 0
+    && source.startsWith(rawSource)
+  ));
 }
 
 // ---------------------------------------------------------------------------
@@ -112,4 +159,12 @@ export function loadOrgPolicy(name, dir) {
   const path = join(resolve(dir, '.guardrail', 'org-policies'), `${name}.json`);
   if (!existsSync(path)) return null;
   return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+export function loadEffectiveOrgPolicy(dir) {
+  const directPath = join(resolve(dir, '.guardrail'), 'org-policy.json');
+  if (existsSync(directPath)) {
+    return JSON.parse(readFileSync(directPath, 'utf8'));
+  }
+  return loadOrgPolicy('default', dir);
 }

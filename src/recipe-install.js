@@ -387,6 +387,7 @@ export function pinPathForRecipePath(recipePath) {
  */
 export async function installFromGitHub(source, opts = {}) {
   const config = loadConfig(opts.configPath);
+  const policy = getOrgPolicyFromOpts(opts);
   const configPath = opts.configPath || resolve(homedir(), '.guardrail', 'config.json');
 
   if (!config.trusted_sources || config.trusted_sources.length === 0) {
@@ -399,6 +400,13 @@ export async function installFromGitHub(source, opts = {}) {
     throw new Error(
       `Source "${source}" is not in trusted sources.\n` +
       `Add a matching prefix to ${configPath}.`
+    );
+  }
+  if (!isTrustedExecutionSource(source, policy)) {
+    const policyLabel = policy?.name || 'active';
+    throw new Error(
+      `Source "${source}" is not in trusted execution sources for org policy "${policyLabel}".` +
+      ` Add trusted_execution_sources to this policy.`
     );
   }
 

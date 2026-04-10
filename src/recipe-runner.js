@@ -11,6 +11,7 @@ import { hashRecipe, loadRemoteRecipe } from './recipe.js';
 import { validateInputValue, inferApprovalMode } from './input-validator.js';
 import { classifyBucket, summarizeCapabilities, escalateTraits } from './risk-traits.js';
 import { loadConfig, pinPathForRecipePath, loadGitHubRecipeFromApi } from './recipe-install.js';
+import { loadOrgPolicy, isTrustedRecipeRoot } from './org-policy.js';
 
 // ---------------------------------------------------------------------------
 // Canonical search directory builders
@@ -40,6 +41,9 @@ export function loadConfiguredRecipeRoots({
   basePath = process.cwd(),
   repoConfigPath = null,
   userConfigPath = null,
+  orgPolicy = null,
+  orgPolicyName = null,
+  orgPolicyDir = null,
 } = {}) {
   const repoRoots = [];
   const userRoots = [];
@@ -50,14 +54,19 @@ export function loadConfiguredRecipeRoots({
   const effectiveUserConfigPath = userConfigPath === false
     ? null
     : (userConfigPath || resolve(homedir(), '.guardrail', 'config.json'));
+  const policy = orgPolicy
+    || (orgPolicyName ? loadOrgPolicy(orgPolicyName, orgPolicyDir || repoBase) : null);
 
   if (effectiveRepoConfigPath && existsSync(effectiveRepoConfigPath)) {
     const repoConfig = loadConfig(effectiveRepoConfigPath, { strict: true });
     const repoConfiguredRoots = repoConfig.default_recipe_roots || repoConfig.recipe_roots || [];
     for (const root of repoConfiguredRoots) {
-      repoRoots.push(
-        normalizeConfiguredRecipeRoot(root, repoBase, `repo config ${effectiveRepoConfigPath}`),
-      );
+      const normalized = normalizeConfiguredRecipeRoot(root, repoBase, `repo config ${effectiveRepoConfigPath}`);
+      if (!isTrustedRecipeRoot(normalized, policy, repoBase)) {
+        const policyLabel = policy?.name || 'active';
+        throw new Error(`Configured recipe root "${root}" is blocked by org policy "${policyLabel}".`);
+      }
+      repoRoots.push(normalized);
     }
   }
 
@@ -65,9 +74,12 @@ export function loadConfiguredRecipeRoots({
     const userConfig = loadConfig(effectiveUserConfigPath, { strict: true });
     const userConfiguredRoots = userConfig.default_recipe_roots || userConfig.recipe_roots || [];
     for (const root of userConfiguredRoots) {
-      userRoots.push(
-        normalizeConfiguredRecipeRoot(root, homedir(), `user config ${effectiveUserConfigPath}`),
-      );
+      const normalized = normalizeConfiguredRecipeRoot(root, homedir(), `user config ${effectiveUserConfigPath}`);
+      if (!isTrustedRecipeRoot(normalized, policy, homedir())) {
+        const policyLabel = policy?.name || 'active';
+        throw new Error(`Configured recipe root "${root}" is blocked by org policy "${policyLabel}".`);
+      }
+      userRoots.push(normalized);
     }
   }
 
@@ -81,12 +93,18 @@ export function buildRecipeSearchDirs({
   includeDefaults = true,
   repoConfigPath = null,
   userConfigPath = null,
+  orgPolicy = null,
+  orgPolicyName = null,
+  orgPolicyDir = null,
 } = {}) {
   const { repoRoots, userRoots } = loadConfiguredRecipeRoots({
     projectRoot,
     basePath,
     repoConfigPath,
     userConfigPath,
+    orgPolicy,
+    orgPolicyName,
+    orgPolicyDir,
   });
   const candidates = [
     ...(explicitSearchDirs || []),
