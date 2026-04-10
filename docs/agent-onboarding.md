@@ -273,6 +273,7 @@ AI execution recipes:
 - `lane send` is the per-message step. It reads the host-side key through the Guardrail CLI, signs the request, writes the strict JSON payload into the lane FIFO, and reads the matching response back without reopening the outer transport/runtime hop.
 - `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
 - `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is alive, expired, stale, or stopped and tells you the safest next action (`send`, `start`, or `cleanup`).
+- Resident lane CLI actions also append lifecycle entries to the repo audit log: `lane_start`, `lane_send`, and `lane_stop`. Use `.guardrail/audit.jsonl` when you need to reconstruct whether a lane was started, reused, expired, or explicitly torn down.
 - The resident FIFO bridge is intentionally narrow:
   - request schema is exactly `{ "id": "...", "prompt": "..." }`
   - request ids are bounded and pattern-checked

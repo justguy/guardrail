@@ -19,6 +19,7 @@ import { evaluateWorkflowRisk } from '../src/policy-engine.js';
 import { signRecipe } from '../src/recipe-channel.js';
 import { saveManifest } from '../src/manifest.js';
 import { runAdapter } from '../src/adapter-engine.js';
+import { queryAuditLog } from '../src/audit.js';
 
 const CLI = `node ${join(process.cwd(), 'src', 'cli.js')}`;
 
@@ -446,26 +447,36 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
     const keyPath = join(dir, 'lane.key');
     writeFileSync(keyPath, 'secret\n', 'utf8');
-    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
-      pid: process.pid,
-      status: 'ready',
-      laneId: 'math-live',
-      sessionName: 'math-live',
-      keyPath,
-      lastActivityAt: new Date().toISOString(),
-    }), 'utf8');
+    const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], {
+      stdio: 'ignore',
+    });
 
-    const r = run(`${CLI} lane status --lane-dir ${laneDir} --key-path ${keyPath} --json`);
-    assert.equal(r.exitCode, 0);
-    const parsed = JSON.parse(r.stdout);
-    assert.equal(parsed.status, 'ready');
-    assert.equal(parsed.alive, true);
-    assert.equal(parsed.recommendedAction, 'send');
+    try {
+      writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+        pid: sleeper.pid,
+        status: 'ready',
+        laneId: 'math-live',
+        sessionName: 'math-live',
+        keyPath,
+        lastActivityAt: new Date().toISOString(),
+      }), 'utf8');
+
+      const r = run(`${CLI} lane status --lane-dir ${laneDir} --key-path ${keyPath} --json`);
+      assert.equal(r.exitCode, 0);
+      const parsed = JSON.parse(r.stdout);
+      assert.equal(parsed.status, 'ready');
+      assert.equal(parsed.alive, true);
+      assert.equal(parsed.recommendedAction, 'send');
+    } finally {
+      sleeper.kill('SIGTERM');
+    }
   });
 
   it('guardrail lane send writes one prompt through a resident lane FIFO', async () => {
     const dir = tmpDir();
+    const guardrailRepo = join(dir, 'repo');
     const laneDir = join(dir, 'lane');
+    mkdirSync(join(guardrailRepo, '.guardrail'), { recursive: true });
     mkdirSync(laneDir, { recursive: true });
     const requestFifo = join(laneDir, 'requests.fifo');
     const responseFifo = join(laneDir, 'responses.fifo');
@@ -505,6 +516,7 @@ describe('README Feature: Resident Lane Mode', () => {
       const child = spawn('node', [
         join(process.cwd(), 'src', 'cli.js'),
         'lane', 'send',
+        '--guardrail-repo', guardrailRepo,
         '--lane-dir', laneDir,
         '--prompt', '2x3=?',
       ], {
@@ -533,6 +545,11 @@ describe('README Feature: Resident Lane Mode', () => {
       const [result] = await Promise.all([laneSend, laneServer]);
       assert.equal(result.exitCode, 0, `lane send should succeed: ${result.stderr}`);
       assert.equal(result.stdout, '6');
+      const entries = queryAuditLog(join(guardrailRepo, '.guardrail', 'audit.jsonl'), {});
+      const laneSendEntry = entries.find((entry) => entry.event === 'lane_send');
+      assert.ok(laneSendEntry, 'expected lane_send audit entry');
+      assert.equal(laneSendEntry.status, 'success');
+      assert.equal(laneSendEntry.trace_id, 'lane:resident');
     } finally {
       closeSync(requestFd);
       closeSync(responseFd);
@@ -569,6 +586,32 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.status, 'expired');
     assert.equal(parsed.alive, false);
     assert.equal(parsed.recommendedAction, 'start');
+  });
+
+  it('guardrail lane stop appends an audit entry and removes the host key', () => {
+    const dir = tmpDir();
+    const guardrailRepo = join(dir, 'repo');
+    const laneDir = join(dir, 'lane');
+    mkdirSync(join(guardrailRepo, '.guardrail'), { recursive: true });
+    mkdirSync(laneDir, { recursive: true });
+    const keyPath = join(dir, 'lane.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: 999999,
+      status: 'ready',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      keyPath,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane stop --guardrail-repo ${guardrailRepo} --lane-dir ${laneDir} --key-path ${keyPath}`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.equal(existsSync(keyPath), false);
+    const entries = queryAuditLog(join(guardrailRepo, '.guardrail', 'audit.jsonl'), {});
+    const laneStopEntry = entries.find((entry) => entry.event === 'lane_stop');
+    assert.ok(laneStopEntry, 'expected lane_stop audit entry');
+    assert.equal(laneStopEntry.status, 'success');
   });
 });
 

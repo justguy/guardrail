@@ -239,6 +239,7 @@ Resident lanes are for direct interactive use when the executable boundary shoul
 - rejects duplicate request ids inside the active lane window to make signed FIFO sends one-shot
 - enforces prompt and payload size limits
 - expires after idle timeout, removes its key/FIFOs, and records lane state under `.guardrail/lanes/<name>/state.json`
+- appends `lane_start`, `lane_send`, and `lane_stop` lifecycle entries to `.guardrail/audit.jsonl` so later ops review can distinguish lane creation, message traffic, expiry, and explicit teardown
 
 Lane startup still has to happen in a runtime where the downstream CLI auth already works. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again.
 Use `lane status` when you need to tell the difference between an alive lane, an expired lane, and stale leftover artifacts before deciding whether to send, restart, or clean up.

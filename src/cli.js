@@ -63,6 +63,25 @@ function isLikelyLaneAlive(laneDir) {
   }
 }
 
+async function appendLaneAuditEntry(laneOpts, event, details = {}) {
+  try {
+    const { createAuditLog } = await import('./audit.js');
+    const guardrailRepo = resolve(laneOpts.guardrailRepo || '.');
+    const auditLog = createAuditLog(resolve(guardrailRepo, '.guardrail', 'audit.jsonl'));
+    auditLog.append({
+      event,
+      trace_id: `lane:${laneOpts.laneId || laneOpts.sessionName || 'resident'}`,
+      lane_id: laneOpts.laneId || null,
+      lane_dir: laneOpts.laneDir || null,
+      session_name: laneOpts.sessionName || null,
+      session_id: laneOpts.sessionId || null,
+      ...details,
+    });
+  } catch {
+    // Best effort: lane execution must not fail solely because audit append failed.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Usage
 // ---------------------------------------------------------------------------
@@ -1052,6 +1071,12 @@ async function main() {
     } finally {
       if (keyFd !== null) closeSync(keyFd);
     }
+    await appendLaneAuditEntry(laneOpts, 'lane_start', {
+      reused: !!summary.reused,
+      pid: summary.pid ?? null,
+      auth_mode: summary.authMode ?? 'none',
+      status: 'success',
+    });
     if (parsed.json) {
       console.log(JSON.stringify(summary, null, 2));
     } else {
@@ -1087,6 +1112,11 @@ async function main() {
         reason: 'lane_expired',
         message: 'The resident lane has idled out. Run `guardrail lane start` to initialize a new session.',
       };
+      await appendLaneAuditEntry(laneOpts, 'lane_send', {
+        request_id: laneOpts.requestId || null,
+        status: 'error',
+        reason: expired.reason,
+      });
       if (parsed.json) {
         console.log(JSON.stringify(expired, null, 2));
       } else {
@@ -1120,6 +1150,13 @@ async function main() {
       if (keyFd !== null) closeSync(keyFd);
     }
 
+    await appendLaneAuditEntry(laneOpts, 'lane_send', {
+      request_id: requestId,
+      status: response.ok ? 'success' : 'error',
+      reason: response.reason || response.error || null,
+      exit_code: response.exitCode ?? null,
+    });
+
     if (parsed.json) {
       console.log(JSON.stringify(response, null, 2));
     } else if (response.ok) {
@@ -1146,6 +1183,10 @@ async function main() {
         if (err?.code !== 'ENOENT') throw err;
       }
     }
+    await appendLaneAuditEntry(laneOpts, 'lane_stop', {
+      status: result.stopped ? 'success' : 'error',
+      stopped: !!result.stopped,
+    });
     if (parsed.json) {
       console.log(JSON.stringify(result, null, 2));
     } else {
