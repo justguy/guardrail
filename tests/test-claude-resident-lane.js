@@ -198,6 +198,48 @@ describe('Claude resident lane', () => {
     assert.match(status.failureReason, /bootstrap/);
   });
 
+  it('fails lane startup when the daemon dies in the immediate post-start window', async () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    const fakeChild = new EventEmitter();
+    fakeChild.pid = 434343;
+    fakeChild.unref = () => {};
+    let alive = true;
+    setTimeout(() => {
+      alive = false;
+      fakeChild.emit('exit', 1, null);
+    }, 500);
+
+    await assert.rejects(
+      launchResidentLane({
+        laneDir,
+        guardrailRepo: dir,
+        workingDir: dir,
+        sessionName: 'math-live-session',
+      }, {
+        spawnProcess: () => fakeChild,
+        waitForBootstrap: waitForResidentLaneBootstrap,
+        waitForBootstrapDeps: {
+          timeoutMs: 2000,
+          postStartGraceMs: 800,
+          isAlive: () => alive,
+          readState: () => ({
+            pid: fakeChild.pid,
+            status: 'ready',
+            sessionName: 'math-live-session',
+            lastActivityAt: new Date().toISOString(),
+          }),
+          readLogTail: () => 'post-start crashed',
+        },
+      }),
+      (err) => err?.code === 'LANE_BOOT_FAILED' && err?.details?.failureStage === 'post_start',
+    );
+
+    const status = getResidentLaneStatus({ laneDir, guardrailRepo: dir });
+    assert.equal(status.status, 'failed');
+    assert.equal(status.failureStage, 'post_start');
+  });
+
   it('sends a prompt over the resident lane FIFOs', async () => {
     const dir = tmpLaneDir();
     const laneDir = join(dir, '.guardrail', 'lanes', 'math');

@@ -303,7 +303,7 @@ AI execution recipes:
 - If a request outlives the client-side wait window, `lane send` now returns a structured `pending` result with the request id instead of reporting `lane_expired`. Treat that as “the lane accepted the request and it is still running,” not as proof that Claude failed.
 - `lane result` is the bounded recovery/read step for those cases. Use it to fetch the stored output for the latest or named request after a long-running turn completes.
 - `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
-- `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is ready, busy, failed, expired, stale, or stopped, includes the current request id/start time plus the last completed result path, and surfaces `failureReason`, `failureStage`, and `logPath` when bootstrap or runtime startup failed.
+- `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is ready, busy, failed, expired, stale, or stopped, includes the current request id/start time plus the last completed result path, and surfaces `failureReason`, `failureStage`, and `logPath` when bootstrap, immediate post-start, or runtime startup failed.
 - The practical review-loop shape is:
   - start one approved Claude session with the full planned doc set in `input_files`
   - keep `system_prompt` fixed for the entire loop

@@ -24,6 +24,7 @@ const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 const STARTUP_POLL_INTERVAL_MS = 25;
 const STARTUP_TIMEOUT_MS = 2_000;
 const STARTUP_SETTLE_MS = 150;
+const POST_START_GRACE_MS = 750;
 const MAX_TRACKED_REQUEST_IDS = 1024;
 const MAX_REQUEST_BYTES = 50_000;
 const MAX_PROMPT_CHARS = 32_000;
@@ -527,6 +528,7 @@ async function waitForResidentLaneBootstrap(options, child, deps = {}) {
   const nowFn = deps.now || Date.now;
   const logTailFn = deps.readLogTail || readLogTail;
   const timeoutMs = deps.timeoutMs || STARTUP_TIMEOUT_MS;
+  const postStartGraceMs = deps.postStartGraceMs || POST_START_GRACE_MS;
   const paths = lanePaths(options.laneDir);
   const expectedPid = child?.pid ?? null;
   const exitState = { code: null, signal: null, error: null };
@@ -543,6 +545,7 @@ async function waitForResidentLaneBootstrap(options, child, deps = {}) {
 
   const startedAtMs = nowFn();
   let healthySinceMs = null;
+  let postStartSinceMs = null;
 
   for (;;) {
     const state = readState(paths.statePath);
@@ -570,7 +573,7 @@ async function waitForResidentLaneBootstrap(options, child, deps = {}) {
           statePath: paths.statePath,
           logPath: paths.logPath,
           failureReason: deriveFailureReason(exitState.error),
-          failureStage: 'bootstrap',
+          failureStage: postStartSinceMs === null ? 'bootstrap' : 'post_start',
           logTail,
         },
       );
@@ -585,7 +588,7 @@ async function waitForResidentLaneBootstrap(options, child, deps = {}) {
           statePath: paths.statePath,
           logPath: paths.logPath,
           failureReason: logTail || null,
-          failureStage: 'bootstrap',
+          failureStage: postStartSinceMs === null ? 'bootstrap' : 'post_start',
           exitCode: exitState.code,
           signal: exitState.signal,
         },
@@ -605,10 +608,15 @@ async function waitForResidentLaneBootstrap(options, child, deps = {}) {
       if (healthySinceMs === null) {
         healthySinceMs = nowFn();
       } else if ((nowFn() - healthySinceMs) >= STARTUP_SETTLE_MS) {
-        return state;
+        if (postStartSinceMs === null) {
+          postStartSinceMs = nowFn();
+        } else if ((nowFn() - postStartSinceMs) >= postStartGraceMs) {
+          return state;
+        }
       }
     } else {
       healthySinceMs = null;
+      postStartSinceMs = null;
     }
 
     if ((nowFn() - startedAtMs) >= timeoutMs) {
@@ -620,7 +628,7 @@ async function waitForResidentLaneBootstrap(options, child, deps = {}) {
           statePath: paths.statePath,
           logPath: paths.logPath,
           failureReason: logTail || null,
-          failureStage: 'bootstrap',
+          failureStage: postStartSinceMs === null ? 'bootstrap' : 'post_start',
         },
       );
     }
@@ -899,6 +907,26 @@ async function runResidentLaneDaemon(options) {
   process.once('SIGTERM', () => shutdown('stopped'));
   process.once('uncaughtException', (err) => shutdown('failed', err, 'runtime'));
   process.once('unhandledRejection', (err) => shutdown('failed', err instanceof Error ? err : new Error(String(err)), 'runtime'));
+  process.once('exit', (code) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      cleanupLaneArtifacts(options, 'failed', {
+        lastRequestId: state.lastRequestId,
+        currentRequestId: state.currentRequestId,
+        currentRequestStartedAt: state.currentRequestStartedAt,
+        lastCompletedRequestId: state.lastCompletedRequestId,
+        lastCompletedAt: state.lastCompletedAt,
+        lastExitCode: state.lastExitCode,
+        lastResultPath: state.lastResultPath,
+        failureReason: state.failureReason || `Resident lane daemon exited unexpectedly (code=${code ?? 'null'}).`,
+        failureStage: state.failureStage || (state.startedConversation ? 'runtime' : 'post_start'),
+        createdAt: state.createdAt,
+      });
+    } catch {
+      // Best effort during process exit.
+    }
+  });
 
   try {
     const chunk = Buffer.alloc(4096);
@@ -1049,7 +1077,7 @@ export async function launchResidentLane(rawOptions, deps = {}) {
     const waitForBootstrap = deps.waitForBootstrap || waitForResidentLaneBootstrap;
     await waitForBootstrap(options, child, deps.waitForBootstrapDeps || {});
   } catch (err) {
-    persistLaneFailureState(options, err, 'bootstrap');
+    persistLaneFailureState(options, err, err?.details?.failureStage || 'bootstrap');
     throw err;
   }
   return launchSummary;
