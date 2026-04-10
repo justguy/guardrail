@@ -158,6 +158,10 @@ export async function runAdapterCli(adapterArgv) {
       const code = result?.adapterResult?.guardrail?.code;
       if (code === ADAPTER_REASON_CODES.MCP_BLOCKED) {
         console.error('Error: MCP protocol is not yet supported in v0.2.');
+        const transportType = result?.adapterResult?.guardrail?.reason?.match(/Declared transport: ([^.]+)\./)?.[1];
+        if (transportType) {
+          console.error(`Declared MCP transport: ${transportType}`);
+        }
         console.error('');
         console.error('For Cline integration now, use the env-shim path or install a shim-oriented profile.');
         console.error('See: docs/adapter-implementation-plan.md#mcp-roadmap');

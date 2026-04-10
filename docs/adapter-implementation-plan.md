@@ -740,6 +740,12 @@ Deferred to v0.3:
 - streaming partial tool results
 - structured tool capability discovery
 
+Current partial state:
+
+- MCP profiles may now declare a validated `mcp_transport` contract
+- Guardrail currently accepts `stdio` as the declared transport shape and requires explicit correlation/capability-discovery fields
+- runtime execution is still blocked; the contract is design-gate groundwork, not runnable transport support
+
 ---
 
 ## CLI Surface (`adapter-cli.js`)

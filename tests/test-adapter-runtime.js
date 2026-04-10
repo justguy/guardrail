@@ -246,6 +246,10 @@ describe('MCP block gate', () => {
       result.adapterResult.guardrail.reason.includes('MCP'),
       `expected reason to include 'MCP': ${result.adapterResult.guardrail.reason}`,
     );
+    assert.ok(
+      result.adapterResult.guardrail.reason.includes('Declared transport: stdio.'),
+      `expected reason to include transport contract: ${result.adapterResult.guardrail.reason}`,
+    );
     assert.equal(typeof result.exitCode, 'number');
   });
 
@@ -257,6 +261,14 @@ describe('MCP block gate', () => {
       description: 'generic mcp profile under test',
       schema_target: 'adapter-result/v1',
       protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: 'test-mcp',
+        args: [],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
       intercept: {
         command: '$.command',
         args: '$.args',

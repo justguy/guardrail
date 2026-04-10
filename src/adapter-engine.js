@@ -177,7 +177,11 @@ export async function runAdapter(opts = {}) {
   // 2. MCP gate: structured block that uses the profile's blocked exit_codes
   // mapping. See docs/adapter-implementation-plan.md#mcp-roadmap.
   if (profile.protocol === 'mcp') {
-    const reason = 'MCP protocol is not yet supported in v0.2. '
+    const transportSummary = profile.mcp_transport?.type
+      ? ` Declared transport: ${profile.mcp_transport.type}.`
+      : '';
+    const reason = 'MCP protocol is not yet supported in v0.2.'
+      + transportSummary + ' '
       + 'For Cline integration now, use the env-shim path or install a shim-oriented profile. '
       + 'See docs/adapter-implementation-plan.md#mcp-roadmap';
     return wrapBlocked(ADAPTER_REASON_CODES.MCP_BLOCKED, reason, profile);

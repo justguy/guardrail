@@ -4,6 +4,14 @@
   "schema_target": "adapter-result/v1",
   "version": "1.0.0",
   "description": "Cline adapter profile — MCP protocol for future IDE integration (blocked in v0.2)",
+  "mcp_transport": {
+    "type": "stdio",
+    "command": "cline",
+    "args": [],
+    "correlation": "request_id",
+    "capability_discovery": "required",
+    "streaming": false
+  },
   "intercept": {
     "command": "$.command",
     "args": "$.args",

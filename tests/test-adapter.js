@@ -433,11 +433,37 @@ describe('adapter-profile', async () => {
     assert.equal(result.valid, true);
   });
 
-  it('accepts mcp profile (blocking is in CLI, not validation)', () => {
+  it('accepts mcp profile with declared transport contract (blocking is in CLI, not validation)', () => {
     const profile = loadBundledProfile('cline');
     const result = validateProfile(profile);
     assert.equal(result.valid, true);
     assert.equal(profile.protocol, 'mcp');
+    assert.equal(profile.mcp_transport.type, 'stdio');
+  });
+
+  it('rejects mcp profile without mcp_transport', () => {
+    const profile = makeJsonProfile({ protocol: 'mcp' });
+    delete profile.mcp_transport;
+    const result = validateProfile(profile);
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some((e) => e.includes('requires an mcp_transport object')));
+  });
+
+  it('rejects mcp_transport on non-mcp profiles', () => {
+    const profile = makeJsonProfile({
+      protocol: 'env-shim',
+      mcp_transport: {
+        type: 'stdio',
+        command: 'cline',
+        args: [],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+    });
+    const result = validateProfile(profile);
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some((e) => e.includes('mcp_transport is only valid')));
   });
 
   it('rejects unsupported protocol http', () => {
@@ -945,6 +971,14 @@ describe('MCP gate parity between runAdapter and CLI', async () => {
     const profilePath = writeProfile(dir, makeJsonProfile({
       tool: 'mcp-blocked',
       protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: 'mcp-blocked',
+        args: [],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
       response: {
         format: 'json',
         success: { status: 'success' },
@@ -967,6 +1001,7 @@ describe('MCP gate parity between runAdapter and CLI', async () => {
     assert.equal(result.adapterResult.guardrail.category, 'blocked');
     assert.equal(result.adapterResult.guardrail.code, ADAPTER_REASON_CODES.MCP_BLOCKED);
     assert.match(result.adapterResult.guardrail.reason, /MCP/);
+    assert.match(result.adapterResult.guardrail.reason, /Declared transport: stdio/);
     assert.match(result.adapterResult.guardrail.reason, /mcp-roadmap/);
     // Profile exit_codes.blocked = 12 in makeJsonProfile defaults.
     assert.equal(result.exitCode, 12);
@@ -1012,6 +1047,14 @@ describe('hardened profile validation', async () => {
   it('rejects mcp protocol with defaults.non_interactive: false', () => {
     const profile = makeJsonProfile({
       protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: 'mcp-test',
+        args: [],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
       defaults: { non_interactive: false, json_output: true },
     });
     const r = validateProfile(profile);

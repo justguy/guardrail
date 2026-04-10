@@ -402,6 +402,8 @@ Adapter mode operator rules:
 - Treat the selected adapter profile as the source of truth for protocol, auth requirements, defaults, and response shape. Do not infer adapter behavior from unrelated recipe docs.
 - If adapter mode reports `No approved manifest found. Run interactively to approve.`, that is an approval problem, not a recipe-install problem. Do not switch to `recipe install` or `run --recipe` unless the user explicitly wants a different execution mode.
 - `adapter run` builds on the selected profile and the underlying supervisor contract. If the profile/runtime does not support the interactive approval path you need, stop and report that instead of guessing hidden flags.
+- MCP profiles are still blocked at runtime, but they may now declare an explicit `mcp_transport` contract. Treat that as design-gate metadata only until Guardrail ships actual MCP transport support.
+- If a blocked MCP run mentions a declared transport, that means the profile shape was recognized; it does not mean the MCP runtime is live.
 
 Useful adapter subcommands:
 

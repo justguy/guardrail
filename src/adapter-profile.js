@@ -27,7 +27,7 @@ const DEFERRED_PROTOCOLS = new Set(['http', 'python-callable', 'node-callable'])
 const ALLOWED_TOP_LEVEL = new Set([
   'version', 'tool', 'description', 'schema_target', 'protocol',
   'intercept', 'response', 'exit_codes', 'defaults',
-  'requires_env', 'requires_auth',
+  'requires_env', 'requires_auth', 'mcp_transport',
 ]);
 
 const TOOL_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -35,6 +35,9 @@ const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 const RESPONSE_PREFIX_RE = /^\$\.(guardrail|process|telemetry)\b/;
 const ENV_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
 const MAX_PROFILE_BYTES = 256 * 1024;
+const VALID_MCP_TRANSPORT_TYPES = new Set(['stdio']);
+const VALID_MCP_CORRELATION = new Set(['request_id']);
+const VALID_MCP_CAP_DISCOVERY = new Set(['required']);
 
 // --- Helpers -----------------------------------------------------------------
 
@@ -195,6 +198,45 @@ export function validateProfile(profile) {
     && profile.defaults.non_interactive === false
   ) {
     errors.push('protocol "mcp" cannot declare defaults.non_interactive: false');
+  }
+
+  if (profile.protocol === 'mcp') {
+    if (profile.mcp_transport == null || typeof profile.mcp_transport !== 'object' || Array.isArray(profile.mcp_transport)) {
+      errors.push('protocol "mcp" requires an mcp_transport object');
+    } else {
+      const transport = profile.mcp_transport;
+      if (typeof transport.type !== 'string' || !VALID_MCP_TRANSPORT_TYPES.has(transport.type)) {
+        errors.push(`mcp_transport.type must be one of: ${[...VALID_MCP_TRANSPORT_TYPES].join(', ')}`);
+      }
+      if (typeof transport.command !== 'string' || transport.command.trim() === '') {
+        errors.push('mcp_transport.command must be a non-empty string');
+      }
+      if (transport.args !== undefined) {
+        if (!Array.isArray(transport.args) || !transport.args.every((value) => typeof value === 'string')) {
+          errors.push('mcp_transport.args must be an array of strings when present');
+        }
+      }
+      if (transport.cwd !== undefined && typeof transport.cwd !== 'string') {
+        errors.push('mcp_transport.cwd must be a string when present');
+      }
+      if (
+        typeof transport.correlation !== 'string'
+        || !VALID_MCP_CORRELATION.has(transport.correlation)
+      ) {
+        errors.push(`mcp_transport.correlation must be one of: ${[...VALID_MCP_CORRELATION].join(', ')}`);
+      }
+      if (
+        typeof transport.capability_discovery !== 'string'
+        || !VALID_MCP_CAP_DISCOVERY.has(transport.capability_discovery)
+      ) {
+        errors.push(`mcp_transport.capability_discovery must be one of: ${[...VALID_MCP_CAP_DISCOVERY].join(', ')}`);
+      }
+      if (transport.streaming !== undefined && transport.streaming !== false) {
+        errors.push('mcp_transport.streaming must be false when present');
+      }
+    }
+  } else if (profile.mcp_transport !== undefined) {
+    errors.push('mcp_transport is only valid when protocol is "mcp"');
   }
 
   if (profile.requires_env !== undefined) {

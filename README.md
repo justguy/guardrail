@@ -638,6 +638,11 @@ Guaranteed:
 
 Guardrail includes an **adapter system** for agent tools and local wrappers. The goal is to let tools like OpenClaw and Aider route execution through the same Guardrail enforcement pipeline without scraping terminal output or inventing adapter-specific drift logic.
 
+MCP status:
+- `stdin-json` and `env-shim` are the runnable adapter transports today
+- MCP profiles are recognized and may declare a validated `mcp_transport` contract, but runtime support is still intentionally blocked
+- blocked MCP runs now tell you which transport contract was recognized so users can distinguish “profile is malformed” from “transport exists on paper but is not live yet”
+
 Current architecture:
 
 - **Rich supervisor result**: `runSupervisor()` returns bounded machine-readable context including native status, drift diffs, clipped stdout/stderr, and telemetry
