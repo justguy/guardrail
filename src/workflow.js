@@ -589,6 +589,9 @@ export function buildWorkflowRecipeSearchDirs(projectRoot, basePath, explicitSea
     includeDefaults: true,
     repoConfigPath: options.repoConfigPath,
     userConfigPath: options.userConfigPath,
+    orgPolicy: options.orgPolicy,
+    orgPolicyName: options.orgPolicyName,
+    orgPolicyDir: options.orgPolicyDir,
   });
 }
 

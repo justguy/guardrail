@@ -229,6 +229,30 @@ describe('Recipe Runner: resolveRecipeById', () => {
     );
   });
 
+  it('blocks explicit recipe roots when org policy blocks them', () => {
+    const base = mkdtempSync(join(tmpdir(), 'gr-explicit-roots-policy-block-'));
+    const explicitRoot = join(base, 'shared-recipes');
+
+    mkdirSync(explicitRoot, { recursive: true });
+
+    assert.throws(
+      () => buildRecipeSearchDirs({
+        explicitSearchDirs: [explicitRoot],
+        basePath: base,
+        includeDefaults: false,
+        orgPolicy: {
+          name: 'policy-block-explicit',
+          version: '1.0.0',
+          trusted_recipe_roots: ['/tmp/blocked-recipes'],
+          forbidden_operations: [],
+          required_approvals: [],
+          allowed_actions: [],
+        },
+      }),
+      /Explicit recipe root ".*shared-recipes" is blocked by org policy/,
+    );
+  });
+
   it('fails closed on configured missing recipe roots', () => {
     const base = mkdtempSync(join(tmpdir(), 'gr-bad-config-roots-'));
     const project = join(base, 'project');

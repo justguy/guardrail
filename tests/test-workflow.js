@@ -1632,6 +1632,68 @@ describe('Workflow Normalization', () => {
     }
   });
 
+  it('blocks recipe_ref resolution from repo-configured roots when org policy disallows them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-config-root-policy-block-'));
+    const workflowDir = join(dir, 'workflow');
+    const repoExtra = join(dir, 'shared-recipes');
+    const repoConfigPath = join(workflowDir, '.guardrail', 'config.json');
+
+    try {
+      mkdirSync(workflowDir, { recursive: true });
+      mkdirSync(join(workflowDir, '.guardrail'), { recursive: true });
+      mkdirSync(repoExtra, { recursive: true });
+
+      writeFileSync(repoConfigPath, JSON.stringify({
+        default_recipe_roots: ['../shared-recipes'],
+      }));
+
+      writeRecipeFile(repoExtra, {
+        id: 'configured-default-recipe',
+        name: 'Configured Default Recipe',
+        description: 'Resolved from repo config default_recipe_roots',
+        version: '1.0.0',
+        author: 'tester',
+        category: 'custom',
+        channel: 'community',
+        approval_required: true,
+        risk_level: 'low',
+        inputs: {},
+        steps: [{
+          id: 'main',
+          description: 'echo configured',
+          run: { command: 'echo', args: ['configured'], mode: 'structured' },
+        }],
+        guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+      });
+
+      assert.throws(
+        () => normalizeWorkflowDefinition(makeDefinition({
+          steps: [{
+            id: 'step_a',
+            type: 'recipe_ref',
+            recipe: 'configured-default-recipe',
+            inputs: {},
+            on: { success: 'done', failure: 'abort' },
+          }],
+        }), workflowDir, {
+          repoConfigPath,
+          userConfigPath: false,
+          orgPolicy: {
+            name: 'policy-block',
+            version: '1.0.0',
+            trusted_recipe_roots: ['/tmp/blocked-recipes'],
+            forbidden_operations: [],
+            required_approvals: [],
+            allowed_actions: [],
+          },
+        }),
+        /blocked by org policy/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('normalizes verified recipe_ref trust metadata', () => {
     const dir = mkdtempSync(join(tmpdir(), 'wf-recipe-verified-'));
     try {

@@ -221,6 +221,7 @@ node src/cli.js recipe versions <recipe-id>
   - user-level `~/.guardrail/config.json` via `"default_recipe_roots": ["/abs/path/to/shared-recipes"]`
 - `recipe_roots` is still accepted as a compatibility alias for `default_recipe_roots`.
 - Configured default recipe roots are additional search roots, not silent overrides. Explicit `--recipe-search-dir` still wins, and missing configured roots fail closed.
+- If the active org policy defines `trusted_recipe_roots`, extra configured roots and explicit extra roots must stay inside that allowlist. Guardrail loads the active policy from `.guardrail/org-policy.json` or `.guardrail/org-policies/default.json` before accepting those extra roots.
 - If the same recipe id/version is discoverable from more than one root at the same precedence point, Guardrail fails closed with an explicit collision error instead of silently picking one candidate.
 
 - Standalone `run --recipe` resolves the local `recipes/` directory relative to the current working directory, not relative to `src/cli.js`.

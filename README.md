@@ -205,6 +205,8 @@ Rollback-bearing workflow templates still need manual recipe authoring; `templat
 
 Bundled Guardrail recipes also resolve shipped wrapper helpers internally now, so cross-repo runs no longer need to thread checkout-path args just to find Guardrail-owned wrapper scripts.
 
+Extra recipe roots remain opt-in, but they no longer bypass central governance: repo/user-configured `default_recipe_roots` and explicit extra roots are blocked when the active org policy does not trust them via `trusted_recipe_roots` in `.guardrail/org-policy.json` or `.guardrail/org-policies/default.json`.
+
 ### 4. Resident Lane Mode
 
 Keep an interactive AI session alive behind one bounded lane, then send later user messages without reopening the outer transport every turn:
