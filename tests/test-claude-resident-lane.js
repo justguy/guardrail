@@ -140,6 +140,20 @@ describe('Claude resident lane', () => {
     assert.deepEqual(options.scopePaths, ['packages/app']);
   });
 
+  it('infers a worktree scope when working_dir narrows below the repo root', () => {
+    const dir = tmpLaneDir();
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: 'packages/app',
+      sessionName: 'math-live-session',
+    }, dir);
+
+    assert.equal(options.scopeType, 'worktree');
+    assert.equal(options.scopeMode, 'warn');
+    assert.deepEqual(options.scopePaths, ['packages/app']);
+  });
+
   it('derives FIFO paths from the lane dir', () => {
     const paths = lanePaths('/tmp/example-lane');
     assert.equal(paths.requestFifo, '/tmp/example-lane/requests.fifo');
@@ -444,6 +458,85 @@ describe('Claude resident lane', () => {
     assert.equal(listing.counts.ready, 1);
     assert.equal(listing.counts.stale, 1);
     assert.equal(listing.lanes.find((lane) => lane.laneId === 'math-ready')?.identityNonce, 'nonce-ready');
+  });
+
+  it('filters resident lanes by status and conflict state', () => {
+    const dir = tmpLaneDir();
+    const readyLaneDir = join(dir, '.guardrail', 'lanes', 'math-ready');
+    const conflictedLaneDir = join(dir, '.guardrail', 'lanes', 'math-conflicted');
+    mkdirSync(readyLaneDir, { recursive: true });
+    mkdirSync(conflictedLaneDir, { recursive: true });
+    const readyPaths = lanePaths(readyLaneDir);
+    const conflictedPaths = lanePaths(conflictedLaneDir);
+    mkfifo(readyPaths.requestFifo);
+    mkfifo(readyPaths.responseFifo);
+    mkfifo(conflictedPaths.requestFifo);
+    mkfifo(conflictedPaths.responseFifo);
+    const sharedScope = ['docs/api'];
+    writeFileSync(readyPaths.identityPath, JSON.stringify({
+      laneId: 'math-ready',
+      laneDir: readyLaneDir,
+      guardrailRepo: dir,
+      keyPath: join(dir, 'ready.key'),
+      identityNonce: 'nonce-ready',
+      tool: 'claude',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: sharedScope,
+    }), 'utf8');
+    writeFileSync(conflictedPaths.identityPath, JSON.stringify({
+      laneId: 'math-conflicted',
+      laneDir: conflictedLaneDir,
+      guardrailRepo: dir,
+      keyPath: join(dir, 'conflicted.key'),
+      identityNonce: 'nonce-conflicted',
+      tool: 'codex',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: sharedScope,
+    }), 'utf8');
+    writeFileSync(readyPaths.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-ready',
+      sessionName: 'math-ready',
+      keyPath: join(dir, 'ready.key'),
+      identityNonce: 'nonce-ready',
+      bootNonce: 'boot-ready',
+      tool: 'claude',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: sharedScope,
+      requestFifo: readyPaths.requestFifo,
+      responseFifo: readyPaths.responseFifo,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+    writeFileSync(conflictedPaths.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-conflicted',
+      sessionName: 'math-conflicted',
+      keyPath: join(dir, 'conflicted.key'),
+      identityNonce: 'nonce-conflicted',
+      bootNonce: 'boot-conflicted',
+      tool: 'codex',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: sharedScope,
+      requestFifo: conflictedPaths.requestFifo,
+      responseFifo: conflictedPaths.responseFifo,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const listing = listResidentLanes({
+      guardrailRepo: dir,
+      status: 'ready',
+      toolFilter: 'codex',
+      hasConflicts: true,
+    });
+    assert.equal(listing.lanes.length, 1);
+    assert.equal(listing.lanes[0].laneId, 'math-conflicted');
+    assert.equal(listing.counts.ready, 1);
   });
 
   it('prunes stale and stopped lanes while leaving failed lanes unless explicitly included', () => {

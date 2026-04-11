@@ -32,6 +32,13 @@ import {
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 
+export const residentLaneAdapterMetadata = {
+  id: 'claude',
+  name: 'Claude',
+  description: 'Resident lane adapter for Claude CLI execution.',
+  capabilities: ['resident_session', 'interactive_prompt', 'stored_results', 'bounded_logs'],
+};
+
 export function parseResidentLaneArgs(argv) {
   const options = {
     laneDir: '',

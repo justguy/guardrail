@@ -1,24 +1,28 @@
 import * as claudeLane from './claude-resident-lane.js';
 import * as codexLane from './codex-resident-lane.js';
+export {
+  cleanupResidentLane,
+  createLaneBootError,
+  getResidentLaneLogs,
+  getResidentLaneResult,
+  getResidentLaneStatus,
+  lanePaths,
+  laneResultPath,
+  listResidentLanes,
+  pruneResidentLanes,
+  readSecretFromFd,
+  signLaneRequest,
+  stableRepoOwnerId,
+  stopResidentLane,
+  trackLaneRequestId,
+  validateLaneRequest,
+  waitForResidentLaneResult,
+  waitForResidentLaneBootstrap,
+} from './resident-lane-core.js';
 
 const ADAPTERS = {
   claude: claudeLane,
   codex: codexLane,
-};
-
-const ADAPTER_METADATA = {
-  claude: {
-    id: 'claude',
-    name: 'Claude',
-    description: 'Resident lane adapter for Claude CLI execution.',
-    capabilities: ['resident_session', 'interactive_prompt', 'stored_results', 'bounded_logs'],
-  },
-  codex: {
-    id: 'codex',
-    name: 'Codex',
-    description: 'Resident lane adapter for Codex CLI execution.',
-    capabilities: ['resident_session', 'interactive_prompt', 'stored_results', 'bounded_logs'],
-  },
 };
 
 function selectedTool(rawOptions = {}) {
@@ -39,7 +43,7 @@ function selectedAdapter(rawOptions = {}) {
 }
 
 export function listResidentLaneAdapters() {
-  return Object.values(ADAPTER_METADATA);
+  return Object.values(ADAPTERS).map((adapter) => adapter.residentLaneAdapterMetadata).filter(Boolean);
 }
 
 export function parseResidentLaneArgs(argv) {
@@ -110,21 +114,3 @@ export async function launchResidentLane(rawOptions, deps = {}) {
 export function launchResidentLaneDaemonHelper(rawOptions) {
   return selectedAdapter(rawOptions).launchResidentLaneDaemonHelper(rawOptions);
 }
-
-export {
-  createLaneBootError,
-  getResidentLaneLogs,
-  getResidentLaneResult,
-  getResidentLaneStatus,
-  lanePaths,
-  laneResultPath,
-  listResidentLanes,
-  pruneResidentLanes,
-  readSecretFromFd,
-  signLaneRequest,
-  stopResidentLane,
-  trackLaneRequestId,
-  validateLaneRequest,
-  waitForResidentLaneResult,
-  waitForResidentLaneBootstrap,
-} from './claude-resident-lane.js';

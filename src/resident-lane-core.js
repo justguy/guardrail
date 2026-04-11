@@ -50,7 +50,10 @@ function normalizeRelativeRepoPath(maybePath, guardrailRepo, label = 'scope path
 }
 
 export function normalizeResidentLaneScope(rawOptions, guardrailRepo, workingDir) {
-  const scopeType = rawOptions.scopeType || rawOptions.writeScopeType || 'none';
+  const explicitScopeType = rawOptions.scopeType || rawOptions.writeScopeType || '';
+  const inferredWorktree = !explicitScopeType
+    && resolve(workingDir || guardrailRepo) !== resolve(guardrailRepo);
+  const scopeType = explicitScopeType || (inferredWorktree ? 'worktree' : 'none');
   const scopeMode = rawOptions.scopeMode || 'warn';
 
   if (!['none', 'repo', 'worktree', 'paths'].includes(scopeType)) {
@@ -175,7 +178,7 @@ function writeJson(path, data) {
   writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
 }
 
-function stableRepoOwnerId(guardrailRepo) {
+export function stableRepoOwnerId(guardrailRepo) {
   return createHash('sha256')
     .update(resolve(guardrailRepo))
     .digest('hex')
@@ -694,6 +697,55 @@ function annotateScopeConflicts(entries) {
   });
 }
 
+function normalizeListFilterValues(value) {
+  if (value == null || value === '') return [];
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((entry) => String(entry).split(','))
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+  return String(value)
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function parseOptionalBooleanFilter(value) {
+  if (value == null || value === '') return null;
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  throw new Error('Boolean lane filters must be true or false.');
+}
+
+function laneMatchesFilters(entry, rawOptions = {}) {
+  const statuses = normalizeListFilterValues(rawOptions.status);
+  if (statuses.length > 0 && !statuses.includes(entry.status)) return false;
+
+  const tools = normalizeListFilterValues(rawOptions.toolFilter);
+  if (tools.length > 0 && !tools.includes(entry.tool || entry.adapterId || '')) return false;
+
+  const laneIds = normalizeListFilterValues(rawOptions.filterLaneId || rawOptions.laneId);
+  if (laneIds.length > 0 && !laneIds.includes(entry.laneId || '')) return false;
+
+  const sessionNames = normalizeListFilterValues(rawOptions.filterSessionName);
+  if (sessionNames.length > 0 && !sessionNames.includes(entry.sessionName || '')) return false;
+
+  const scopeTypes = normalizeListFilterValues(rawOptions.scopeTypeFilter);
+  if (scopeTypes.length > 0 && !scopeTypes.includes(entry.scopeType || 'none')) return false;
+
+  const scopeModes = normalizeListFilterValues(rawOptions.scopeModeFilter);
+  if (scopeModes.length > 0 && !scopeModes.includes(entry.scopeMode || 'warn')) return false;
+
+  const alive = parseOptionalBooleanFilter(rawOptions.alive);
+  if (alive !== null && alive !== entry.alive) return false;
+
+  const hasConflicts = parseOptionalBooleanFilter(rawOptions.hasConflicts);
+  if (hasConflicts !== null && hasConflicts !== ((entry.scopeConflicts?.length || 0) > 0)) return false;
+
+  return true;
+}
+
 function registryDirFor(rawOptions = {}) {
   const guardrailRepo = rawOptions.guardrailRepo
     ? resolve(process.cwd(), rawOptions.guardrailRepo)
@@ -730,7 +782,7 @@ function collectResidentLaneStatusBase(rawOptions) {
   const paths = lanePaths(laneDir);
   const state = readJson(paths.statePath, null);
   const identity = readJson(paths.identityPath, null);
-  const effectiveKeyPath = keyPath || identity?.keyPath || state?.keyPath || '';
+  const effectiveKeyPath = identity?.keyPath || state?.keyPath || keyPath || '';
   const keyPresent = !!(effectiveKeyPath && existsSync(effectiveKeyPath));
   const requestFifoPresent = isFifo(paths.requestFifo);
   const responseFifoPresent = isFifo(paths.responseFifo);
@@ -793,7 +845,7 @@ export function getResidentLaneStatus(rawOptions) {
 
 export function listResidentLanes(rawOptions = {}) {
   const { registryDir, entries: baseEntries } = collectResidentLaneRegistryEntries(rawOptions);
-  const entries = annotateScopeConflicts(baseEntries);
+  const entries = annotateScopeConflicts(baseEntries).filter((entry) => laneMatchesFilters(entry, rawOptions));
 
   entries.sort((a, b) => {
     const byCreated = String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
@@ -811,6 +863,22 @@ export function listResidentLanes(rawOptions = {}) {
     registryDir,
     counts,
     lanes: entries,
+  };
+}
+
+function cleanupOneLane(lane) {
+  if (lane.keyPath) {
+    removeIfExists(lane.keyPath);
+  }
+  removeLaneDirectory(lane.laneDir);
+  return {
+    laneDir: lane.laneDir,
+    laneId: lane.laneId || null,
+    adapterId: lane.adapterId || null,
+    tool: lane.tool || lane.adapterId || null,
+    status: lane.status,
+    keyPath: lane.keyPath || null,
+    aliveBeforeCleanup: lane.alive,
   };
 }
 
@@ -840,18 +908,7 @@ export function pruneResidentLanes(rawOptions = {}) {
       continue;
     }
 
-    if (lane.keyPath) {
-      removeIfExists(lane.keyPath);
-    }
-    removeLaneDirectory(lane.laneDir);
-    pruned.push({
-      laneDir: lane.laneDir,
-      laneId: lane.laneId,
-      adapterId: lane.adapterId || null,
-      tool: lane.tool || lane.adapterId || null,
-      status: lane.status,
-      keyPath: lane.keyPath || null,
-    });
+    pruned.push(cleanupOneLane(lane));
   }
 
   return {
@@ -859,6 +916,66 @@ export function pruneResidentLanes(rawOptions = {}) {
     includeFailed,
     pruned,
     skipped,
+  };
+}
+
+export function cleanupResidentLane(rawOptions = {}) {
+  const listing = listResidentLanes(rawOptions);
+  const explicitLaneDir = rawOptions.laneDir
+    ? resolve(rawOptions.guardrailRepo ? resolve(process.cwd(), rawOptions.guardrailRepo) : process.cwd(), rawOptions.laneDir)
+    : null;
+  const selected = explicitLaneDir
+    ? listing.lanes.filter((lane) => lane.laneDir === explicitLaneDir)
+    : listing.lanes;
+
+  if (selected.length === 0) {
+    return {
+      status: 'missing',
+      cleaned: false,
+      message: 'No resident lane matched the requested cleanup target.',
+      registryDir: listing.registryDir,
+      matches: [],
+    };
+  }
+
+  if (selected.length > 1) {
+    return {
+      status: 'ambiguous',
+      cleaned: false,
+      message: 'More than one resident lane matched the requested cleanup target.',
+      registryDir: listing.registryDir,
+      matches: selected.map((lane) => ({
+        laneDir: lane.laneDir,
+        laneId: lane.laneId || null,
+        status: lane.status,
+        tool: lane.tool || lane.adapterId || null,
+      })),
+    };
+  }
+
+  const lane = selected[0];
+  const stopped = lane.alive ? stopResidentLane({
+    ...rawOptions,
+    laneDir: lane.laneDir,
+    laneId: lane.laneId || rawOptions.laneId || '',
+    keyPath: lane.keyPath || rawOptions.keyPath || '',
+    tool: lane.tool || rawOptions.tool || lane.adapterId || 'claude',
+    sessionName: lane.sessionName || rawOptions.sessionName || lane.laneId || '',
+    sessionId: lane.sessionId || rawOptions.sessionId || '',
+  }) : null;
+  const cleaned = cleanupOneLane({
+    ...lane,
+    alive: false,
+    status: stopped ? 'stopped' : lane.status,
+    keyPath: (stopped?.keyPath || lane.keyPath || null),
+  });
+
+  return {
+    status: 'cleaned',
+    cleaned: true,
+    registryDir: listing.registryDir,
+    lane: cleaned,
+    stoppedLiveLane: !!stopped,
   };
 }
 

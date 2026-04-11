@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { runSupervisor, STATUS_EXIT_CODES } from './supervisor.js';
@@ -26,14 +26,19 @@ function defaultLaneDir(laneId) {
   return `.guardrail/lanes/${laneId}`;
 }
 
-function defaultLaneKeyPath(laneId) {
-  return resolve(homedir(), '.guardrail', 'lanes', `${laneId}.key`);
+function defaultLaneKeyPath(laneId, guardrailRepo = '.') {
+  const repoId = createHash('sha256')
+    .update(resolve(process.cwd(), guardrailRepo))
+    .digest('hex')
+    .slice(0, 16);
+  return resolve(homedir(), '.guardrail', 'lanes', repoId, `${laneId}.key`);
 }
 
 function normalizeLaneCliOptions(raw = {}) {
   const laneId = raw.id || raw.laneId || '';
   const laneDir = raw.laneDir || (laneId ? defaultLaneDir(laneId) : '');
-  const keyPath = raw.keyPath || (laneId ? defaultLaneKeyPath(laneId) : '');
+  const guardrailRepo = raw.guardrailRepo || '.';
+  const keyPath = raw.keyPath || (laneId ? defaultLaneKeyPath(laneId, guardrailRepo) : '');
   return {
     ...raw,
     laneId,
@@ -41,7 +46,7 @@ function normalizeLaneCliOptions(raw = {}) {
     keyPath,
     tool: raw.tool || 'claude',
     sessionName: raw.sessionName || laneId || '',
-    guardrailRepo: raw.guardrailRepo || '.',
+    guardrailRepo,
     workingDir: raw.workingDir || '.',
     scopeType: raw.scopeType || 'none',
     scopeMode: raw.scopeMode || 'warn',
@@ -76,7 +81,7 @@ function buildLaneRecommendedCommand(status = {}) {
       if (status.lastRequestId) return `guardrail lane result ${ref} --request-id ${status.lastRequestId}`;
       return `guardrail lane result ${ref}`;
     case 'cleanup':
-      return `guardrail lane stop ${ref}`;
+      return `guardrail lane cleanup ${ref}`;
     default:
       return null;
   }
@@ -204,6 +209,7 @@ Commands:
   lane inspect [flags]                  Show status, latest result, and bounded logs together
   lane logs [flags]                     Read the bounded resident lane log tail
   lane stop [flags]                     Stop a resident interactive lane
+  lane cleanup [flags]                  Remove one resident lane's local artifacts
   lane list [flags]                     List resident lanes in this Guardrail repo
   lane prune [flags]                    Remove dead resident-lane artifacts
   lane adapters                         List bundled resident lane adapters
@@ -282,6 +288,7 @@ Examples:
   guardrail lane inspect --id claude-live --tail 60
   guardrail lane logs --id claude-live --tail 60
   guardrail lane stop --id claude-live
+  guardrail lane cleanup --id claude-live
   guardrail lane list --json
   guardrail lane prune --json
   guardrail repo status --path .
@@ -739,7 +746,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'result', 'wait', 'status', 'inspect', 'logs', 'stop', 'list', 'prune', 'adapters'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'result', 'wait', 'status', 'inspect', 'logs', 'stop', 'cleanup', 'list', 'prune', 'adapters'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -785,9 +792,14 @@ export function parseArgs(argv) {
       '--wait': { key: 'wait', boolean: true },
       '--timeout-ms': 'timeoutMs',
       '--tail': 'tail',
-      '--scope-type': 'scopeType',
-      '--scope-mode': 'scopeMode',
-      '--scope-path': 'scopePaths',
+      '--status': 'status',
+      '--alive': { key: 'alive', boolean: true },
+      '--has-conflicts': { key: 'hasConflicts', boolean: true },
+      '--tool-filter': 'toolFilter',
+      '--lane-id-filter': 'filterLaneId',
+      '--session-name-filter': 'filterSessionName',
+      '--scope-type-filter': 'scopeTypeFilter',
+      '--scope-mode-filter': 'scopeModeFilter',
       '--lanes-dir': 'lanesDir',
       '--include-failed': { key: 'includeFailed', boolean: true },
     });
@@ -1576,6 +1588,39 @@ async function main() {
     process.exit(0);
   }
 
+  if (parsed.subcommand === 'lane-cleanup') {
+    const { cleanupResidentLane } = await import('./resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir && !laneOpts.filterLaneId && !laneOpts.filterSessionName) {
+      console.error('Error: provide --id <lane-id>, --lane-dir <path>, or one narrowing lane filter for lane cleanup');
+      process.exit(1);
+    }
+    const result = cleanupResidentLane(laneOpts);
+    await appendLaneAuditEntry(laneOpts, 'lane_cleanup', {
+      status: result.cleaned ? 'success' : 'error',
+      reason: result.status,
+      stopped_live_lane: !!result.stoppedLiveLane,
+      cleaned_lane_dir: result.lane?.laneDir || null,
+    });
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.cleaned) {
+      console.log(`Lane cleaned: ${result.lane.laneId || result.lane.laneDir}`);
+      console.log(`  Status before cleanup: ${result.lane.status}`);
+      console.log(`  Live before cleanup:   ${result.lane.aliveBeforeCleanup ? 'yes' : 'no'}`);
+    } else {
+      console.error(result.message);
+      if (Array.isArray(result.matches) && result.matches.length > 0) {
+        console.error('Matches:');
+        for (const match of result.matches) {
+          console.error(`  ${match.laneId || match.laneDir} (${match.status})`);
+        }
+      }
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+
   if (parsed.subcommand === 'lane-list') {
     const { listResidentLanes } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
@@ -1595,6 +1640,19 @@ async function main() {
       for (const [status, count] of Object.entries(enrichedListing.counts)) {
         if (status === 'total') continue;
         console.log(`  ${status}:`.padEnd(11) + ` ${count}`);
+      }
+      const activeFilters = [
+        laneOpts.status ? `status=${Array.isArray(laneOpts.status) ? laneOpts.status.join(',') : laneOpts.status}` : null,
+        laneOpts.toolFilter ? `tool=${Array.isArray(laneOpts.toolFilter) ? laneOpts.toolFilter.join(',') : laneOpts.toolFilter}` : null,
+        laneOpts.alive !== undefined ? `alive=${laneOpts.alive}` : null,
+        laneOpts.hasConflicts !== undefined ? `hasConflicts=${laneOpts.hasConflicts}` : null,
+        laneOpts.filterLaneId ? `laneId=${laneOpts.filterLaneId}` : null,
+        laneOpts.filterSessionName ? `sessionName=${laneOpts.filterSessionName}` : null,
+        laneOpts.scopeTypeFilter ? `scopeType=${laneOpts.scopeTypeFilter}` : null,
+        laneOpts.scopeModeFilter ? `scopeMode=${laneOpts.scopeModeFilter}` : null,
+      ].filter(Boolean);
+      if (activeFilters.length > 0) {
+        console.log(`  Filters: ${activeFilters.join(' ')}`);
       }
       if (enrichedListing.lanes.length > 0) {
         console.log('');

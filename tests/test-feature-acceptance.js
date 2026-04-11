@@ -611,6 +611,65 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(laneB.scopeConflicts.length, 1);
   });
 
+  it('guardrail lane list filters by status, tool, and conflict state', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const lanesDir = join(repoDir, '.guardrail', 'lanes');
+    const readyLaneDir = join(lanesDir, 'lane-ready');
+    const conflictedLaneDir = join(lanesDir, 'lane-conflicted');
+    mkdirSync(readyLaneDir, { recursive: true });
+    mkdirSync(conflictedLaneDir, { recursive: true });
+    writeFileSync(join(readyLaneDir, 'identity.json'), JSON.stringify({
+      laneId: 'lane-ready',
+      tool: 'claude',
+      laneDir: readyLaneDir,
+      guardrailRepo: repoDir,
+      identityNonce: 'nonce-ready',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['docs'],
+    }), 'utf8');
+    writeFileSync(join(conflictedLaneDir, 'identity.json'), JSON.stringify({
+      laneId: 'lane-conflicted',
+      tool: 'codex',
+      laneDir: conflictedLaneDir,
+      guardrailRepo: repoDir,
+      identityNonce: 'nonce-conflicted',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: ['docs/api'],
+    }), 'utf8');
+    writeFileSync(join(readyLaneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'lane-ready',
+      tool: 'claude',
+      sessionName: 'lane-ready',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['docs'],
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+    writeFileSync(join(conflictedLaneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'lane-conflicted',
+      tool: 'codex',
+      sessionName: 'lane-conflicted',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: ['docs/api'],
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane list --guardrail-repo ${repoDir} --status ready --tool-filter codex --has-conflicts --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.lanes.length, 1);
+    assert.equal(parsed.lanes[0].laneId, 'lane-conflicted');
+    assert.equal(parsed.counts.ready, 1);
+  });
+
   it('guardrail lane send writes one prompt through a resident lane FIFO', async () => {
     const dir = tmpDir();
     const guardrailRepo = join(dir, 'repo');
@@ -1085,6 +1144,45 @@ describe('README Feature: Resident Lane Mode', () => {
     const pruneEntry = entries.find((entry) => entry.event === 'lane_prune');
     assert.ok(pruneEntry, 'expected lane_prune audit entry');
     assert.equal(pruneEntry.status, 'success');
+  });
+
+  it('guardrail lane cleanup removes one failed lane and appends an audit entry', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const laneDir = join(repoDir, '.guardrail', 'lanes', 'math-failed');
+    mkdirSync(join(repoDir, '.guardrail'), { recursive: true });
+    mkdirSync(laneDir, { recursive: true });
+    const keyPath = join(dir, 'failed.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(join(laneDir, 'identity.json'), JSON.stringify({
+      laneId: 'math-failed',
+      laneDir,
+      guardrailRepo: repoDir,
+      keyPath,
+      identityNonce: 'nonce-failed',
+    }), 'utf8');
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: 999999,
+      status: 'failed',
+      laneId: 'math-failed',
+      sessionName: 'math-failed',
+      keyPath,
+      failureReason: 'boot failed',
+      failureStage: 'post_start',
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane cleanup --guardrail-repo ${repoDir} --id math-failed --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.cleaned, true);
+    assert.equal(parsed.lane.laneId, 'math-failed');
+    assert.equal(existsSync(laneDir), false);
+    assert.equal(existsSync(keyPath), false);
+    const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
+    const cleanupEntry = entries.find((entry) => entry.event === 'lane_cleanup');
+    assert.ok(cleanupEntry, 'expected lane_cleanup audit entry');
+    assert.equal(cleanupEntry.status, 'success');
   });
 });
 
