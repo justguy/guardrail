@@ -277,6 +277,35 @@ describe('Recipe: Step Validation', () => {
   it('structured mode is accepted', () => {
     assert.doesNotThrow(() => validateRecipe(makeRecipe()));
   });
+
+  it('accepts idempotent flag on recipe steps', () => {
+    assert.doesNotThrow(() => validateRecipe(makeRecipe({
+      steps: [{
+        id: 'step-1',
+        description: 'Run the command',
+        idempotent: false,
+        run: { command: 'echo', args: ['{{inputs.target}}'], mode: 'structured' },
+      }],
+      rollback: {
+        steps: [{
+          id: 'rollback-1',
+          description: 'Undo the command',
+          run: { command: 'echo', args: ['undo'], mode: 'structured' },
+        }],
+      },
+    })));
+  });
+
+  it('allows non-idempotent recipe steps without forcing rollback migration', () => {
+    assert.doesNotThrow(() => validateRecipe(makeRecipe({
+      steps: [{
+        id: 'step-1',
+        description: 'Mutate state',
+        idempotent: false,
+        run: { command: 'echo', args: ['mutate'], mode: 'structured' },
+      }],
+    })));
+  });
 });
 
 // ===========================================================================
@@ -373,6 +402,40 @@ describe('Recipe: Content Hashing', () => {
   it('different requires_auth declarations produce different hash', () => {
     const r1 = makeRecipe();
     const r2 = makeRecipe({ requires_auth: [{ type: 'claude_login', env: ['HOME'] }] });
+    assert.notEqual(hashRecipe(r1), hashRecipe(r2));
+  });
+
+  it('different rollback steps produce different hash', () => {
+    const r1 = makeRecipe({
+      steps: [{
+        id: 'step-1',
+        description: 'Mutate state',
+        idempotent: false,
+        run: { command: 'echo', args: ['hello'], mode: 'structured' },
+      }],
+      rollback: {
+        steps: [{
+          id: 'rollback-1',
+          description: 'Undo',
+          run: { command: 'echo', args: ['undo-a'], mode: 'structured' },
+        }],
+      },
+    });
+    const r2 = makeRecipe({
+      steps: [{
+        id: 'step-1',
+        description: 'Mutate state',
+        idempotent: false,
+        run: { command: 'echo', args: ['hello'], mode: 'structured' },
+      }],
+      rollback: {
+        steps: [{
+          id: 'rollback-1',
+          description: 'Undo',
+          run: { command: 'echo', args: ['undo-b'], mode: 'structured' },
+        }],
+      },
+    });
     assert.notEqual(hashRecipe(r1), hashRecipe(r2));
   });
 

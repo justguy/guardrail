@@ -161,6 +161,22 @@ describe('scrubPersonalData', async () => {
     const scrubbed = scrubPersonalData(recipe);
     assert.ok(scrubbed.inputs.dir.description.includes('{{working_dir}}'));
   });
+
+  it('rejects user-specific paths in rollback executable fields', () => {
+    const recipe = makeValidRecipe({
+      rollback: {
+        steps: [{
+          id: 'rb',
+          description: 'undo',
+          run: { command: 'bash', args: ['/Users/alice/undo.sh'], mode: 'structured' },
+        }],
+      },
+    });
+    assert.throws(
+      () => scrubPersonalData(recipe),
+      /cannot safely scrub.*executable fields/
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -309,14 +325,24 @@ describe('templateToRecipe', async () => {
     assert.deepEqual(recipe.requires_env, ['NPM_TOKEN']);
   });
 
-  it('rejects rollback-bearing templates for publish', () => {
-    assert.throws(
-      () => templateToRecipe(
-        makeTemplate({ rollback: { steps: [{ id: 'rb', run: { command: 'npm', args: ['unpublish'], mode: 'structured' } }] } }),
-        { name: 'npm-publish', category: 'packages' },
-      ),
-      /does not support templates with rollback steps/,
+  it('maps rollback-bearing templates into recipe rollback steps', () => {
+    const recipe = templateToRecipe(
+      makeTemplate({
+        idempotent: false,
+        rollback: {
+          steps: [{
+            id: 'rb',
+            description: 'Undo publish',
+            run: { command: 'npm', args: ['unpublish'], mode: 'structured' },
+          }],
+        },
+      }),
+      { name: 'npm-publish', category: 'packages' },
     );
+    validateRecipe(recipe);
+    assert.equal(recipe.steps[0].idempotent, false);
+    assert.equal(recipe.rollback.steps.length, 1);
+    assert.equal(recipe.rollback.steps[0].run.command, 'npm');
   });
 });
 

@@ -159,7 +159,7 @@ Template bridge rules:
 
 - `template create --from-manifest` can generate a starter template from an approved command manifest or approved recipe manifest.
 - Generated templates record source provenance. If the template later drifts from its recorded source hash, Guardrail demotes source trust instead of silently preserving it.
-- `template publish` currently supports command-shaped templates. If a template includes rollback steps, stop and author the target recipe manually.
+- `template publish` now supports command templates and rollback-bearing workflow templates. Preserve the bounded rollback contract instead of flattening it into an ad hoc command recipe.
 
 ## Recipe Mode
 
@@ -547,7 +547,7 @@ Other shipped `R0a` recipe batch entries:
 Task-specific OpenClaw recipes:
 - `openclaw-fix-tests` for the fixed `fix-tests` flow with write scope, a pre-run scope check, fixed `--no-escalate`, and post-run output verification
 - `openclaw-debug-ci` for the fixed `debug-ci` flow with read scope, the same scope check, and output verification
-- `openclaw-deploy` is still deferred. Treat generic deploy flows as high-trust environment/account-bound operations, not as community-safe task recipes.
+- `openclaw-deploy` for the narrow `deploy` flow bound to `preview|staging` plus approved `service_manifest` and `release_file` inputs. Treat wider environment/account-bound deploy surfaces as high-trust operations that still need stronger contracts than the public recipe ships.
 
 ## Adapter Mode
 

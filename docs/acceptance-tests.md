@@ -77,6 +77,9 @@
 | openclaw-wrapper | flow_id=fix-tests scope=write | 3 | PASS |
 | openclaw-fix-tests | (fixed write task) | 1 | PASS |
 | openclaw-debug-ci | (fixed read task) | 1 | PASS |
+| openclaw-deploy | environment=preview service_manifest=package.json release_file=package.json | 1 | PASS |
+| git-commit-amend | repo_path=. message_file=README.md expected_head=abcdef123456789 | 1 | PASS |
+| git-force-push-safe | repo_path=. remote=origin branch=feature/demo expected_head=abcdef123456789 expected_remote_oid=<40 hex> | 1 | PASS |
 
 ## CI / Non-Interactive Mode
 

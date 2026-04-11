@@ -113,6 +113,24 @@ function buildLaneRecommendedCommand(status = {}) {
   }
 }
 
+function laneHasSelectionFilter(laneOpts = {}) {
+  return Boolean(
+    laneOpts.all === true
+    || laneOpts.laneId
+    || laneOpts.laneDir
+    || laneOpts.filterLaneId
+    || laneOpts.filterSessionName
+    || laneOpts.status
+    || laneOpts.toolFilter
+    || laneOpts.scopeTypeFilter
+    || laneOpts.scopeModeFilter
+    || laneOpts.resourceFilter
+    || laneOpts.repoFilter
+    || laneOpts.alive !== undefined
+    || laneOpts.hasConflicts !== undefined
+  );
+}
+
 function buildLaneInspectBundle(laneOpts, status, getResidentLaneResult, getResidentLaneLogs, getResidentLaneHistory) {
   const requestId = status.currentRequestId || status.lastCompletedRequestId || status.lastRequestId || null;
   return {
@@ -283,6 +301,7 @@ Commands:
   run --template <path> --input k=v     Run a template under Guardrail
   lane start [flags]                    Start a resident interactive lane
   lane send [flags]                     Send one message through a resident lane
+  lane chat [flags]                     Send one message and wait like a guarded chat turn
   lane result [flags]                   Read the latest or named resident lane result
   lane wait [flags]                     Wait for a resident lane request to complete
   lane status [flags]                   Show resident lane status and recovery hints
@@ -292,6 +311,7 @@ Commands:
   lane logs [flags]                     Read the bounded resident lane log tail
   lane stop [flags]                     Stop a resident interactive lane
   lane cleanup [flags]                  Remove one resident lane's local artifacts
+  lane batch [flags]                    Preview or apply stop/cleanup actions across filtered lanes
   lane list [flags]                     List resident lanes in this Guardrail repo
   lane prune [flags]                    Classify and optionally remove dead resident-lane artifacts
   lane adapters                         List bundled resident lane adapters
@@ -309,6 +329,7 @@ Commands:
   list [--category X] [--search Q]      List and filter available recipes
   pack <recipe.json> [--output <path>]   Package a recipe for distribution
   recipe validate <recipe.json>         Validate a recipe file
+  recipe compose --transport <id> --exec <id> --output <path>   Generate a composed recipe artifact
   recipe inspect <packed.json>          Inspect a packaged recipe (verify hash)
   recipe install <path|url|github://>   Install a recipe to local registry
                                         or install <category/id@version> --registry <root>
@@ -366,6 +387,7 @@ Examples:
   guardrail lane start --id lint-live --tool local-exec --command node --arg scripts/lint-worker.js
   guardrail lane start --id wrapper-live --tool prompt-wrapper --wrapper-command ./scripts/my-wrapper.js --wrapper-arg mode=review
   guardrail lane send --id claude-live --prompt "2x3=?"
+  guardrail lane chat --id claude-live --prompt "hello"
   guardrail lane result --id claude-live
   guardrail lane wait --id claude-live --request-id req-123
   guardrail lane result --id claude-live --request-id req-123
@@ -375,6 +397,7 @@ Examples:
   guardrail lane logs --id claude-live --tail 60
   guardrail lane stop --id claude-live
   guardrail lane cleanup --id claude-live
+  guardrail lane batch --action cleanup --status failed --dry-run --json
   guardrail lane list --json
   guardrail lane list --all-repos --resource-filter git-branch:main --json
   guardrail lane prune --json
@@ -387,6 +410,7 @@ Examples:
   guardrail template list --json
   guardrail template explain --template ./templates/npm-publish.json
   guardrail template simulate --template ./templates/npm-publish.json --input package_dir=packages/my-lib
+  guardrail recipe compose --transport cmux-claude-exec --exec claude-exec --output .guardrail/recipes/cmux-direct.recipe.json
   guardrail run --non-interactive --approved-manifest .guardrail/approved.json -- npm test
   guardrail demo drift`;
 
@@ -834,7 +858,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'result', 'wait', 'status', 'inspect', 'history', 'portfolio', 'logs', 'stop', 'cleanup', 'list', 'prune', 'adapters'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'chat', 'result', 'wait', 'status', 'inspect', 'history', 'portfolio', 'logs', 'stop', 'cleanup', 'batch', 'list', 'prune', 'adapters'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -890,6 +914,8 @@ export function parseArgs(argv) {
       '--idle-timeout-ms': 'idleTimeoutMs',
       '--request-id': 'requestId',
       '--prompt': 'prompt',
+      '--action': 'action',
+      '--all': { key: 'all', boolean: true },
       '--wait': { key: 'wait', boolean: true },
       '--timeout-ms': 'timeoutMs',
       '--tail': 'tail',
@@ -973,7 +999,7 @@ export function parseArgs(argv) {
   // --- recipe subcommand ----------------------------------------------------
 
   if (sub === 'recipe') {
-    if (i >= argv.length || !['validate', 'inspect', 'install', 'versions', 'publish', 'registry'].includes(argv[i])) {
+    if (i >= argv.length || !['validate', 'inspect', 'install', 'versions', 'publish', 'registry', 'compose'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -1023,6 +1049,24 @@ export function parseArgs(argv) {
           continue;
         }
         if (argv[i] === '--dry-run') { result.dryRun = true; i++; continue; }
+        if (argv[i] === '--json') { result.json = true; i++; continue; }
+        return { error: 'usage' };
+      }
+      return result;
+    }
+
+    if (action === 'compose') {
+      result.recipeSearchDirs = [];
+      while (i < argv.length) {
+        if (argv[i] === '--transport' && i + 1 < argv.length) { result.transportRecipe = argv[++i]; i++; continue; }
+        if (argv[i] === '--transport-step' && i + 1 < argv.length) { result.transportStep = argv[++i]; i++; continue; }
+        if (argv[i] === '--exec' && i + 1 < argv.length) { result.execRecipe = argv[++i]; i++; continue; }
+        if (argv[i] === '--output' && i + 1 < argv.length) { result.outputPath = argv[++i]; i++; continue; }
+        if (argv[i] === '--name' && i + 1 < argv.length) { result.name = argv[++i]; i++; continue; }
+        if (argv[i] === '--category' && i + 1 < argv.length) { result.category = argv[++i]; i++; continue; }
+        if (argv[i] === '--description' && i + 1 < argv.length) { result.description = argv[++i]; i++; continue; }
+        if (argv[i] === '--version' && i + 1 < argv.length) { result.version = argv[++i]; i++; continue; }
+        if (argv[i] === '--recipe-search-dir' && i + 1 < argv.length) { result.recipeSearchDirs.push(argv[++i]); i++; continue; }
         if (argv[i] === '--json') { result.json = true; i++; continue; }
         return { error: 'usage' };
       }
@@ -1493,7 +1537,7 @@ async function main() {
     process.exit(0);
   }
 
-  if (parsed.subcommand === 'lane-send') {
+  if (parsed.subcommand === 'lane-send' || parsed.subcommand === 'lane-chat') {
     const { sendResidentLaneMessage } = await import('./resident-lane-client.js');
     const {
       assertValidResidentLaneTool,
@@ -1502,12 +1546,13 @@ async function main() {
       waitForResidentLaneResult,
     } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    const chatMode = parsed.subcommand === 'lane-chat';
     if (!laneOpts.laneId && !laneOpts.laneDir) {
-      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane send');
+      console.error(`Error: --id <lane-id> or --lane-dir <path> is required for lane ${chatMode ? 'chat' : 'send'}`);
       process.exit(1);
     }
     if (!laneOpts.prompt) {
-      console.error('Error: --prompt <text> is required for lane send');
+      console.error(`Error: --prompt <text> is required for lane ${chatMode ? 'chat' : 'send'}`);
       process.exit(1);
     }
     try {
@@ -1591,14 +1636,14 @@ async function main() {
       if (keyFd !== null) closeSync(keyFd);
     }
 
-    if (response?.status === 'pending' && (laneOpts.wait === true || laneOpts.wait === 'true')) {
+    if (response?.status === 'pending' && (chatMode || laneOpts.wait === true || laneOpts.wait === 'true')) {
       response = await waitForResidentLaneResult({
         ...laneOpts,
         requestId,
       });
     }
 
-    await appendLaneAuditEntry(laneOpts, 'lane_send', {
+    await appendLaneAuditEntry(laneOpts, chatMode ? 'lane_chat' : 'lane_send', {
       request_id: requestId,
       status: response.status === 'pending'
         ? 'pending'
@@ -1750,6 +1795,125 @@ async function main() {
       process.exit(1);
     }
     process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-batch') {
+    const { cleanupResidentLane, listResidentLanes, stopResidentLane } = await import('./resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    const action = String(laneOpts.action || '').trim();
+    if (!['stop', 'cleanup'].includes(action)) {
+      console.error('Error: lane batch requires --action stop|cleanup');
+      process.exit(1);
+    }
+    if (!laneHasSelectionFilter(laneOpts)) {
+      console.error('Error: lane batch requires at least one lane selector or --all');
+      process.exit(1);
+    }
+
+    const listing = listResidentLanes(laneOpts);
+    const targets = listing.lanes;
+    if (laneOpts.dryRun === true || laneOpts.dryRun === 'true') {
+      const preview = {
+        action,
+        dryRun: true,
+        count: targets.length,
+        lanes: targets.map((lane) => ({
+          laneId: lane.laneId || null,
+          laneDir: lane.laneDir,
+          tool: lane.tool || lane.adapterId || null,
+          status: lane.status,
+          alive: !!lane.alive,
+        })),
+      };
+      if (parsed.json) {
+        console.log(JSON.stringify(preview, null, 2));
+      } else {
+        console.log(`Batch ${action} preview (${targets.length} lane(s))`);
+        for (const lane of preview.lanes) {
+          console.log(`  ${lane.laneId || lane.laneDir}: ${lane.status}${lane.alive ? ' (alive)' : ''}`);
+        }
+      }
+      process.exit(0);
+    }
+
+    const results = [];
+    for (const lane of targets) {
+      const targetOpts = {
+        ...laneOpts,
+        laneId: lane.laneId || '',
+        laneDir: lane.laneDir,
+        keyPath: lane.keyPath || '',
+        tool: lane.tool || lane.adapterId || laneOpts.tool || 'claude',
+        sessionName: lane.sessionName || lane.laneId || laneOpts.sessionName || '',
+        sessionId: lane.sessionId || laneOpts.sessionId || '',
+      };
+      if (action === 'stop') {
+        if (!lane.alive) {
+          results.push({
+            laneId: lane.laneId || null,
+            laneDir: lane.laneDir,
+            status: 'skipped',
+            reason: 'lane_not_alive',
+          });
+          continue;
+        }
+        const stopped = stopResidentLane(targetOpts);
+        await appendLaneAuditEntry(targetOpts, 'lane_stop', {
+          status: stopped?.stopped ? 'success' : 'error',
+          stopped: !!stopped?.stopped,
+          reason: stopped?.stopped ? null : 'stop_failed',
+        });
+        results.push({
+          laneId: lane.laneId || null,
+          laneDir: lane.laneDir,
+          status: stopped?.stopped ? 'success' : 'error',
+          stopped: !!stopped?.stopped,
+        });
+        continue;
+      }
+
+      const cleaned = cleanupResidentLane(targetOpts);
+      await appendLaneAuditEntry(targetOpts, 'lane_cleanup', {
+        status: cleaned.cleaned ? 'success' : 'error',
+        reason: cleaned.status,
+        stopped_live_lane: !!cleaned.stoppedLiveLane,
+        cleaned_lane_dir: cleaned.lane?.laneDir || lane.laneDir,
+        cleanup_reason: cleaned.lane?.cleanupReason || null,
+        tombstone_path: cleaned.lane?.tombstonePath || null,
+      });
+      results.push({
+        laneId: lane.laneId || null,
+        laneDir: lane.laneDir,
+        status: cleaned.cleaned ? 'success' : 'error',
+        reason: cleaned.lane?.cleanupReason || cleaned.status || null,
+        cleaned: !!cleaned.cleaned,
+      });
+    }
+
+    await appendLaneAuditEntry(laneOpts, 'lane_batch', {
+      status: results.every((entry) => entry.status === 'success' || entry.status === 'skipped') ? 'success' : 'error',
+      action,
+      total_matches: targets.length,
+      success_count: results.filter((entry) => entry.status === 'success').length,
+      skipped_count: results.filter((entry) => entry.status === 'skipped').length,
+      error_count: results.filter((entry) => entry.status === 'error').length,
+    });
+
+    const payload = {
+      action,
+      dryRun: false,
+      count: targets.length,
+      results,
+    };
+    if (parsed.json) {
+      console.log(JSON.stringify(payload, null, 2));
+    } else {
+      console.log(`Batch ${action} complete (${targets.length} lane(s))`);
+      for (const entry of results) {
+        console.log(`  ${entry.laneId || entry.laneDir}: ${entry.status}${entry.reason ? ` (${entry.reason})` : ''}`);
+      }
+    }
+    process.exit(results.some((entry) => entry.status === 'error') ? 1 : 0);
   }
 
   if (parsed.subcommand === 'lane-list') {
@@ -2728,6 +2892,35 @@ async function main() {
         if (result.pin) {
           console.log(`  SHA:  ${result.pin.sha}`);
         }
+      }
+      process.exit(0);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  }
+
+  if (parsed.subcommand === 'recipe-compose') {
+    try {
+      const { composeRecipeArtifact } = await import('./recipe-compose.js');
+      const result = composeRecipeArtifact({
+        transportSpecifier: parsed.transportRecipe,
+        execSpecifier: parsed.execRecipe,
+        transportStepId: parsed.transportStep || null,
+        searchDirs: parsed.recipeSearchDirs || [],
+        outputPath: parsed.outputPath,
+        name: parsed.name,
+        category: parsed.category,
+        description: parsed.description,
+        version: parsed.version,
+      });
+      if (parsed.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Wrote composed recipe: ${result.outputPath}`);
+        console.log(`  Transport: ${result.transport.specifier}`);
+        console.log(`  Exec:      ${result.exec.specifier}`);
+        console.log(`  Recipe id: ${result.recipe.id}`);
       }
       process.exit(0);
     } catch (err) {

@@ -89,7 +89,7 @@ export function scrubPersonalData(recipe) {
   }
 
   // Do not mutate executable fields. Reject instead.
-  for (const step of scrubbed.steps || []) {
+  for (const step of [...(scrubbed.steps || []), ...(scrubbed.rollback?.steps || [])]) {
     const execFields = [step.run?.command, ...(step.run?.args || [])];
     if (execFields.some(v => typeof v === 'string' && userPathRe.test(v))) {
       throw new Error(
@@ -158,17 +158,12 @@ export function templateToRecipe(templateDef, opts) {
 
   if (!name) throw new Error('--name is required for template publish');
   if (!category) throw new Error('--category is required for template publish');
-  if (templateDef.rollback?.steps?.length > 0) {
-    throw new Error(
-      'template publish does not support templates with rollback steps yet.\n' +
-      'Remove rollback or author the recipe manually.'
-    );
-  }
 
   const steps = templateDef.kind === 'template'
     ? [{
       id: 'main',
       description: templateDef.description,
+      idempotent: templateDef.idempotent !== false,
       run: {
         command: templateDef.run.command,
         args: templateDef.run.args || [],
@@ -178,6 +173,7 @@ export function templateToRecipe(templateDef, opts) {
     : (templateDef.steps || []).map((step) => ({
       id: step.id,
       description: step.description,
+      idempotent: step.idempotent !== false,
       run: {
         command: step.run.command,
         args: step.run.args || [],
@@ -211,6 +207,20 @@ export function templateToRecipe(templateDef, opts) {
 
   if (Array.isArray(templateDef.requires_env) && templateDef.requires_env.length > 0) {
     recipe.requires_env = [...templateDef.requires_env];
+  }
+  if (templateDef.rollback?.steps?.length > 0) {
+    recipe.rollback = {
+      steps: templateDef.rollback.steps.map((step) => ({
+        id: step.id,
+        description: step.description,
+        idempotent: step.idempotent !== false,
+        run: {
+          command: step.run.command,
+          args: step.run.args || [],
+          mode: 'structured',
+        },
+      })),
+    };
   }
 
   return recipe;

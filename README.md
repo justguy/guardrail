@@ -213,9 +213,7 @@ Template inputs are constrained by schema, but approval reuse is still exact-val
 Guardrail can now bridge approved executions back into authoring flow:
 - `template create --from-manifest` turns an approved command or recipe manifest into a starter template with recorded source provenance
 - `template list` shows local templates plus whether recorded source trust still matches
-- `template publish` converts a command-shaped template into a publishable recipe
-
-Rollback-bearing workflow templates still need manual recipe authoring; `template publish` currently rejects templates with rollback steps.
+- `template publish` converts command templates and rollback-bearing workflow templates into publishable recipes
 
 Bundled Guardrail recipes also resolve shipped wrapper helpers internally now, so cross-repo runs no longer need to thread checkout-path args just to find Guardrail-owned wrapper scripts.
 
@@ -246,6 +244,11 @@ guardrail lane send \
   --prompt "Summarize the current report." \
   --wait
 
+# Treat one turn like guarded chat: send and wait in one command
+guardrail lane chat \
+  --id claude-live \
+  --prompt "Summarize the current report."
+
 # Inspect whether the lane is still alive before restarting it
 guardrail lane status --id claude-live
 
@@ -272,6 +275,9 @@ guardrail lane list --status failed --tool-filter codex --has-conflicts --json
 
 # Remove stale/expired/stopped lane artifacts once you're done diagnosing them
 guardrail lane prune --json
+
+# Preview or apply batch actions across filtered lanes
+guardrail lane batch --action cleanup --status failed --all --dry-run --json
 
 # Inspect the bundled resident-lane adapters before startup
 guardrail lane adapters --json
@@ -338,6 +344,15 @@ Resident lanes are also the first step toward the broader "manager of managers" 
 Lane startup still has to happen in a runtime where the downstream CLI auth already works. Direct AI recipes can now declare bounded `requires_auth` checks too, so Guardrail fails before launch with `missing_auth_prerequisite` instead of letting the underlying CLI die late. The same bounded preflight now applies when those recipes are executed through workflow `recipe_ref` steps, so chained recipe workflows stop before launch on missing tool auth instead of surfacing a late downstream CLI failure. `lane start` now launches the daemon through a short-lived helper so the resident lane survives the wrapped CLI process exiting, records a fresh boot nonce in the lane identity record, scopes the default host key path by Guardrail repo identity, writes a host-side live-lane claim, and uses both repo-local and host-side startup lock files to fail closed when another Guardrail process is already starting the same lane. Lanes can also declare `--scope-type repo|worktree|paths` plus `--scope-mode warn|block`, repeated `--scope-path <relative-path>` values, and typed `--resource <class:name>` claims with `--resource-mode warn|block` for non-path ownership such as `git-branch:main`, `service:postgres`, or `env:staging`. Guardrail now canonicalizes legacy `branch:<name>` to `git-branch:<name>`, auto-discovers the current `git-branch:<name>` claim when the working tree is on an attached branch and no explicit branch claim was provided, and compares repo-scoped branch ownership separately from host-scoped resources like services or environments. When callers narrow `working_dir` below the repo root and omit explicit scope flags, Guardrail now infers a default `worktree/warn` ownership scope from that working directory. Guardrail compares those declared or inferred scopes and resource claims against other live lanes, blocks startup on overlapping `block` claims, and surfaces overlapping ownership through `lane start`, `lane status`, and `lane list`. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again. Use `--tool claude` (default), `--tool codex`, `--tool local-exec`, `--tool prompt-wrapper`, or `--tool ssh-prompt-wrapper` to bind that lane to the right wrapped executor.
 Guardrail now exposes first-class startup and long-turn state for resident lanes. If a request outlives the client-side wait window, `lane send` returns a structured `pending` response with the request id and an exact bounded next step instead of collapsing into `lane_expired`. `lane start` also now fails early with `lane_boot_failed` when the daemon dies during bootstrap or in the immediate post-start window, and `lane status` reports `failureReason`, `failureStage`, `logPath`, transport summary, and a concrete next command when a lane is in `failed` state. If the daemon disappears before the first request and leaves no explicit failure metadata, Guardrail now infers that as `failed/post_start` instead of showing a bare `stale` lane. Use `lane status` to see whether the lane is `ready`, `busy`, `failed`, `expired`, `stale`, or `stopped`, including the current request id/start time, lane identity metadata, transport summary, and the last completed result path. Use `lane inspect` when you want one bounded surface that combines status, latest result, bounded logs, and recent audit history with chain-validity. Use `lane history` when you want just the resident-lane audit timeline. Use `lane portfolio` when you want the repo-level or host-level lane timeline instead of one lane’s history. Use `lane result` to read the stored output for the latest or named request once it completes, and `lane wait` when you want Guardrail to wait on that same result instead of dropping to raw host inspection. Use `lane list` to inspect every repo-local lane in one portfolio view, add `--all-repos` when you need to include host-registry lanes from other checkouts, narrow that view first with `--status`, `--tool-filter`, `--lane-id-filter`, `--session-name-filter`, `--scope-type-filter`, `--scope-mode-filter`, `--resource-filter`, `--alive`, or `--has-conflicts`, use `lane cleanup` to remove one failed/dead lane directly once diagnosis is complete, and use `lane prune` for bulk dead-lane cleanup with explicit audit entries. `lane prune --dry-run` now previews the exact candidates and reasons before deletion, and real prune runs write a bounded tombstone under `.guardrail/lane-tombstones/` before deleting the lane directory so post-mortem review survives cleanup. Raw host inspection should be the last resort, not the default recovery path.
 If a direct recipe run and a composed host-runtime recipe both fail with the same downstream tool-auth error such as `Not logged in`, treat that as missing auth in the target host runtime, not as Guardrail drift. Direct recipes now preflight in the current runtime; composed host-runtime recipes re-run the same bounded auth check inside the hosted surface before the downstream CLI starts. For Claude, the bundled recipes now use a real bounded `claude --print` probe instead of trusting `claude auth status` alone, and the actual bounded Claude probe/invoke path now preserves the wider current runtime env so secure-store-backed auth matches the shell/runtime that launched Guardrail more closely. The declared `requires_env` / `--env-allow` subset is still what Guardrail binds into approval drift. Hosted transport wrappers still isolate the child env with `env -i` and rehydrate only the approved vars, so seeing `env -i` in a pane capture is expected; missing runtime vars or false-positive shell-level auth are the real failure modes. The bundled `cmux-claude-exec` recipe now defaults to one hosted auth repair attempt too: if the hosted probe or exec hits login, Guardrail runs `claude auth login --console` in that exact hosted runtime, reruns the probe, and retries the original exec once. If login itself still needs a human to finish it, the run now fails with `auth_repair_pending_user_input` instead of pretending the slice ran. For repeated interaction or monitoring after startup, prefer the resident FIFO lane over repeated raw host-surface inspection commands so you do not trigger another approval-bearing transport hop every turn.
+
+When you want a reusable transport+exec artifact instead of hand-authoring composed recipe JSON, use `guardrail recipe compose` to merge a transport recipe and an exec recipe into one generated recipe artifact under a single approval contract:
+
+```bash
+guardrail recipe compose \
+  --transport cmux-claude-exec \
+  --exec claude-exec \
+  --output .guardrail/recipes/cmux-direct.recipe.json
+```
 
 Communication matrix:
 - `prompt`: one user message for the current turn
@@ -472,9 +487,9 @@ For open-source distribution, treat recipes as auditable artifacts, not safety c
 | **Git** | `git-clone-allowed`, `git-push`, `git-commit-amend`, `git-force-push-safe` |
 | **Package** | `npm-install`, `pip-install` |
 | **Infra / Cloud** | `docker-build`, `docker-push`, `terraform-plan-only` |
-| **AI / Agent** | `openclaw-fix-tests`, `openclaw-debug-ci` |
+| **AI / Agent** | `openclaw-fix-tests`, `openclaw-debug-ci`, `openclaw-deploy` |
 
-Task-specific OpenClaw recipes are intentionally narrow: `openclaw-fix-tests` and `openclaw-debug-ci` are bound through a dedicated bundled wrapper (`openclaw_task`) that enforces the fixed flow/scope contract before running `openclaw scope check`, `openclaw run --no-escalate`, and `openclaw verify`.
+Task-specific OpenClaw recipes are intentionally narrow: `openclaw-fix-tests`, `openclaw-debug-ci`, and `openclaw-deploy` are bound through a dedicated bundled wrapper (`openclaw_task`) that enforces the fixed flow/scope contract before running `openclaw scope check`, `openclaw run --no-escalate`, and `openclaw verify`. `openclaw-deploy` is still intentionally limited to `preview|staging` plus approved `service_manifest` and `release_file` inputs; broader account-wide deploy surfaces remain out of scope for the public recipe set.
 
 ### Using Recipes
 
@@ -532,6 +547,13 @@ guardrail run --recipe gh-open-pr \
 
 # Task-specific OpenClaw flows with fixed ids and scopes
 guardrail run --recipe openclaw-debug-ci --dry-run
+
+# Narrow deploy flow with approved environment + artifact manifests
+guardrail run --recipe openclaw-deploy \
+  --input environment=preview \
+  --input service_manifest=package.json \
+  --input release_file=package.json \
+  --dry-run
 
 # Pin to a specific version
 guardrail run --recipe git-branch-cleanup@1.0.0 --input repo_path=. --dry-run

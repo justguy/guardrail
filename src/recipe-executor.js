@@ -229,6 +229,65 @@ function buildComposedTransportContract(parentRecipe, step, resolvedInputs, prep
   };
 }
 
+async function executeRecipeRollback(recipe, resolvedInputs, cwd, auditLog, auditContext, opts = {}) {
+  const rollbackSteps = recipe.rollback?.steps || [];
+  if (!rollbackSteps.length) {
+    return { ran: false, results: [] };
+  }
+
+  auditLog.append({ event: 'rollback_start', ...auditContext, step_count: rollbackSteps.length });
+  const results = [];
+
+  for (const step of rollbackSteps) {
+    const contract = buildStructuredRecipeStepContract(recipe, step, resolvedInputs, cwd, opts.envAllow);
+    const dangerCheck = checkDangerous(contract.command, contract.args || []);
+    if (!dangerCheck.safe) {
+      const entry = {
+        step: step.id,
+        success: false,
+        exitCode: null,
+        detail: `blocked: ${dangerCheck.reason}`,
+      };
+      results.push(entry);
+      auditLog.append({ event: 'rollback_step_failed', ...auditContext, step_id: step.id, reason: dangerCheck.reason });
+      continue;
+    }
+    const scopeCheck = checkScope(contract.args || [], opts.allowedPaths);
+    if (!scopeCheck.inScope) {
+      const reason = scopeCheck.violations.join('; ');
+      const entry = {
+        step: step.id,
+        success: false,
+        exitCode: null,
+        detail: `blocked: ${reason}`,
+      };
+      results.push(entry);
+      auditLog.append({ event: 'rollback_step_failed', ...auditContext, step_id: step.id, reason });
+      continue;
+    }
+    const workerResult = await launchWorker(contract, { timeoutMs: step.run?.timeoutMs || 60000, validatorMode: 'exit_code' });
+    const validation = validateResult(workerResult, 'exit_code');
+    const detail = extractFailureDetail(workerResult);
+    const entry = {
+      step: step.id,
+      success: validation.valid,
+      exitCode: validation.exitCode,
+      detail: detail || null,
+    };
+    results.push(entry);
+    auditLog.append({
+      event: validation.valid ? 'rollback_step_done' : 'rollback_step_failed',
+      ...auditContext,
+      step_id: step.id,
+      exitCode: validation.exitCode,
+      reason: detail || null,
+    });
+  }
+
+  auditLog.append({ event: 'rollback_end', ...auditContext, step_count: rollbackSteps.length });
+  return { ran: true, results };
+}
+
 // ---------------------------------------------------------------------------
 // Execute recipe
 // ---------------------------------------------------------------------------
@@ -273,6 +332,15 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
 
   const results = [];
   let stepsExecuted = 0;
+  let rollbackRan = false;
+  let rollbackResults = [];
+
+  const maybeRunRollback = async (step) => {
+    if (step?.idempotent !== false || rollbackRan) return;
+    const rollback = await executeRecipeRollback(recipe, resolvedInputs, cwd, auditLog, auditContext, opts);
+    rollbackRan = rollback.ran;
+    rollbackResults = rollback.results;
+  };
 
   for (const step of (recipe.steps || [])) {
     const preparedComposition = opts.composedSteps?.[step.id] ?? null;
@@ -350,30 +418,33 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
     try {
       workerResult = await launchWorker(contract, { timeoutMs: step.run?.timeoutMs || 60000, validatorMode: 'exit_code' });
     } catch (err) {
+      await maybeRunRollback(step);
       results.push({ step: step.id, success: false, error: err.message });
       auditLog.append({ event: 'step_failed', ...auditContext, step_id: step.id, error: err.message });
-      return { status: 'failed', reason: `Step "${step.id}" failed: ${err.message}`, stepsExecuted, results };
+      return { status: 'failed', reason: `Step "${step.id}" failed: ${err.message}`, stepsExecuted, results, rollbackRan, rollbackResults };
     }
 
     const failureDetail = extractFailureDetail(workerResult);
 
     if (workerResult.timedOut) {
+      await maybeRunRollback(step);
       const reason = failureDetail
         ? `Step "${step.id}" timed out after ${step.run?.timeoutMs || 60000}ms: ${failureDetail}`
         : `Step "${step.id}" timed out after ${step.run?.timeoutMs || 60000}ms`;
       auditLog.append({ event: 'step_failed', ...auditContext, step_id: step.id, reason });
       results.push({ step: step.id, success: false, error: reason });
-      return { status: 'failed', reason, stepsExecuted, results };
+      return { status: 'failed', reason, stepsExecuted, results, rollbackRan, rollbackResults };
     }
 
     const interactiveCheck = detectInteractiveAttempt(workerResult);
     if (interactiveCheck.detected) {
+      await maybeRunRollback(step);
       const reason = failureDetail
         ? `Step "${step.id}" expected interactive input (${interactiveCheck.pattern}): ${failureDetail}`
         : `Step "${step.id}" expected interactive input (${interactiveCheck.pattern})`;
       auditLog.append({ event: 'step_failed', ...auditContext, step_id: step.id, reason });
       results.push({ step: step.id, success: false, error: reason });
-      return { status: 'failed', reason, stepsExecuted, results };
+      return { status: 'failed', reason, stepsExecuted, results, rollbackRan, rollbackResults };
     }
 
     const validation = validateResult(workerResult, 'exit_code');
@@ -387,18 +458,19 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
     });
 
     if (!validation.valid) {
+      await maybeRunRollback(step);
       const reason = failureDetail
         ? `Step "${step.id}" failed with exit code ${validation.exitCode}: ${failureDetail}`
         : `Step "${step.id}" failed with exit code ${validation.exitCode}`;
       auditLog.append({ event: 'step_failed', ...auditContext, step_id: step.id, exitCode: validation.exitCode, reason });
-      return { status: 'failed', reason, stepsExecuted, results };
+      return { status: 'failed', reason, stepsExecuted, results, rollbackRan, rollbackResults };
     }
 
     auditLog.append({ event: 'step_completed', ...auditContext, step_id: step.id });
   }
 
   auditLog.append({ event: 'recipe_execution_end', ...auditContext, status: 'success' });
-  return { status: 'success', stepsExecuted, results };
+  return { status: 'success', stepsExecuted, results, rollbackRan, rollbackResults };
 }
 
 // ---------------------------------------------------------------------------

@@ -683,6 +683,19 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.json, true);
   });
 
+  it('parses lane chat flags', () => {
+    const result = parseArgs([
+      'lane', 'chat',
+      '--id', 'claude-live',
+      '--prompt', 'hello',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-chat');
+    assert.equal(result.laneOpts.id, 'claude-live');
+    assert.equal(result.laneOpts.prompt, 'hello');
+    assert.equal(result.json, true);
+  });
+
   it('parses lane list flags', () => {
     const result = parseArgs([
       'lane', 'list',
@@ -845,6 +858,23 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.json, true);
   });
 
+  it('parses lane batch flags', () => {
+    const result = parseArgs([
+      'lane', 'batch',
+      '--action', 'cleanup',
+      '--status', 'failed',
+      '--all',
+      '--dry-run',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-batch');
+    assert.equal(result.laneOpts.action, 'cleanup');
+    assert.equal(result.laneOpts.status, 'failed');
+    assert.equal(result.laneOpts.all, true);
+    assert.equal(result.dryRun, true);
+    assert.equal(result.json, true);
+  });
+
   it('parses lane prune flags', () => {
     const result = parseArgs([
       'lane', 'prune',
@@ -912,6 +942,27 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.version, '1.2.0');
     assert.equal(result.author, 'me');
     assert.equal(result.dryRun, true);
+  });
+
+  it('parses recipe compose flags', () => {
+    const result = parseArgs([
+      'recipe', 'compose',
+      '--transport', 'transport-hop',
+      '--transport-step', 'hop',
+      '--exec', 'claude-exec',
+      '--output', '.guardrail/recipes/composed.recipe.json',
+      '--name', 'transport-hop-claude',
+      '--recipe-search-dir', 'recipes',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'recipe-compose');
+    assert.equal(result.transportRecipe, 'transport-hop');
+    assert.equal(result.transportStep, 'hop');
+    assert.equal(result.execRecipe, 'claude-exec');
+    assert.equal(result.outputPath, '.guardrail/recipes/composed.recipe.json');
+    assert.equal(result.name, 'transport-hop-claude');
+    assert.deepEqual(result.recipeSearchDirs, ['recipes']);
+    assert.equal(result.json, true);
   });
 });
 

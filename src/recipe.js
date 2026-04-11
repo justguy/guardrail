@@ -210,6 +210,9 @@ function validateSteps(steps) {
     if (typeof step.description !== 'string' || step.description.trim() === '') {
       errors.push(`${p} "${step.id}": must have a description`);
     }
+    if (step.idempotent !== undefined && typeof step.idempotent !== 'boolean') {
+      errors.push(`${p} "${step.id}": idempotent must be a boolean when present`);
+    }
     if (!step.run || typeof step.run !== 'object') {
       errors.push(`${p} "${step.id}": must have a run block`);
     } else {
@@ -237,6 +240,20 @@ function validateSteps(steps) {
       }
     }
   }
+  return errors;
+}
+
+function validateRollback(recipe) {
+  const errors = [];
+
+  if (recipe.rollback !== undefined) {
+    if (!recipe.rollback || typeof recipe.rollback !== 'object' || Array.isArray(recipe.rollback)) {
+      errors.push('rollback must be an object when present');
+    } else {
+      errors.push(...validateSteps(recipe.rollback.steps));
+    }
+  }
+
   return errors;
 }
 
@@ -409,6 +426,7 @@ export function validateRecipe(recipe) {
     ...validateRequiresAuth(recipe),
     ...validateInputs(recipe.inputs),
     ...validateSteps(recipe.steps),
+    ...validateRollback(recipe),
     ...validateGuardrails(recipe.guardrails),
   ];
 
@@ -552,6 +570,7 @@ export function hashRecipe(recipe) {
     author:            recipe.author,
     inputs:            recipe.inputs,
     steps:             recipe.steps,
+    rollback:          recipe.rollback,
     guardrails:        recipe.guardrails,
     approval_required: recipe.approval_required,
     risk_level:        recipe.risk_level,
