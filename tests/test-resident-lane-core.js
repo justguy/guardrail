@@ -178,5 +178,30 @@ describe('Resident lane core', () => {
     assert.equal(hostTimeline.allRepos, true);
     assert.equal(hostTimeline.totalMatches, 1);
     assert.equal(hostTimeline.entries[0].lane_id, 'host-lane');
+    assert.equal(hostTimeline.eventCounts.lane_prune, 1);
+  });
+
+  it('includes repo-local tombstones in the repo portfolio timeline', () => {
+    const dir = tmpLaneDir();
+    const tombstoneDir = join(dir, '.guardrail', 'lane-tombstones');
+    mkdirSync(tombstoneDir, { recursive: true });
+    writeFileSync(join(tombstoneDir, 'cleanup.json'), JSON.stringify({
+      cleanedAt: '2026-04-11T00:00:00.000Z',
+      action: 'cleanup',
+      reason: 'manual_cleanup',
+      laneId: 'math-dead',
+      laneDir: join(dir, '.guardrail', 'lanes', 'math-dead'),
+      guardrailRepo: dir,
+      tool: 'claude',
+      status: 'failed',
+    }), 'utf8');
+
+    const timeline = getResidentLaneTimeline({ guardrailRepo: dir, limit: 10 });
+    assert.equal(timeline.allRepos, false);
+    assert.equal(timeline.totalMatches, 1);
+    assert.equal(timeline.entries[0].event, 'lane_cleanup');
+    assert.equal(timeline.entries[0].reason, 'manual_cleanup');
+    assert.ok(timeline.entries[0].tombstone_path);
+    assert.equal(timeline.summary.byEvent.lane_cleanup, 1);
   });
 });

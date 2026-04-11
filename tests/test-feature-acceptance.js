@@ -763,7 +763,9 @@ describe('README Feature: Resident Lane Mode', () => {
     const parsed = JSON.parse(portfolio.stdout);
     assert.equal(parsed.scope, 'host');
     assert.ok(parsed.chainValid, 'expected host portfolio audit chain to validate');
+    assert.equal(parsed.eventCounts.lane_prune, 1);
     assert.ok(parsed.entries.some((entry) => entry.event === 'lane_prune' && entry.lane_id === 'math-stale'));
+    assert.ok(parsed.entries.some((entry) => entry.source === 'host-audit'));
   });
 
   it('guardrail lane send writes one prompt through a resident lane FIFO', async () => {
