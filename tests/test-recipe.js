@@ -131,6 +131,14 @@ describe('Recipe: Schema Validation', () => {
     );
   });
 
+  it('validates preserve_runtime_env as a boolean', () => {
+    assert.doesNotThrow(() => validateRecipe(makeRecipe({ preserve_runtime_env: true })));
+    assert.throws(
+      () => validateRecipe(makeRecipe({ preserve_runtime_env: 'yes' })),
+      (err) => err.errors.some(e => e.includes('preserve_runtime_env')),
+    );
+  });
+
   it('validates requires_auth as a bounded auth requirement array', () => {
     assert.doesNotThrow(() => validateRecipe(makeRecipe({
       requires_auth: [{ type: 'claude_login', env: ['HOME'], message: 'Login required' }],
@@ -365,6 +373,12 @@ describe('Recipe: Content Hashing', () => {
   it('different requires_auth declarations produce different hash', () => {
     const r1 = makeRecipe();
     const r2 = makeRecipe({ requires_auth: [{ type: 'claude_login', env: ['HOME'] }] });
+    assert.notEqual(hashRecipe(r1), hashRecipe(r2));
+  });
+
+  it('different preserve_runtime_env declarations produce different hash', () => {
+    const r1 = makeRecipe();
+    const r2 = makeRecipe({ preserve_runtime_env: true });
     assert.notEqual(hashRecipe(r1), hashRecipe(r2));
   });
 

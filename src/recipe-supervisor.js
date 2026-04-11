@@ -334,11 +334,16 @@ export async function preflightRecipeAuthRuntime({
       ...deriveAuthEnvRequirements(authRequirements, currentEnv),
     ]),
   ];
-  const authEnvPolicy = {
-    inherit: false,
-    allow: [...new Set(['PATH', ...(envAllow || [])])],
-    inject: {},
-  };
+  const authEnvPolicy = recipe.preserve_runtime_env === true
+    ? {
+        inherit: true,
+        inject: cwd ? { PWD: cwd } : {},
+      }
+    : {
+        inherit: false,
+        allow: [...new Set(['PATH', ...(envAllow || [])])],
+        inject: cwd ? { PWD: cwd } : {},
+      };
 
   if (requiredEnv.length > 0 && envAllow.length === 0) {
     return {

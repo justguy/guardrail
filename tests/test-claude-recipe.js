@@ -20,6 +20,7 @@ import {
   formatAllowUnverifiedReapprovalNotice,
   preflightRecipeAuthRuntime,
 } from '../src/recipe-supervisor.js';
+import { executeRecipe } from '../src/recipe-executor.js';
 import { signRecipe } from '../src/recipe-channel.js';
 import { saveManifest } from '../src/manifest.js';
 import {
@@ -174,6 +175,7 @@ describe('Claude recipe', () => {
       recipe.requires_env,
       ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'TERM_PROGRAM', 'LANG', 'TMPDIR', 'PWD', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR'],
     );
+    assert.equal(recipe.preserve_runtime_env, true);
     assert.deepEqual(recipe.requires_auth, [{ type: 'claude_exec_probe' }]);
     assert.match(recipe.description, /OS-managed secure stores|process-identity-gated runtime state/);
     assert.match(recipe.description, /exact same shell\/runtime that will later launch Guardrail/);
@@ -279,10 +281,50 @@ describe('Claude recipe', () => {
 
     assert.equal(result.ok, true);
     assert.deepEqual(seenOptions?.envPolicy, {
-      inherit: false,
-      allow: [...new Set(['PATH', ...recipe.requires_env])],
-      inject: {},
+      inherit: true,
+      inject: {
+        PWD: process.cwd(),
+      },
     });
+  });
+
+  it('preserves the full runtime env for secure-store-backed claude execution while still requiring declared env approval', async () => {
+    const originalExtra = process.env.GUARDRAIL_CLAUDE_RUNTIME_EXTRA;
+    process.env.GUARDRAIL_CLAUDE_RUNTIME_EXTRA = 'present';
+
+    try {
+      const recipe = makeClaudeStubRecipe({
+        preserve_runtime_env: true,
+        requires_env: ['HOME'],
+        steps: [
+          {
+            id: 'env-check',
+            description: 'assert hidden runtime env survives',
+            run: {
+              command: 'node',
+              args: ['-e', 'if (process.env.GUARDRAIL_CLAUDE_RUNTIME_EXTRA !== "present") process.exit(7)'],
+              mode: 'structured',
+              timeoutMs: 5000,
+            },
+          },
+        ],
+      });
+
+      const result = await executeRecipe(recipe, {}, {
+        approved: true,
+        cwd: process.cwd(),
+        envAllow: ['HOME'],
+        allowUnverified: false,
+      });
+
+      assert.equal(result.status, 'success');
+    } finally {
+      if (originalExtra === undefined) {
+        delete process.env.GUARDRAIL_CLAUDE_RUNTIME_EXTRA;
+      } else {
+        process.env.GUARDRAIL_CLAUDE_RUNTIME_EXTRA = originalExtra;
+      }
+    }
   });
 
   it('explains reapproval when --allow-unverified widens the recipe trust boundary', () => {

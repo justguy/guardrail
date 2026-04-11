@@ -146,7 +146,7 @@ export function dryRun(recipe, resolvedInputs, opts = {}) {
   };
 }
 
-function buildRecipeEnvPolicy(recipe, envAllow = []) {
+function buildRecipeEnvPolicy(recipe, envAllow = [], cwd = null) {
   const requiredEnv = [
     ...(recipe.requires_env || []),
     ...deriveAuthEnvRequirements(recipe.requires_auth || []),
@@ -155,11 +155,18 @@ function buildRecipeEnvPolicy(recipe, envAllow = []) {
     return undefined;
   }
 
+  if (recipe.preserve_runtime_env === true) {
+    return {
+      inherit: true,
+      inject: cwd ? { PWD: cwd } : {},
+    };
+  }
+
   const allow = [...new Set(['PATH', ...(envAllow || [])])];
   return {
     inherit: false,
     allow,
-    inject: {},
+    inject: cwd ? { PWD: cwd } : {},
   };
 }
 
@@ -172,7 +179,7 @@ function buildStructuredRecipeStepContract(recipe, step, resolvedInputs, cwd, en
     args,
     cwd,
     mode: 'structured',
-    envPolicy: buildRecipeEnvPolicy(recipe, envAllow),
+    envPolicy: buildRecipeEnvPolicy(recipe, envAllow, cwd),
     authPreflight: {
       requirements: recipe.requires_auth || [],
     },
@@ -213,7 +220,7 @@ function buildComposedTransportContract(parentRecipe, step, resolvedInputs, prep
     args: [...transportArgs, '--exec-contract-b64', encodedChildContract],
     cwd,
     mode: 'structured',
-    envPolicy: buildRecipeEnvPolicy(parentRecipe, []),
+    envPolicy: buildRecipeEnvPolicy(parentRecipe, [], cwd),
   });
 
   return {

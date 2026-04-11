@@ -101,6 +101,14 @@ function validateRequiresEnv(recipe) {
   return [];
 }
 
+function validatePreserveRuntimeEnv(recipe) {
+  if (recipe.preserve_runtime_env === undefined) return [];
+  if (typeof recipe.preserve_runtime_env !== 'boolean') {
+    return ['preserve_runtime_env must be a boolean when present'];
+  }
+  return [];
+}
+
 function validateRequiresAuth(recipe) {
   if (recipe.requires_auth === undefined) return [];
   if (!Array.isArray(recipe.requires_auth) || recipe.requires_auth.length === 0) {
@@ -397,6 +405,7 @@ export function validateRecipe(recipe) {
   const errors = [
     ...validateTopLevel(recipe),
     ...validateRequiresEnv(recipe),
+    ...validatePreserveRuntimeEnv(recipe),
     ...validateRequiresAuth(recipe),
     ...validateInputs(recipe.inputs),
     ...validateSteps(recipe.steps),
@@ -549,6 +558,9 @@ export function hashRecipe(recipe) {
   };
   if (recipe.requires_env !== undefined) {
     hashable.requires_env = recipe.requires_env;
+  }
+  if (recipe.preserve_runtime_env !== undefined) {
+    hashable.preserve_runtime_env = recipe.preserve_runtime_env;
   }
   if (recipe.requires_auth !== undefined) {
     hashable.requires_auth = recipe.requires_auth;
