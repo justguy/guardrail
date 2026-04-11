@@ -6,10 +6,13 @@ import { tmpdir } from 'node:os';
 
 import {
   getResidentLaneStatus,
+  getResidentLaneTimeline,
   lanePaths,
   listResidentLanes,
+  residentLanePortfolioAuditPath,
   runResidentLaneRequest,
 } from '../src/resident-lane-core.js';
+import { createAuditLog } from '../src/audit.js';
 
 function tmpLaneDir() {
   return mkdtempSync(join(tmpdir(), 'gr-lane-core-'));
@@ -141,5 +144,39 @@ describe('Resident lane core', () => {
     assert.equal(listing.lanes.length, 2);
     assert.equal(listing.lanes[0].scopeConflicts.length, 1);
     assert.equal(listing.lanes[1].scopeConflicts.length, 1);
+  });
+
+  it('builds a repo or host portfolio timeline from resident-lane audit entries', () => {
+    const dir = tmpLaneDir();
+    const repoAudit = createAuditLog(join(dir, '.guardrail', 'audit.jsonl'));
+    repoAudit.append({
+      event: 'lane_start',
+      lane_id: 'repo-lane',
+      lane_dir: join(dir, '.guardrail', 'lanes', 'repo-lane'),
+      guardrail_repo: dir,
+      tool: 'claude',
+      status: 'success',
+    });
+    const hostAuditPath = residentLanePortfolioAuditPath({ hostStateDir: join(dir, '.host') });
+    const hostAudit = createAuditLog(hostAuditPath);
+    hostAudit.append({
+      event: 'lane_prune',
+      lane_id: 'host-lane',
+      lane_dir: '/tmp/host-lane',
+      guardrail_repo: '/tmp/other-repo',
+      tool: 'codex',
+      status: 'success',
+      prune_reason: 'dead_artifacts_present',
+    });
+
+    const repoTimeline = getResidentLaneTimeline({ guardrailRepo: dir });
+    const hostTimeline = getResidentLaneTimeline({ hostStateDir: join(dir, '.host'), allRepos: true });
+
+    assert.equal(repoTimeline.allRepos, false);
+    assert.equal(repoTimeline.totalMatches, 1);
+    assert.equal(repoTimeline.entries[0].lane_id, 'repo-lane');
+    assert.equal(hostTimeline.allRepos, true);
+    assert.equal(hostTimeline.totalMatches, 1);
+    assert.equal(hostTimeline.entries[0].lane_id, 'host-lane');
   });
 });

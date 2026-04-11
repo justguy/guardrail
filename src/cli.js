@@ -154,6 +154,31 @@ function buildLaneHistoryBundle(history) {
   };
 }
 
+function lanePortfolioAuditPath(laneOpts = {}) {
+  return resolve(laneOpts.hostStateDir || resolve(homedir(), '.guardrail'), 'resident-lane-portfolio.jsonl');
+}
+
+function buildLanePortfolioBundle(timeline) {
+  return {
+    ...timeline,
+    entries: timeline.entries.map((entry) => ({
+      timestamp: entry.timestamp,
+      event: entry.event,
+      lane_id: entry.lane_id || null,
+      lane_dir: entry.lane_dir || null,
+      guardrail_repo: entry.guardrail_repo || null,
+      request_id: entry.request_id || null,
+      session_name: entry.session_name || null,
+      tool: entry.tool || null,
+      status: entry.status || null,
+      reason: entry.reason || entry.prune_reason || null,
+      failure_stage: entry.failure_stage || null,
+      scope_conflict_count: entry.scope_conflict_count ?? null,
+      resource_conflict_count: entry.resource_conflict_count ?? null,
+    })),
+  };
+}
+
 function ensureLaneKeyFile(keyPath) {
   mkdirSync(dirname(keyPath), { recursive: true });
   const secret = randomBytes(32).toString('hex');
@@ -224,17 +249,20 @@ async function appendLaneAuditEntry(laneOpts, event, details = {}) {
   try {
     const { createAuditLog } = await import('./audit.js');
     const guardrailRepo = resolve(laneOpts.guardrailRepo || '.');
-    const auditLog = createAuditLog(resolve(guardrailRepo, '.guardrail', 'audit.jsonl'));
-    auditLog.append({
+    const entry = {
       event,
       trace_id: `lane:${laneOpts.laneId || laneOpts.sessionName || 'resident'}`,
+      guardrail_repo: guardrailRepo,
       lane_id: laneOpts.laneId || null,
       lane_dir: laneOpts.laneDir || null,
       tool: laneOpts.tool || 'claude',
       session_name: laneOpts.sessionName || null,
       session_id: laneOpts.sessionId || null,
       ...details,
-    });
+    };
+    const auditLog = createAuditLog(resolve(guardrailRepo, '.guardrail', 'audit.jsonl'));
+    auditLog.append(entry);
+    createAuditLog(lanePortfolioAuditPath(laneOpts)).append(entry);
   } catch {
     // Best effort: lane execution must not fail solely because audit append failed.
   }
@@ -258,6 +286,7 @@ Commands:
   lane status [flags]                   Show resident lane status and recovery hints
   lane inspect [flags]                  Show status, latest result, and bounded logs together
   lane history [flags]                  Query resident-lane audit history
+  lane portfolio [flags]                Query the portfolio-wide resident-lane timeline
   lane logs [flags]                     Read the bounded resident lane log tail
   lane stop [flags]                     Stop a resident interactive lane
   lane cleanup [flags]                  Remove one resident lane's local artifacts
@@ -340,6 +369,7 @@ Examples:
   guardrail lane result --id claude-live --request-id req-123
   guardrail lane inspect --id claude-live --tail 60
   guardrail lane history --id claude-live --limit 20
+  guardrail lane portfolio --all-repos --limit 30 --json
   guardrail lane logs --id claude-live --tail 60
   guardrail lane stop --id claude-live
   guardrail lane cleanup --id claude-live
@@ -802,7 +832,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'result', 'wait', 'status', 'inspect', 'history', 'logs', 'stop', 'cleanup', 'list', 'prune', 'adapters'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'result', 'wait', 'status', 'inspect', 'history', 'portfolio', 'logs', 'stop', 'cleanup', 'list', 'prune', 'adapters'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -872,6 +902,7 @@ export function parseArgs(argv) {
       '--scope-type-filter': 'scopeTypeFilter',
       '--scope-mode-filter': 'scopeModeFilter',
       '--resource-filter': 'resourceFilter',
+      '--repo-filter': 'repoFilter',
       '--host-state-dir': 'hostStateDir',
       '--all-repos': { key: 'allRepos', boolean: true },
       '--lanes-dir': 'lanesDir',
@@ -1854,6 +1885,32 @@ async function main() {
       console.log(`  Chain:   ${history.chainValid ? 'valid' : 'broken'}`);
       for (const entry of history.entries) {
         console.log(`  ${entry.timestamp} ${entry.event} request=${entry.request_id ?? 'n/a'} status=${entry.status ?? 'n/a'} reason=${entry.reason ?? 'n/a'} exit=${entry.exit_code ?? 'n/a'}`);
+      }
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-portfolio') {
+    const { getResidentLaneTimeline } = await import('./resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    const timeline = buildLanePortfolioBundle(getResidentLaneTimeline(laneOpts));
+    if (parsed.json) {
+      console.log(JSON.stringify(timeline, null, 2));
+    } else {
+      console.log(`Lane portfolio scope: ${timeline.scope}`);
+      console.log(`  Audit path:     ${timeline.auditPath}`);
+      console.log(`  Chain valid:    ${timeline.chainValid ? 'yes' : 'no'}`);
+      console.log(`  Live lanes:     ${timeline.liveLaneCount}`);
+      console.log(`  Matched events: ${timeline.totalMatches}`);
+      if (timeline.entries.length > 0) {
+        console.log('');
+        for (const entry of timeline.entries) {
+          console.log(`${entry.timestamp} ${entry.event} ${entry.lane_id || entry.lane_dir || 'unknown'}`);
+          console.log(`  Repo:    ${entry.guardrail_repo || 'n/a'}`);
+          console.log(`  Tool:    ${entry.tool || 'n/a'}`);
+          console.log(`  Status:  ${entry.status || 'n/a'}`);
+          if (entry.reason) console.log(`  Reason:  ${entry.reason}`);
+        }
       }
     }
     process.exit(0);

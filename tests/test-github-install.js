@@ -808,6 +808,23 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.laneOpts.limit, '5');
   });
 
+  it('parses lane portfolio flags', () => {
+    const result = parseArgs([
+      'lane', 'portfolio',
+      '--all-repos',
+      '--tool-filter', 'codex',
+      '--repo-filter', '/tmp/example-repo',
+      '--limit', '10',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-portfolio');
+    assert.equal(result.laneOpts.allRepos, true);
+    assert.equal(result.laneOpts.toolFilter, 'codex');
+    assert.equal(result.laneOpts.repoFilter, '/tmp/example-repo');
+    assert.equal(result.laneOpts.limit, '10');
+    assert.equal(result.json, true);
+  });
+
   it('parses lane stop flags', () => {
     const result = parseArgs([
       'lane', 'stop',

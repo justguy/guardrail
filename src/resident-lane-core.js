@@ -1077,6 +1077,238 @@ export function getResidentLaneHistory(rawOptions = {}) {
   };
 }
 
+function laneTimelineEntryMatches(entry, rawOptions = {}) {
+  if (rawOptions.event && entry.event !== rawOptions.event) return false;
+  if (rawOptions.laneId && entry.lane_id !== rawOptions.laneId) return false;
+  if (rawOptions.filterSessionName && entry.session_name !== rawOptions.filterSessionName) return false;
+  if (rawOptions.toolFilter) {
+    const wantedTools = new Set(Array.isArray(rawOptions.toolFilter) ? rawOptions.toolFilter : splitCsv(rawOptions.toolFilter));
+    if (wantedTools.size > 0 && !wantedTools.has(entry.tool || '')) return false;
+  }
+  if (rawOptions.status) {
+    const wantedStatuses = new Set(Array.isArray(rawOptions.status) ? rawOptions.status : splitCsv(rawOptions.status));
+    if (wantedStatuses.size > 0 && !wantedStatuses.has(entry.status || '')) return false;
+  }
+  if (rawOptions.after && entry.timestamp < rawOptions.after) return false;
+  if (rawOptions.before && entry.timestamp > rawOptions.before) return false;
+  if (rawOptions.repoFilter) {
+    const requestedRepo = resolve(rawOptions.guardrailRepo || '.', rawOptions.repoFilter);
+    const entryRepo = entry.guardrail_repo ? resolve(entry.guardrail_repo) : null;
+    if (entryRepo !== requestedRepo) return false;
+  }
+  return true;
+}
+
+function readLaneTimelineAuditEntries(guardrailRepo, rawOptions = {}) {
+  const auditPath = resolve(guardrailRepo, '.guardrail', 'audit.jsonl');
+  const repoEntries = queryAuditLog(auditPath, {
+    after: rawOptions.after || undefined,
+    before: rawOptions.before || undefined,
+  }).filter((entry) => String(entry.event || '').startsWith('lane_'))
+    .map((entry) => ({
+      source: 'audit',
+      timestamp: entry.timestamp,
+      event: entry.event,
+      lane_id: entry.lane_id || null,
+      lane_dir: entry.lane_dir ? resolve(guardrailRepo, entry.lane_dir) : null,
+      session_name: entry.session_name || null,
+      session_id: entry.session_id || null,
+      tool: entry.tool || null,
+      status: entry.status || null,
+      reason: entry.reason || entry.prune_reason || null,
+      request_id: entry.request_id || null,
+      guardrail_repo: guardrailRepo,
+      detail: entry,
+    }))
+    .filter((entry) => laneTimelineEntryMatches(entry, rawOptions));
+  return {
+    guardrailRepo,
+    auditPath,
+    chainValid: verifyAuditChain(auditPath).valid,
+    entries: repoEntries,
+  };
+}
+
+function readLaneTimelineTombstones(guardrailRepo, rawOptions = {}) {
+  const dir = laneTombstoneDir(guardrailRepo);
+  const entries = [];
+  if (!existsSync(dir)) {
+    return { tombstoneDir: dir, entries };
+  }
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const parsed = readJson(join(dir, entry.name), null);
+    if (!parsed?.cleanedAt || !parsed?.laneDir) continue;
+    const event = parsed.action === 'prune' ? 'lane_prune' : 'lane_cleanup';
+    const normalized = {
+      source: 'tombstone',
+      timestamp: parsed.cleanedAt,
+      event,
+      lane_id: parsed.laneId || null,
+      lane_dir: resolve(parsed.laneDir),
+      session_name: parsed.sessionName || null,
+      session_id: parsed.sessionId || null,
+      tool: parsed.tool || parsed.adapterId || null,
+      status: parsed.status || null,
+      reason: parsed.reason || null,
+      request_id: parsed.currentRequestId || parsed.lastRequestId || null,
+      guardrail_repo: parsed.guardrailRepo ? resolve(parsed.guardrailRepo) : guardrailRepo,
+      tombstone_path: join(dir, entry.name),
+      detail: parsed,
+    };
+    if (laneTimelineEntryMatches(normalized, rawOptions)) {
+      entries.push(normalized);
+    }
+  }
+  return { tombstoneDir: dir, entries };
+}
+
+function readLaneTimelinePortfolioAuditEntries(rawOptions = {}) {
+  const auditPath = residentLanePortfolioAuditPath(rawOptions);
+  const entries = queryAuditLog(auditPath, {
+    after: rawOptions.after || undefined,
+    before: rawOptions.before || undefined,
+  }).filter((entry) => String(entry.event || '').startsWith('lane_'))
+    .map((entry) => ({
+      source: 'host-audit',
+      timestamp: entry.timestamp,
+      event: entry.event,
+      lane_id: entry.lane_id || null,
+      lane_dir: entry.lane_dir ? resolve(entry.lane_dir) : null,
+      session_name: entry.session_name || null,
+      session_id: entry.session_id || null,
+      tool: entry.tool || null,
+      status: entry.status || null,
+      reason: entry.reason || entry.prune_reason || null,
+      request_id: entry.request_id || null,
+      guardrail_repo: entry.guardrail_repo ? resolve(entry.guardrail_repo) : null,
+      tombstone_path: entry.tombstone_path || null,
+      detail: entry,
+    }))
+    .filter((entry) => laneTimelineEntryMatches(entry, rawOptions));
+  return {
+    auditPath,
+    chainValid: verifyAuditChain(auditPath).valid,
+    entries,
+  };
+}
+
+function portfolioReposForLaneTimeline(rawOptions = {}) {
+  const guardrailRepo = resolve(rawOptions.guardrailRepo || '.');
+  const repos = new Set([guardrailRepo]);
+  if (rawOptions.allRepos === true || rawOptions.allRepos === 'true') {
+    const hostEntries = readHostLaneRegistryEntries(rawOptions).entries;
+    for (const entry of hostEntries) {
+      if (entry.guardrailRepo) repos.add(resolve(entry.guardrailRepo));
+    }
+  }
+  return Array.from(repos).sort();
+}
+
+export function getResidentLaneTimeline(rawOptions = {}) {
+  const allRepos = rawOptions.allRepos === true || rawOptions.allRepos === 'true';
+  const listing = listResidentLanes(rawOptions);
+  const snapshot = {
+    registryDir: listing.registryDir,
+    hostRegistryDir: listing.hostRegistryDir || null,
+    counts: listing.counts,
+    visibleLaneCount: listing.lanes.length,
+    lanes: listing.lanes.map((lane) => ({
+      laneId: lane.laneId || null,
+      laneDir: lane.laneDir,
+      guardrailRepo: lane.guardrailRepo || null,
+      tool: lane.tool || lane.adapterId || null,
+      status: lane.status,
+      alive: !!lane.alive,
+      currentRequestId: lane.currentRequestId || null,
+      sessionName: lane.sessionName || null,
+      scopeType: lane.scopeType || 'none',
+      scopeMode: lane.scopeMode || 'warn',
+      resourceClaims: Array.isArray(lane.resourceClaims) ? lane.resourceClaims : [],
+    })),
+  };
+  if (allRepos) {
+    const hostAudit = readLaneTimelinePortfolioAuditEntries(rawOptions);
+    const entries = hostAudit.entries.slice(-parseInteger(rawOptions.limit, 40, 'limit', 1));
+    const summary = {
+      totalMatches: hostAudit.entries.length,
+      byEvent: {},
+      byTool: {},
+      byStatus: {},
+    };
+    for (const entry of hostAudit.entries) {
+      summary.byEvent[entry.event] = (summary.byEvent[entry.event] || 0) + 1;
+      if (entry.tool) summary.byTool[entry.tool] = (summary.byTool[entry.tool] || 0) + 1;
+      if (entry.status) summary.byStatus[entry.status] = (summary.byStatus[entry.status] || 0) + 1;
+    }
+    return {
+      repos: [],
+      repoCount: 0,
+      allRepos: true,
+      scope: 'host',
+      auditPath: hostAudit.auditPath,
+      chainValid: hostAudit.chainValid,
+      count: entries.length,
+      totalMatches: hostAudit.entries.length,
+      summary,
+      snapshot,
+      entries,
+    };
+  }
+
+  const repos = portfolioReposForLaneTimeline(rawOptions);
+  const repoSummaries = [];
+  const allEntries = [];
+
+  for (const guardrailRepo of repos) {
+    const audit = readLaneTimelineAuditEntries(guardrailRepo, rawOptions);
+    const tombstones = readLaneTimelineTombstones(guardrailRepo, rawOptions);
+    repoSummaries.push({
+      guardrailRepo,
+      auditPath: audit.auditPath,
+      chainValid: audit.chainValid,
+      auditEntryCount: audit.entries.length,
+      tombstoneDir: tombstones.tombstoneDir,
+      tombstoneCount: tombstones.entries.length,
+    });
+    allEntries.push(...audit.entries, ...tombstones.entries);
+  }
+
+  allEntries.sort((a, b) => {
+    const byTs = String(a.timestamp || '').localeCompare(String(b.timestamp || ''));
+    if (byTs !== 0) return byTs;
+    return String(a.lane_id || a.lane_dir || '').localeCompare(String(b.lane_id || b.lane_dir || ''));
+  });
+
+  const limit = parseInteger(rawOptions.limit, 40, 'limit', 1);
+  const entries = allEntries.slice(-limit);
+  const summary = {
+    totalMatches: allEntries.length,
+    byEvent: {},
+    byTool: {},
+    byStatus: {},
+  };
+  for (const entry of allEntries) {
+    summary.byEvent[entry.event] = (summary.byEvent[entry.event] || 0) + 1;
+    if (entry.tool) summary.byTool[entry.tool] = (summary.byTool[entry.tool] || 0) + 1;
+    if (entry.status) summary.byStatus[entry.status] = (summary.byStatus[entry.status] || 0) + 1;
+  }
+
+  return {
+    repos: repoSummaries,
+    repoCount: repoSummaries.length,
+    allRepos: false,
+    scope: 'repo',
+    auditPath: repoSummaries[0]?.auditPath || null,
+    chainValid: repoSummaries.every((repo) => repo.chainValid !== false),
+    count: entries.length,
+    totalMatches: allEntries.length,
+    summary,
+    snapshot,
+    entries,
+  };
+}
+
 function annotateScopeConflicts(entries) {
   return entries.map((entry) => {
     const scopeConflicts = entries

@@ -304,6 +304,7 @@ AI execution recipes:
   - `node src/cli.js lane wait --id <lane-id> [--request-id <id>]`
   - `node src/cli.js lane inspect --id <lane-id> [--tail <n>]`
   - `node src/cli.js lane history --id <lane-id> [--limit <n>]`
+  - `node src/cli.js lane portfolio [--all-repos] [--limit <n>]`
   - `node src/cli.js lane logs --id <lane-id> [--tail <n>]`
   - `node src/cli.js lane status --id <lane-id>`
   - `node src/cli.js lane cleanup --id <lane-id>`
@@ -329,6 +330,7 @@ AI execution recipes:
 - `lane result` is the bounded recovery/read step for those cases. Use it to fetch the stored output for the latest or named request after a long-running turn completes.
 - `lane inspect` is the bounded triage step when you want one command that shows status, latest result, and a log tail together.
 - `lane history` is the bounded audit timeline step when you want the recent `lane_start` / `lane_send` / `lane_result` / `lane_wait` / `lane_cleanup` / `lane_stop` trail for one lane without opening the raw audit file.
+- `lane portfolio` is the bounded swarm timeline step when you need one surface for startup, prune, cleanup, and other lane lifecycle events across the repo audit log or the mirrored host-level lane audit (`--all-repos`) instead of pivoting lane by lane.
 - `lane logs` is the bounded diagnosis step when status/result are not enough. Use it before raw host-pane inspection so you can read the local lane log tail without paying another transport approval.
 - `lane wait` is the bounded wait/recovery step for those cases. Use it when you want Guardrail to keep polling for completion instead of dropping to raw host inspection or an ad hoc retry loop.
 - `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
@@ -367,7 +369,7 @@ AI execution recipes:
 - Treat host-runtime selection as an expected routing decision, not as a surprising late-stage workaround. If a tool is authenticated or functional only in a different launcher, terminal surface, remote shell, container, or similar runtime, choose that runtime early and explain it plainly as “this tool must run in the already-working host runtime,” not as a mysterious new failure after several retries.
 - When switching runtimes, name the reason in one sentence: same tool contract, different host runtime. Example: “the guarded Claude wrapper is unchanged; only the host runtime changes because the authenticated terminal surface is where Claude CLI login is currently valid.”
 - Do not present a runtime switch as if Guardrail has changed its approval model or as if the user must infer hidden state. The agent should make the boundary explicit: exec contract stays the same, host runtime changes, and the switch is to avoid repeating known-failing paths in an unauthenticated shell.
-- Resident lane CLI actions also append lifecycle entries to the repo audit log: `lane_start`, `lane_send`, `lane_result`, `lane_stop`, and `lane_prune`. Use `.guardrail/audit.jsonl` when you need to reconstruct whether a lane was started, reused, queried for results, expired, explicitly torn down, or pruned after it went dead.
+- Resident lane CLI actions also append lifecycle entries to the repo audit log and to the mirrored host-level lane portfolio audit: `lane_start`, `lane_send`, `lane_result`, `lane_wait`, `lane_cleanup`, `lane_stop`, and `lane_prune`. Use `lane portfolio --all-repos` when you need the bounded host-level view, and fall back to `.guardrail/audit.jsonl` only when you truly need the raw repo-local file.
 - The resident FIFO bridge is intentionally narrow:
   - request schema is exactly `{ "id": "...", "prompt": "..." }`
   - request ids are bounded and pattern-checked

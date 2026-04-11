@@ -738,6 +738,34 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.entries[1].request_id, 'req-1');
   });
 
+  it('guardrail lane portfolio returns the mirrored host timeline for lane lifecycle events', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const hostStateDir = join(dir, 'host');
+    const laneDir = join(repoDir, '.guardrail', 'lanes', 'math-stale');
+    mkdirSync(join(repoDir, '.guardrail'), { recursive: true });
+    mkdirSync(laneDir, { recursive: true });
+    const keyPath = join(dir, 'stale.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(join(laneDir, 'identity.json'), JSON.stringify({
+      laneId: 'math-stale',
+      laneDir,
+      guardrailRepo: repoDir,
+      keyPath,
+      identityNonce: 'nonce-stale',
+    }), 'utf8');
+
+    const prune = run(`${CLI} lane prune --guardrail-repo ${repoDir} --host-state-dir ${hostStateDir} --json`);
+    assert.equal(prune.exitCode, 0, prune.stderr);
+
+    const portfolio = run(`${CLI} lane portfolio --guardrail-repo ${repoDir} --host-state-dir ${hostStateDir} --all-repos --limit 10 --json`);
+    assert.equal(portfolio.exitCode, 0, portfolio.stderr);
+    const parsed = JSON.parse(portfolio.stdout);
+    assert.equal(parsed.scope, 'host');
+    assert.ok(parsed.chainValid, 'expected host portfolio audit chain to validate');
+    assert.ok(parsed.entries.some((entry) => entry.event === 'lane_prune' && entry.lane_id === 'math-stale'));
+  });
+
   it('guardrail lane send writes one prompt through a resident lane FIFO', async () => {
     const dir = tmpDir();
     const guardrailRepo = join(dir, 'repo');

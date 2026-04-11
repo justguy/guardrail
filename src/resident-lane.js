@@ -7,6 +7,7 @@ export {
   cleanupResidentLane,
   createLaneBootError,
   getResidentLaneHistory,
+  getResidentLaneTimeline,
   getResidentLaneLogs,
   getResidentLaneResult,
   getResidentLaneStatus,
