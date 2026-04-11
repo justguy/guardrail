@@ -229,7 +229,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     ? resolve(guardrailRepo, rawOptions.workingDir)
     : guardrailRepo;
   const scope = normalizeResidentLaneScope(rawOptions, guardrailRepo, workingDir);
-  const resources = normalizeResidentLaneResources(rawOptions);
+  const resources = normalizeResidentLaneResources(rawOptions, guardrailRepo, workingDir);
   const keyPath = rawOptions.keyPath ? resolve(baseCwd, rawOptions.keyPath) : '';
   const hostStateDir = rawOptions.hostStateDir
     ? resolve(baseCwd, rawOptions.hostStateDir)
@@ -258,6 +258,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     scopePaths: scope.scopePaths,
     resourceMode: resources.resourceMode,
     resources: resources.resources,
+    resourceDetails: resources.resourceDetails,
     keyPath,
     hostStateDir,
     identityNonce: rawOptions.identityNonce || '',
@@ -270,6 +271,11 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     idleTimeoutMs: parseInteger(rawOptions.idleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS, 'idle_timeout_ms', 1000),
     launchDaemonHelper: rawOptions.launchDaemonHelper === true,
     daemon: rawOptions.daemon === true,
+    transportSummary: {
+      mode: 'codex-cli',
+      profile: rawOptions.profile || '',
+      sandbox: rawOptions.sandbox || '',
+    },
   };
 }
 

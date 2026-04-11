@@ -672,11 +672,11 @@ describe('README Feature: Resident Lane Mode', () => {
 
   it('guardrail lane list --all-repos includes host-registry lanes and honors resource filters', () => {
     const dir = tmpDir();
-    const homeDir = join(dir, 'home');
+    const hostStateDir = join(dir, 'host-state');
     const repoDir = join(dir, 'repo');
     mkdirSync(join(repoDir, '.guardrail', 'lanes'), { recursive: true });
-    mkdirSync(join(homeDir, '.guardrail', 'lanes', 'resident-lanes'), { recursive: true });
-    writeFileSync(join(homeDir, '.guardrail', 'lanes', 'resident-lanes', 'remote-lane.json'), JSON.stringify({
+    mkdirSync(join(hostStateDir, 'resident-lanes'), { recursive: true });
+    writeFileSync(join(hostStateDir, 'resident-lanes', 'remote-lane.json'), JSON.stringify({
       laneId: 'remote-lane',
       laneDir: join(dir, 'other-repo', '.guardrail', 'lanes', 'remote-lane'),
       guardrailRepo: join(dir, 'other-repo'),
@@ -690,14 +690,52 @@ describe('README Feature: Resident Lane Mode', () => {
       updatedAt: new Date().toISOString(),
     }), 'utf8');
 
-    const r = run(`${CLI} lane list --guardrail-repo ${repoDir} --all-repos --resource-filter git-branch:main --json`, {
-      env: { ...process.env, HOME: homeDir },
-    });
+    const r = run(`${CLI} lane list --guardrail-repo ${repoDir} --host-state-dir ${hostStateDir} --all-repos --resource-filter git-branch:main --json`);
     assert.equal(r.exitCode, 0, r.stderr);
     const parsed = JSON.parse(r.stdout);
     assert.equal(parsed.lanes.length, 1);
     assert.equal(parsed.lanes[0].laneId, 'remote-lane');
     assert.equal(parsed.lanes[0].source, 'host-registry');
+
+    const classFiltered = run(`${CLI} lane list --guardrail-repo ${repoDir} --host-state-dir ${hostStateDir} --all-repos --resource-filter git-branch --json`);
+    assert.equal(classFiltered.exitCode, 0, classFiltered.stderr);
+    const classParsed = JSON.parse(classFiltered.stdout);
+    assert.equal(classParsed.lanes.length, 1);
+    assert.equal(classParsed.lanes[0].laneId, 'remote-lane');
+  });
+
+  it('guardrail lane history returns bounded audit entries for one lane', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    mkdirSync(join(repoDir, '.guardrail'), { recursive: true });
+    writeFileSync(join(repoDir, '.guardrail', 'audit.jsonl'), [
+      JSON.stringify({
+        timestamp: '2026-04-10T00:00:00.000Z',
+        event: 'lane_start',
+        lane_id: 'math-live',
+        lane_dir: join(repoDir, '.guardrail', 'lanes', 'math-live'),
+        tool: 'claude',
+        session_name: 'math-live',
+        status: 'success',
+      }),
+      JSON.stringify({
+        timestamp: '2026-04-10T00:01:00.000Z',
+        event: 'lane_send',
+        lane_id: 'math-live',
+        lane_dir: join(repoDir, '.guardrail', 'lanes', 'math-live'),
+        tool: 'claude',
+        session_name: 'math-live',
+        request_id: 'req-1',
+        status: 'success',
+      }),
+    ].join('\n') + '\n');
+
+    const r = run(`${CLI} lane history --guardrail-repo ${repoDir} --id math-live --limit 5 --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.count, 2);
+    assert.equal(parsed.entries[1].event, 'lane_send');
+    assert.equal(parsed.entries[1].request_id, 'req-1');
   });
 
   it('guardrail lane send writes one prompt through a resident lane FIFO', async () => {
@@ -1113,6 +1151,7 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.ok(parsed.adapters.some((adapter) => adapter.id === 'codex'));
     assert.ok(parsed.adapters.some((adapter) => adapter.id === 'local-exec'));
     assert.ok(parsed.adapters.some((adapter) => adapter.id === 'prompt-wrapper'));
+    assert.ok(parsed.adapters.some((adapter) => adapter.id === 'ssh-prompt-wrapper'));
     assert.ok(parsed.adapters.every((adapter) => Array.isArray(adapter.capabilities)));
     assert.ok(parsed.adapters.every((adapter) => adapter.source === 'bundled'));
   });

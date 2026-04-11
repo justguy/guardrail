@@ -7,8 +7,6 @@ import {
   getResidentLaneLogs,
   getResidentLaneResult,
   getResidentLaneStatus,
-  lanePaths,
-  laneResultPath,
   launchResidentLaneDaemonHelper as launchResidentLaneDaemonHelperWithAdapter,
   launchResidentLaneWithAdapter,
   listResidentLanes,
@@ -34,12 +32,16 @@ import { parseResidentLaneArgs as parseBaseArgs } from './claude-resident-lane.j
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
 export const residentLaneAdapterMetadata = {
-  id: 'prompt-wrapper',
-  name: 'Prompt Wrapper',
-  description: 'Resident lane adapter for local wrapper commands that honor the Guardrail prompt-wrapper flag contract.',
+  id: 'ssh-prompt-wrapper',
+  name: 'SSH Prompt Wrapper',
+  description: 'Resident lane adapter for remote wrapper commands executed over SSH with the Guardrail prompt-wrapper contract.',
   source: 'bundled',
-  capabilities: ['resident_session', 'interactive_prompt', 'stored_results', 'bounded_logs', 'plugin_adapter'],
+  capabilities: ['resident_session', 'interactive_prompt', 'stored_results', 'bounded_logs', 'plugin_adapter', 'remote_transport'],
 };
 
 export function parseResidentLaneArgs(argv) {
@@ -49,7 +51,8 @@ export function parseResidentLaneArgs(argv) {
 export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()) {
   if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
   if (!rawOptions.sessionName) throw new Error('Provide --session-name.');
-  if (!rawOptions.wrapperCommand) throw new Error('Provide --wrapper-command for --tool prompt-wrapper.');
+  if (!rawOptions.wrapperCommand) throw new Error('Provide --wrapper-command for --tool ssh-prompt-wrapper.');
+  if (!rawOptions.sshTarget) throw new Error('Provide --ssh-target for --tool ssh-prompt-wrapper.');
 
   const guardrailRepo = rawOptions.guardrailRepo
     ? resolve(baseCwd, rawOptions.guardrailRepo)
@@ -66,15 +69,20 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     : (keyPath ? dirname(dirname(keyPath)) : resolve(guardrailRepo, '.guardrail'));
 
   return {
-    adapterId: 'prompt-wrapper',
+    adapterId: 'ssh-prompt-wrapper',
     laneDir,
     guardrailRepo,
     workingDir,
-    wrapperCommand: resolve(baseCwd, rawOptions.wrapperCommand),
+    sshTarget: rawOptions.sshTarget,
+    sshArgs: Array.isArray(rawOptions.sshArgs)
+      ? rawOptions.sshArgs.flatMap((entry) => splitCsv(entry))
+      : splitCsv(rawOptions.sshArgs || ''),
+    remoteWorkingDir: rawOptions.remoteWorkingDir || '.',
+    wrapperCommand: rawOptions.wrapperCommand,
     wrapperArgs: Array.isArray(rawOptions.wrapperArgs)
       ? rawOptions.wrapperArgs.flatMap((entry) => splitCsv(entry))
       : splitCsv(rawOptions.wrapperArgs || ''),
-    addDirs: splitCsv(rawOptions.addDirs).map((dir) => resolve(workingDir, dir)),
+    addDirs: splitCsv(rawOptions.addDirs),
     inputFiles: splitCsv(rawOptions.inputFiles),
     systemPrompt: rawOptions.systemPrompt || '',
     laneId: rawOptions.laneId || '',
@@ -97,23 +105,26 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     launchDaemonHelper: rawOptions.launchDaemonHelper === true,
     daemon: rawOptions.daemon === true,
     transportSummary: {
-      mode: 'prompt-wrapper',
-      wrapperCommand: resolve(baseCwd, rawOptions.wrapperCommand),
+      mode: 'ssh-prompt-wrapper',
+      sshTarget: rawOptions.sshTarget,
+      sshArgs: Array.isArray(rawOptions.sshArgs)
+        ? rawOptions.sshArgs.flatMap((entry) => splitCsv(entry))
+        : splitCsv(rawOptions.sshArgs || ''),
+      remoteWorkingDir: rawOptions.remoteWorkingDir || '.',
+      wrapperCommand: rawOptions.wrapperCommand,
       wrapperArgs: Array.isArray(rawOptions.wrapperArgs)
         ? rawOptions.wrapperArgs.flatMap((entry) => splitCsv(entry))
         : splitCsv(rawOptions.wrapperArgs || ''),
-      inputFiles: splitCsv(rawOptions.inputFiles),
-      addDirs: splitCsv(rawOptions.addDirs).map((dir) => resolve(workingDir, dir)),
     },
-    tool: 'prompt-wrapper',
+    tool: 'ssh-prompt-wrapper',
   };
 }
 
-function buildWrapperArgs(options, request, lifecycle) {
+function buildRemoteWrapperCommand(options, request, lifecycle) {
   const args = [
     ...options.wrapperArgs,
     '--prompt', request.prompt,
-    '--working-dir', options.workingDir,
+    '--working-dir', options.remoteWorkingDir,
     '--session-name', options.sessionName,
     '--lifecycle', lifecycle,
   ];
@@ -121,13 +132,18 @@ function buildWrapperArgs(options, request, lifecycle) {
   if (options.inputFiles.length > 0) args.push('--input-files', options.inputFiles.join(','));
   if (options.addDirs.length > 0) args.push('--add-dirs', options.addDirs.join(','));
   if (options.systemPrompt) args.push('--system-prompt', options.systemPrompt);
-  return args;
+  const renderedArgs = args.map(shellQuote).join(' ');
+  return `cd ${shellQuote(options.remoteWorkingDir)} && ${shellQuote(options.wrapperCommand)}${renderedArgs ? ` ${renderedArgs}` : ''}`;
 }
 
-async function spawnWrapperCommand(command, args, cwd) {
+async function spawnSshWrapper(options, request, lifecycle) {
   return await new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(command, args, {
-      cwd,
+    const child = spawn('ssh', [
+      ...options.sshArgs,
+      options.sshTarget,
+      buildRemoteWrapperCommand(options, request, lifecycle),
+    ], {
+      cwd: options.guardrailRepo,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
     });
@@ -142,7 +158,7 @@ async function spawnWrapperCommand(command, args, cwd) {
     child.on('error', rejectPromise);
     child.on('close', (code, signal) => {
       if (signal) {
-        resolvePromise({ code: 1, stdout, stderr: `${stderr}\nprompt wrapper exited on signal ${signal}`.trim() });
+        resolvePromise({ code: 1, stdout, stderr: `${stderr}\nssh prompt wrapper exited on signal ${signal}`.trim() });
         return;
       }
       resolvePromise({ code: code ?? 1, stdout, stderr });
@@ -152,8 +168,8 @@ async function spawnWrapperCommand(command, args, cwd) {
 
 const selfPath = fileURLToPath(import.meta.url);
 
-const PROMPT_WRAPPER_ADAPTER = {
-  adapterId: 'prompt-wrapper',
+const SSH_PROMPT_WRAPPER_ADAPTER = {
+  adapterId: 'ssh-prompt-wrapper',
   buildHelperArgs(options, helperAuthFd) {
     const args = [
       selfPath,
@@ -161,7 +177,10 @@ const PROMPT_WRAPPER_ADAPTER = {
       '--lane-dir', options.laneDir,
       '--guardrail-repo', options.guardrailRepo,
       '--working-dir', options.workingDir,
-      '--tool', 'prompt-wrapper',
+      '--tool', 'ssh-prompt-wrapper',
+      '--ssh-target', options.sshTarget,
+      '--ssh-args', options.sshArgs.join(','),
+      '--remote-working-dir', options.remoteWorkingDir,
       '--wrapper-command', options.wrapperCommand,
       '--wrapper-args', options.wrapperArgs.join(','),
       '--system-prompt', options.systemPrompt || '',
@@ -193,7 +212,10 @@ const PROMPT_WRAPPER_ADAPTER = {
       '--lane-dir', options.laneDir,
       '--guardrail-repo', options.guardrailRepo,
       '--working-dir', options.workingDir,
-      '--tool', 'prompt-wrapper',
+      '--tool', 'ssh-prompt-wrapper',
+      '--ssh-target', options.sshTarget,
+      '--ssh-args', options.sshArgs.join(','),
+      '--remote-working-dir', options.remoteWorkingDir,
       '--wrapper-command', options.wrapperCommand,
       '--wrapper-args', options.wrapperArgs.join(','),
       '--system-prompt', options.systemPrompt || '',
@@ -219,10 +241,10 @@ const PROMPT_WRAPPER_ADAPTER = {
     return args;
   },
   async runRequest(options, request, state, deps = {}) {
-    const runner = deps.runner || spawnWrapperCommand;
+    const runner = deps.runner || spawnSshWrapper;
     const lifecycle = state.startedConversation ? 'continue' : 'start';
     const startedAt = new Date().toISOString();
-    const result = await runner(options.wrapperCommand, buildWrapperArgs(options, request, lifecycle), options.guardrailRepo);
+    const result = await runner(options, request, lifecycle);
     return {
       requestId: request.id,
       prompt: request.prompt,
@@ -238,17 +260,17 @@ const PROMPT_WRAPPER_ADAPTER = {
 };
 
 export async function runLaneRequest(options, request, state, deps = {}) {
-  return runResidentLaneRequest(PROMPT_WRAPPER_ADAPTER, options, request, state, deps);
+  return runResidentLaneRequest(SSH_PROMPT_WRAPPER_ADAPTER, options, request, state, deps);
 }
 
 export async function launchResidentLane(rawOptions, deps = {}) {
   const options = normalizeResidentLaneOptions(rawOptions);
-  return launchResidentLaneWithAdapter(options, PROMPT_WRAPPER_ADAPTER, deps);
+  return launchResidentLaneWithAdapter(options, SSH_PROMPT_WRAPPER_ADAPTER, deps);
 }
 
 export function launchResidentLaneDaemonHelper(rawOptions) {
   const options = normalizeResidentLaneOptions(rawOptions);
-  return launchResidentLaneDaemonHelperWithAdapter(options, PROMPT_WRAPPER_ADAPTER);
+  return launchResidentLaneDaemonHelperWithAdapter(options, SSH_PROMPT_WRAPPER_ADAPTER);
 }
 
 async function main() {
@@ -261,39 +283,51 @@ async function main() {
       return;
     }
     if (options.daemon) {
-      await runResidentLaneDaemonWithAdapter(options, PROMPT_WRAPPER_ADAPTER);
+      await runResidentLaneDaemonWithAdapter(options, SSH_PROMPT_WRAPPER_ADAPTER);
       return;
     }
 
     const summary = await launchResidentLane(raw);
     process.stdout.write(`${JSON.stringify(summary)}\n`);
   } catch (err) {
-    if (raw?.daemon) {
-      try {
-        const failureOptions = options || normalizeResidentLaneOptions(raw);
-        persistLaneFailureState(failureOptions, err, 'bootstrap');
-      } catch {
-        // Best effort.
-      }
-    }
-    throw err;
+    const failure = createLaneBootError(err, {
+      laneDir: options?.laneDir || raw.laneDir,
+      guardrailRepo: options?.guardrailRepo || raw.guardrailRepo || process.cwd(),
+    });
+    persistLaneFailureState(failure.statePath, {
+      laneId: options?.laneId || raw.laneId || null,
+      laneDir: options?.laneDir || raw.laneDir || null,
+      guardrailRepo: options?.guardrailRepo || raw.guardrailRepo || process.cwd(),
+      tool: 'ssh-prompt-wrapper',
+      adapterId: 'ssh-prompt-wrapper',
+      sessionName: options?.sessionName || raw.sessionName || null,
+      sessionId: options?.sessionId || raw.sessionId || null,
+      requestFifo: null,
+      responseFifo: null,
+      keyPath: options?.keyPath || raw.keyPath || null,
+      hostStateDir: options?.hostStateDir || raw.hostStateDir || null,
+      pid: null,
+      identityNonce: options?.identityNonce || raw.identityNonce || null,
+      bootNonce: options?.bootNonce || raw.bootNonce || null,
+      failureReason: failure.failureReason,
+      failureStage: failure.failureStage,
+      status: 'failed',
+      logPath: failure.logPath,
+    });
+    process.stdout.write(`${JSON.stringify(failure)}\n`);
+    process.exitCode = failure.exitCode || 1;
   }
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
-  main().catch((err) => {
-    process.stderr.write(`${err.message}\n`);
-    process.exit(1);
-  });
+const isCliEntry = process.argv[1] && resolve(process.argv[1]) === resolve(selfPath);
+if (isCliEntry) {
+  main();
 }
 
 export {
-  createLaneBootError,
   getResidentLaneLogs,
   getResidentLaneResult,
   getResidentLaneStatus,
-  lanePaths,
-  laneResultPath,
   listResidentLanes,
   pruneResidentLanes,
   readSecretFromFd,

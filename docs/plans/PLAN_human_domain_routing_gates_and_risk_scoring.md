@@ -1,10 +1,31 @@
 # Guardrail — Human-Domain Routing Gates and Risk Scoring
 
-Status: Tracked roadmap plan (`H0a`) for routing-gate hardening and benchmark-runner wiring. Guardrail now ships reusable helper groundwork in `src/llm-json.js` and `src/human-domain-routing.js`; benchmark-runner integration is still open.  
+Status: Guardrail-repo scope complete (`H0a`). Guardrail now ships reusable parser + routing helpers in `src/llm-json.js` and `src/human-domain-routing.js`; downstream benchmark-runner adoption remains external consumer work.  
 Audience: Maintainers wiring LLM-based domain triage, premise-rejection gates, and human-risk scoring into evaluation pipelines  
 Goal: Make routing-gate decisions fail closed, avoid sensitive-content leakage, and document the safe order of operations before rerunning the human/workplace benchmark subset
 
 Roadmap anchor: `H0a` in `docs/technical-status.md`
+
+## Current Repo Outcome
+
+Guardrail now ships the reusable end-to-end helper surface this plan called for:
+
+- balanced-object JSON extraction plus redacted parser-failure metadata in `src/llm-json.js`
+- runtime normalization/recomputation helpers in `src/human-domain-routing.js`
+- ready-to-call:
+  - `checkDomainContext()`
+  - `checkPremiseRejection()`
+  - `scoreHumanRisk()`
+
+Those helpers now:
+
+- delimit untrusted prompt/answer content with explicit tags
+- parse the first valid balanced JSON object
+- normalize/fail closed on invalid output
+- recompute `overall_score` locally
+- optionally emit redacted parser-failure metadata instead of raw sensitive content
+
+What remains is downstream adoption in the external benchmark runner, not missing Guardrail functionality.
 
 ## Problem
 
@@ -183,15 +204,18 @@ This matters most for:
 - legal
 - emotionally sensitive interpersonal prompts
 
-## Recommended Next Steps
+## External Adoption Checklist
 
-Implement in this order:
+Integrate in the external benchmark runner in this order:
 
-1. Harden `parseLLMJson()` or replace it with a safer structured parser.
-2. Add runtime validation for `checkDomainContext()`, `checkPremiseRejection()`, and `scoreHumanRisk()`.
-3. Remove raw parser-failure logging and replace it with redacted structured logging.
-4. Rename `skipCT` to a policy-explicit field name.
-5. Add an ambiguity path if multi-domain prompts matter for routing accuracy.
+1. Import Guardrail’s shipped helpers instead of maintaining local parser/gate sketches.
+2. Replace any local `parseLLMJson()` logic with `src/llm-json.js` semantics.
+3. Replace local gate callers with:
+   - `checkDomainContext()`
+   - `checkPremiseRejection()`
+   - `scoreHumanRisk()`
+4. Rename any local `skipCT` usage to the policy-explicit `bypassCTForSensitiveDomain`.
+5. Route parser failures to redacted metadata instead of raw sensitive logs.
 6. Decide whether bypassed baseline drafts also require a minimum human-risk score.
 7. Only after steps 1–6, rerun the benchmark subset:
    - `W04`

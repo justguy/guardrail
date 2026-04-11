@@ -21,6 +21,7 @@ import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { acquireLock } from './runtime-policy.js';
+import { queryAuditLog, verifyAuditChain } from './audit.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -36,6 +37,14 @@ const MAX_REQUEST_ID_CHARS = 128;
 const PARTIAL_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const DEFAULT_WAIT_POLL_INTERVAL_MS = 250;
+const RESOURCE_CLASS_SCOPE = {
+  'git-branch': 'repo',
+  service: 'host',
+  port: 'host',
+  env: 'host',
+  deployment: 'host',
+  queue: 'host',
+};
 
 function withinPathScope(candidate, root) {
   return candidate === root || candidate.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
@@ -153,19 +162,95 @@ function normalizeResourceClaim(rawClaim) {
   return claim;
 }
 
-export function normalizeResidentLaneResources(rawOptions = {}) {
+function parseResourceClaim(rawClaim) {
+  const claim = normalizeResourceClaim(rawClaim);
+  const sepIndex = claim.indexOf(':');
+  if (sepIndex <= 0 || sepIndex === claim.length - 1) {
+    return { raw: claim, className: 'generic', name: claim, scope: 'global', source: 'explicit' };
+  }
+  const rawClassName = claim.slice(0, sepIndex);
+  const className = rawClassName === 'branch' ? 'git-branch' : rawClassName;
+  const name = claim.slice(sepIndex + 1);
+  const canonicalRaw = `${className}:${name}`;
+  return {
+    raw: canonicalRaw,
+    className,
+    name,
+    scope: RESOURCE_CLASS_SCOPE[className] || 'global',
+    source: 'explicit',
+  };
+}
+
+function findGitHeadPath(startDir) {
+  let current = safeRealpath(startDir);
+  while (true) {
+    const gitDir = join(current, '.git');
+    const gitDirStatExists = existsSync(gitDir);
+    if (gitDirStatExists) {
+      try {
+        const stat = lstatSync(gitDir);
+        if (stat.isDirectory()) {
+          const headPath = join(gitDir, 'HEAD');
+          if (existsSync(headPath)) return headPath;
+        }
+      } catch {}
+      try {
+        const pointer = readFileSync(gitDir, 'utf8').trim();
+        if (pointer.startsWith('gitdir:')) {
+          const target = pointer.slice('gitdir:'.length).trim();
+          const headPath = resolve(current, target, 'HEAD');
+          if (existsSync(headPath)) return headPath;
+        }
+      } catch {}
+    }
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function inferGitBranchResource(guardrailRepo, workingDir) {
+  const headPath = findGitHeadPath(workingDir || guardrailRepo);
+  if (!headPath) return null;
+  try {
+    const head = readFileSync(headPath, 'utf8').trim();
+    if (!head.startsWith('ref:')) return null;
+    const ref = head.slice(4).trim();
+    const prefix = 'refs/heads/';
+    if (!ref.startsWith(prefix)) return null;
+    const branch = ref.slice(prefix.length).trim();
+    return branch ? `git-branch:${branch}` : null;
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeResidentLaneResources(rawOptions = {}, guardrailRepo = process.cwd(), workingDir = guardrailRepo) {
   const rawClaims = Array.isArray(rawOptions.resourceClaims)
     ? rawOptions.resourceClaims.flatMap((entry) => splitCsv(entry))
     : splitCsv(rawOptions.resourceClaims || rawOptions.resourceClaim || rawOptions.resources || rawOptions.resource || '');
-  const resourceClaims = Array.from(new Set(rawClaims.map((entry) => normalizeResourceClaim(entry))));
+  const resourceClaims = rawClaims.map((entry) => parseResourceClaim(entry).raw);
+  const inferredGitBranch = inferGitBranchResource(guardrailRepo, workingDir);
+  if (inferredGitBranch && !resourceClaims.some((claim) => parseResourceClaim(claim).className === 'git-branch')) {
+    resourceClaims.push(inferredGitBranch);
+  }
+  const dedupedClaims = Array.from(new Set(resourceClaims));
   const resourceMode = rawOptions.resourceMode || (resourceClaims.length > 0 ? 'warn' : 'none');
   if (!['none', 'warn', 'block'].includes(resourceMode)) {
     throw new Error('resource_mode must be one of: none, warn, block');
   }
+  const resourceDetails = dedupedClaims.map((claim) => {
+    const detail = parseResourceClaim(claim);
+    if (inferredGitBranch && detail.raw === inferredGitBranch && !rawClaims.some((entry) => parseResourceClaim(entry).raw === detail.raw)) {
+      return { ...detail, source: 'discovered' };
+    }
+    return detail;
+  });
   return {
-    resourceMode: resourceClaims.length === 0 ? 'none' : resourceMode,
-    resourceClaims,
-    resources: resourceClaims,
+    resourceMode: dedupedClaims.length === 0 ? 'none' : resourceMode,
+    resourceClaims: dedupedClaims,
+    resources: dedupedClaims,
+    resourceDetails,
   };
 }
 
@@ -258,6 +343,7 @@ function writeHostLaneRegistryEntry(options, state = {}) {
     adapterId: options.adapterId || state.adapterId || null,
     sessionName: options.sessionName || state.sessionName || null,
     sessionId: options.sessionId || state.sessionId || null,
+    transportSummary: options.transportSummary || state.transportSummary || null,
     workingDir: options.workingDir || state.workingDir || null,
     keyPath: options.keyPath || state.keyPath || null,
     scopeType: options.scopeType || state.scopeType || 'none',
@@ -265,6 +351,7 @@ function writeHostLaneRegistryEntry(options, state = {}) {
     scopePaths: Array.isArray(options.scopePaths) ? options.scopePaths : (state.scopePaths || []),
     resourceMode: options.resourceMode || state.resourceMode || 'warn',
     resources: Array.isArray(options.resources) ? options.resources : (state.resources || []),
+    resourceDetails: Array.isArray(options.resourceDetails) ? options.resourceDetails : (state.resourceDetails || []),
     identityNonce: options.identityNonce || state.identityNonce || null,
     bootNonce: options.bootNonce || state.bootNonce || null,
     pid: state.pid ?? process.pid,
@@ -424,6 +511,9 @@ function buildLaneIdentity(options, existing = null) {
     resourceClaims: Array.isArray(options.resourceClaims)
       ? options.resourceClaims
       : (Array.isArray(options.resources) ? options.resources : (existing?.resourceClaims || existing?.resources || [])),
+    resourceDetails: Array.isArray(options.resourceDetails)
+      ? options.resourceDetails
+      : (existing?.resourceDetails || []),
     laneId: options.laneId || existing?.laneId || null,
     laneDir: options.laneDir,
     guardrailRepo: options.guardrailRepo,
@@ -432,6 +522,7 @@ function buildLaneIdentity(options, existing = null) {
     hostStateDir: options.hostStateDir || existing?.hostStateDir || defaultHostStateDir(),
     sessionName: options.sessionName,
     sessionId: options.sessionId || null,
+    transportSummary: options.transportSummary || existing?.transportSummary || null,
     ownerRepoId: stableRepoOwnerId(options.guardrailRepo),
     identityNonce: existing?.identityNonce || options.identityNonce || randomBytes(12).toString('hex'),
     bootNonce: options.bootNonce || existing?.bootNonce || null,
@@ -517,6 +608,7 @@ function buildState(options, pid, startedConversation = false, extra = {}) {
     resourceClaims: Array.isArray(options.resourceClaims)
       ? options.resourceClaims
       : (Array.isArray(options.resources) ? options.resources : []),
+    resourceDetails: Array.isArray(options.resourceDetails) ? options.resourceDetails : [],
     laneDir: options.laneDir,
     requestFifo: paths.requestFifo,
     responseFifo: paths.responseFifo,
@@ -528,6 +620,7 @@ function buildState(options, pid, startedConversation = false, extra = {}) {
     hostStateDir: options.hostStateDir || defaultHostStateDir(),
     sessionName: options.sessionName,
     sessionId: options.sessionId || null,
+    transportSummary: options.transportSummary || extra.transportSummary || null,
     identityNonce: options.identityNonce || null,
     bootNonce: options.bootNonce || null,
     ownerRepoId: stableRepoOwnerId(options.guardrailRepo),
@@ -925,9 +1018,20 @@ function buildScopeConflict(entry, other) {
 }
 
 function laneResourcesOverlap(a, b) {
-  const aResources = new Set(Array.isArray(a.resourceClaims) ? a.resourceClaims : (Array.isArray(a.resources) ? a.resources : []));
-  const bResources = Array.isArray(b.resourceClaims) ? b.resourceClaims : (Array.isArray(b.resources) ? b.resources : []);
-  return bResources.some((resource) => aResources.has(resource));
+  const ownerRepoIdFor = (entry) => entry.ownerRepoId || (entry.guardrailRepo ? stableRepoOwnerId(entry.guardrailRepo) : null);
+  const aResources = (Array.isArray(a.resourceClaims) ? a.resourceClaims : (Array.isArray(a.resources) ? a.resources : []))
+    .map((resource) => parseResourceClaim(resource));
+  const bResources = (Array.isArray(b.resourceClaims) ? b.resourceClaims : (Array.isArray(b.resources) ? b.resources : []))
+    .map((resource) => parseResourceClaim(resource));
+  return aResources.some((left) => bResources.some((right) => {
+    if (left.className !== right.className || left.name !== right.name) return false;
+    if (left.scope === 'repo' || right.scope === 'repo') {
+      const leftOwner = ownerRepoIdFor(a);
+      const rightOwner = ownerRepoIdFor(b);
+      return !!leftOwner && !!rightOwner && leftOwner === rightOwner;
+    }
+    return true;
+  }));
 }
 
 function buildResourceConflict(entry, other) {
@@ -942,7 +1046,34 @@ function buildResourceConflict(entry, other) {
     tool: other.tool || other.adapterId || null,
     resourceMode: other.resourceMode || 'warn',
     resources: Array.isArray(other.resources) ? other.resources : (Array.isArray(other.resourceClaims) ? other.resourceClaims : []),
+    resourceDetails: Array.isArray(other.resourceDetails) ? other.resourceDetails : [],
     enforcement,
+  };
+}
+
+export function getResidentLaneHistory(rawOptions = {}) {
+  const guardrailRepo = resolve(rawOptions.guardrailRepo || '.');
+  const auditPath = resolve(guardrailRepo, '.guardrail', 'audit.jsonl');
+  const requestedLaneDir = rawOptions.laneDir ? resolve(guardrailRepo, rawOptions.laneDir) : null;
+  const entries = queryAuditLog(auditPath, {
+    event: rawOptions.event || undefined,
+  }).filter((entry) => {
+    if (rawOptions.laneId && entry.lane_id !== rawOptions.laneId) return false;
+    if (requestedLaneDir) {
+      const entryLaneDir = entry.lane_dir ? resolve(guardrailRepo, entry.lane_dir) : null;
+      if (entryLaneDir !== requestedLaneDir) return false;
+    }
+    if (rawOptions.requestId && entry.request_id !== rawOptions.requestId) return false;
+    return true;
+  });
+  const limit = parseInteger(rawOptions.limit, 20, 'limit', 1);
+  const tailEntries = entries.slice(-limit);
+  return {
+    auditPath,
+    chainValid: verifyAuditChain(auditPath).valid,
+    count: tailEntries.length,
+    totalMatches: entries.length,
+    entries: tailEntries,
   };
 }
 
@@ -1014,8 +1145,17 @@ function laneMatchesFilters(entry, rawOptions = {}) {
 
   const resourceFilter = normalizeListFilterValues(rawOptions.resourceFilter);
   if (resourceFilter.length > 0) {
-    const entryResources = new Set(Array.isArray(entry.resourceClaims) ? entry.resourceClaims : (Array.isArray(entry.resources) ? entry.resources : []));
-    if (!resourceFilter.every((resource) => entryResources.has(resource))) return false;
+    const entryResources = (Array.isArray(entry.resourceDetails) && entry.resourceDetails.length > 0 ? entry.resourceDetails : (
+      Array.isArray(entry.resourceClaims) ? entry.resourceClaims : (Array.isArray(entry.resources) ? entry.resources : [])
+    ).map((resource) => parseResourceClaim(resource)));
+    const matchesFilter = (filterValue) => {
+      if (filterValue.includes(':')) {
+        const parsed = parseResourceClaim(filterValue);
+        return entryResources.some((resource) => resource.className === parsed.className && resource.name === parsed.name);
+      }
+      return entryResources.some((resource) => resource.className === filterValue || resource.raw === filterValue);
+    };
+    if (!resourceFilter.every((resource) => matchesFilter(resource))) return false;
   }
 
   const alive = parseOptionalBooleanFilter(rawOptions.alive);
@@ -1107,6 +1247,7 @@ function collectResidentLaneStatusBase(rawOptions) {
     resourceMode: state?.resourceMode ?? identity?.resourceMode ?? rawOptions.resourceMode ?? 'warn',
     resources: state?.resources ?? state?.resourceClaims ?? identity?.resources ?? identity?.resourceClaims ?? rawOptions.resources ?? rawOptions.resourceClaims ?? [],
     resourceClaims: state?.resourceClaims ?? state?.resources ?? identity?.resourceClaims ?? identity?.resources ?? rawOptions.resourceClaims ?? rawOptions.resources ?? [],
+    resourceDetails: state?.resourceDetails ?? identity?.resourceDetails ?? rawOptions.resourceDetails ?? [],
     laneDir,
     statePath: paths.statePath,
     status: derived.status,
@@ -1115,6 +1256,7 @@ function collectResidentLaneStatusBase(rawOptions) {
     laneId: state?.laneId ?? identity?.laneId ?? rawOptions.laneId ?? null,
     sessionName: state?.sessionName ?? identity?.sessionName ?? rawOptions.sessionName ?? null,
     sessionId: state?.sessionId ?? identity?.sessionId ?? rawOptions.sessionId ?? null,
+    transportSummary: state?.transportSummary ?? identity?.transportSummary ?? rawOptions.transportSummary ?? null,
     identityPath: paths.identityPath,
     identityNonce: state?.identityNonce ?? identity?.identityNonce ?? null,
     bootNonce: state?.bootNonce ?? identity?.bootNonce ?? null,
@@ -1736,6 +1878,8 @@ export async function launchResidentLaneWithAdapter(options, adapter, deps = {})
         scopePaths: existing.scopePaths ?? optionsWithIdentity.scopePaths ?? [],
         resourceMode: existing.resourceMode ?? optionsWithIdentity.resourceMode ?? 'warn',
         resources: existing.resources ?? optionsWithIdentity.resources ?? [],
+        resourceDetails: existing.resourceDetails ?? optionsWithIdentity.resourceDetails ?? [],
+        transportSummary: existing.transportSummary ?? optionsWithIdentity.transportSummary ?? null,
         scopeConflicts,
         resourceConflicts,
         laneDir: optionsWithIdentity.laneDir,
@@ -1841,6 +1985,8 @@ export async function launchResidentLaneWithAdapter(options, adapter, deps = {})
       scopePaths: optionsWithIdentity.scopePaths || [],
       resourceMode: optionsWithIdentity.resourceMode || 'warn',
       resources: optionsWithIdentity.resources || [],
+      resourceDetails: optionsWithIdentity.resourceDetails || [],
+      transportSummary: optionsWithIdentity.transportSummary || null,
       scopeConflicts,
       resourceConflicts,
       laneDir: optionsWithIdentity.laneDir,
@@ -1890,6 +2036,8 @@ export async function launchResidentLaneWithAdapter(options, adapter, deps = {})
       scopePaths: launchSummary.scopePaths,
       resourceMode: launchSummary.resourceMode,
       resourceClaims: launchSummary.resources,
+      resourceDetails: launchSummary.resourceDetails,
+      transportSummary: launchSummary.transportSummary,
       identityNonce: launchSummary.identityNonce,
       bootNonce: launchSummary.bootNonce,
     });

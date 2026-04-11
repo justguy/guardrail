@@ -2,9 +2,11 @@ import * as claudeLane from './claude-resident-lane.js';
 import * as codexLane from './codex-resident-lane.js';
 import * as localExecLane from './local-exec-resident-lane.js';
 import * as promptWrapperLane from './prompt-wrapper-resident-lane.js';
+import * as sshPromptWrapperLane from './ssh-prompt-wrapper-resident-lane.js';
 export {
   cleanupResidentLane,
   createLaneBootError,
+  getResidentLaneHistory,
   getResidentLaneLogs,
   getResidentLaneResult,
   getResidentLaneStatus,
@@ -27,6 +29,7 @@ const ADAPTERS = {
   codex: codexLane,
   'local-exec': localExecLane,
   'prompt-wrapper': promptWrapperLane,
+  'ssh-prompt-wrapper': sshPromptWrapperLane,
 };
 
 function selectedTool(rawOptions = {}) {
@@ -112,6 +115,14 @@ export function parseResidentLaneArgs(argv) {
         parsed.wrapperCommand = value;
         i += 1;
         break;
+      case '--ssh-target':
+        parsed.sshTarget = value;
+        i += 1;
+        break;
+      case '--remote-working-dir':
+        parsed.remoteWorkingDir = value;
+        i += 1;
+        break;
       case '--command':
         parsed.command = value;
         i += 1;
@@ -130,6 +141,14 @@ export function parseResidentLaneArgs(argv) {
           parsed.wrapperArgs = [];
         }
         parsed.wrapperArgs.push(value);
+        i += 1;
+        break;
+      case '--ssh-arg':
+      case '--ssh-args':
+        if (!parsed.sshArgs) {
+          parsed.sshArgs = [];
+        }
+        parsed.sshArgs.push(value);
         i += 1;
         break;
       default:

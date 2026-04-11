@@ -319,6 +319,38 @@ describe('Claude resident lane', () => {
     assert.equal(result.stdout, 'ECHO:review this\n');
   });
 
+  it('builds ssh prompt-wrapper lane args when tool=ssh-prompt-wrapper', async () => {
+    const dir = tmpLaneDir();
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/ssh-wrapper',
+      guardrailRepo: '.',
+      workingDir: '.',
+      tool: 'ssh-prompt-wrapper',
+      sessionName: 'ssh-wrapper-live',
+      sessionId: 'ssh-wrapper-live-1',
+      sshTarget: 'build@staging.example.com',
+      sshArgs: ['-i', '~/.ssh/id_ed25519'],
+      remoteWorkingDir: '/srv/app',
+      wrapperCommand: 'guarded-wrapper',
+      wrapperArgs: 'mode=review',
+      systemPrompt: 'Stay terse.',
+    }, dir);
+
+    const calls = [];
+    const runner = async (spawnOptions, request, lifecycle) => {
+      calls.push({ spawnOptions, request, lifecycle });
+      return { code: 0, stdout: 'done\n', stderr: '' };
+    };
+
+    await runGenericLaneRequest(options, { id: 'req-1', prompt: 'review this' }, { startedConversation: false }, { runner });
+
+    assert.equal(calls[0].spawnOptions.sshTarget, 'build@staging.example.com');
+    assert.deepEqual(calls[0].spawnOptions.sshArgs, ['-i', '~/.ssh/id_ed25519']);
+    assert.equal(calls[0].spawnOptions.remoteWorkingDir, '/srv/app');
+    assert.equal(calls[0].spawnOptions.wrapperCommand, 'guarded-wrapper');
+    assert.equal(calls[0].lifecycle, 'start');
+  });
+
   it('lists bundled resident lane adapters beyond Claude/Codex', () => {
     const adapters = listResidentLaneAdapters();
     const ids = adapters.map((adapter) => adapter.id).sort();
@@ -327,7 +359,42 @@ describe('Claude resident lane', () => {
     assert.ok(ids.includes('codex'));
     assert.ok(ids.includes('local-exec'));
     assert.ok(ids.includes('prompt-wrapper'));
+    assert.ok(ids.includes('ssh-prompt-wrapper'));
     assert.ok(adapters.every((adapter) => adapter.source === 'bundled'));
+  });
+
+  it('canonicalizes branch aliases and auto-discovers git branch resources', () => {
+    const dir = tmpLaneDir();
+    mkdirSync(join(dir, '.git', 'refs', 'heads'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
+
+    const explicit = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/local-exec',
+      guardrailRepo: '.',
+      workingDir: '.',
+      tool: 'local-exec',
+      sessionName: 'local-exec-live',
+      command: 'node',
+      commandArgs: ['scripts/echo.js'],
+      resources: ['branch:main', 'service:postgres'],
+    }, dir);
+
+    assert.deepEqual(explicit.resources, ['git-branch:main', 'service:postgres']);
+    assert.equal(explicit.resourceDetails[0].className, 'git-branch');
+    assert.equal(explicit.resourceDetails[0].source, 'explicit');
+
+    const discovered = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/local-exec',
+      guardrailRepo: '.',
+      workingDir: '.',
+      tool: 'local-exec',
+      sessionName: 'local-exec-live',
+      command: 'node',
+      commandArgs: ['scripts/echo.js'],
+    }, dir);
+
+    assert.ok(discovered.resources.includes('git-branch:main'));
+    assert.ok(discovered.resourceDetails.some((detail) => detail.raw === 'git-branch:main' && detail.source === 'discovered'));
   });
 
   it('reuses an already-running lane instead of failing', async () => {
@@ -756,6 +823,69 @@ describe('Claude resident lane', () => {
     assert.equal(status.resourceConflicts.length, 1);
     assert.equal(status.resourceConflicts[0].laneId, 'resource-external');
     assert.ok(status.resourceConflicts[0].guardrailRepo.endsWith('other-repo'));
+  });
+
+  it('does not treat git-branch resources from different repos as conflicting', () => {
+    const dir = tmpLaneDir();
+    const hostStateDir = join(dir, 'host-keys');
+    const localLaneDir = join(dir, '.guardrail', 'lanes', 'branch-local');
+    mkdirSync(localLaneDir, { recursive: true });
+    const localPaths = lanePaths(localLaneDir);
+    mkfifo(localPaths.requestFifo);
+    mkfifo(localPaths.responseFifo);
+    writeFileSync(localPaths.identityPath, JSON.stringify({
+      laneId: 'branch-local',
+      laneDir: localLaneDir,
+      guardrailRepo: dir,
+      ownerRepoId: 'repo-a',
+      identityNonce: 'nonce-local',
+      resourceMode: 'warn',
+      resources: ['git-branch:main'],
+      resourceDetails: [{ raw: 'git-branch:main', className: 'git-branch', name: 'main', scope: 'repo', source: 'explicit' }],
+    }), 'utf8');
+    writeFileSync(localPaths.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'branch-local',
+      sessionName: 'branch-local',
+      ownerRepoId: 'repo-a',
+      resourceMode: 'warn',
+      resources: ['git-branch:main'],
+      resourceDetails: [{ raw: 'git-branch:main', className: 'git-branch', name: 'main', scope: 'repo', source: 'explicit' }],
+      requestFifo: localPaths.requestFifo,
+      responseFifo: localPaths.responseFifo,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const externalLaneDir = join(dir, 'other-repo', '.guardrail', 'lanes', 'branch-external');
+    const externalRegistryDir = join(hostStateDir, 'resident-lanes');
+    mkdirSync(externalRegistryDir, { recursive: true });
+    const externalRegistryKey = createHash('sha256')
+      .update(resolve(externalLaneDir))
+      .digest('hex')
+      .slice(0, 24);
+    writeFileSync(join(externalRegistryDir, `${externalRegistryKey}.json`), JSON.stringify({
+      laneId: 'branch-external',
+      laneDir: externalLaneDir,
+      guardrailRepo: join(dir, 'other-repo'),
+      ownerRepoId: 'repo-b',
+      tool: 'codex',
+      sessionName: 'branch-external',
+      resourceMode: 'block',
+      resources: ['git-branch:main'],
+      resourceDetails: [{ raw: 'git-branch:main', className: 'git-branch', name: 'main', scope: 'repo', source: 'explicit' }],
+      pid: process.pid,
+      status: 'ready',
+      updatedAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const status = getResidentLaneStatus({
+      guardrailRepo: dir,
+      laneDir: localLaneDir,
+      hostStateDir,
+    });
+
+    assert.equal(status.resourceConflicts.length, 0);
   });
 
   it('lists resident lanes from the project lane registry', () => {

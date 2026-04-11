@@ -280,7 +280,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     ? resolve(guardrailRepo, rawOptions.workingDir)
     : guardrailRepo;
   const scope = normalizeResidentLaneScope(rawOptions, guardrailRepo, workingDir);
-  const resources = normalizeResidentLaneResources(rawOptions);
+  const resources = normalizeResidentLaneResources(rawOptions, guardrailRepo, workingDir);
   const keyPath = rawOptions.keyPath ? resolve(baseCwd, rawOptions.keyPath) : '';
   const hostStateDir = rawOptions.hostStateDir
     ? resolve(baseCwd, rawOptions.hostStateDir)
@@ -316,6 +316,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     scopePaths: scope.scopePaths,
     resourceMode: resources.resourceMode,
     resources: resources.resources,
+    resourceDetails: resources.resourceDetails,
     keyPath,
     hostStateDir,
     identityNonce: rawOptions.identityNonce || '',
@@ -323,6 +324,12 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     sessionName: rawOptions.sessionName,
     sessionId: rawOptions.sessionId || '',
     noSessionPersistence: shellTruthy(rawOptions.noSessionPersistence),
+    transportSummary: {
+      mode: 'claude-cli',
+      model: rawOptions.model || '',
+      permissionMode: rawOptions.permissionMode || '',
+      outputFormat: rawOptions.outputFormat || '',
+    },
     authFd: parseInteger(rawOptions.authFd, null, 'auth_fd', 3),
     pollIntervalMs: parseInteger(rawOptions.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, 'poll_interval_ms', 50),
     idleTimeoutMs: parseInteger(rawOptions.idleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS, 'idle_timeout_ms', 1000),

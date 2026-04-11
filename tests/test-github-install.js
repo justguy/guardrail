@@ -722,6 +722,27 @@ describe('CLI bare recipe name detection', () => {
     assert.deepEqual(result.laneOpts.wrapperArgs, ['mode=review', 'fast']);
   });
 
+  it('parses ssh prompt-wrapper lane flags', () => {
+    const result = parseArgs([
+      'lane', 'start',
+      '--id', 'ssh-live',
+      '--tool', 'ssh-prompt-wrapper',
+      '--ssh-target', 'build@staging.example.com',
+      '--ssh-arg', '-i',
+      '--ssh-arg', '~/.ssh/id_ed25519',
+      '--remote-working-dir', '/srv/app',
+      '--wrapper-command', 'guarded-wrapper',
+      '--wrapper-arg', 'mode=review',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-start');
+    assert.equal(result.laneOpts.tool, 'ssh-prompt-wrapper');
+    assert.equal(result.laneOpts.sshTarget, 'build@staging.example.com');
+    assert.deepEqual(result.laneOpts.sshArgs, ['-i', '~/.ssh/id_ed25519']);
+    assert.equal(result.laneOpts.remoteWorkingDir, '/srv/app');
+    assert.equal(result.laneOpts.wrapperCommand, 'guarded-wrapper');
+  });
+
   it('parses local-exec lane flags', () => {
     const result = parseArgs([
       'lane', 'start',
@@ -769,6 +790,22 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.laneOpts.id, 'claude-live');
     assert.equal(result.laneOpts.requestId, 'req-123');
     assert.equal(result.json, true);
+  });
+
+  it('parses lane history flags', () => {
+    const result = parseArgs([
+      'lane', 'history',
+      '--id', 'claude-live',
+      '--request-id', 'req-123',
+      '--event', 'lane_send',
+      '--limit', '5',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-history');
+    assert.equal(result.laneOpts.id, 'claude-live');
+    assert.equal(result.laneOpts.requestId, 'req-123');
+    assert.equal(result.laneOpts.event, 'lane_send');
+    assert.equal(result.laneOpts.limit, '5');
   });
 
   it('parses lane stop flags', () => {

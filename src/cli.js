@@ -70,9 +70,22 @@ function formatLaneScope(status = {}) {
 }
 
 function formatLaneResources(status = {}) {
+  const details = Array.isArray(status.resourceDetails) ? status.resourceDetails : [];
+  if (details.length > 0) {
+    return `${status.resourceMode || 'warn'} ${details.map((detail) => `${detail.raw}${detail.source === 'discovered' ? ' [auto]' : ''}`).join(', ')}`;
+  }
   const resources = Array.isArray(status.resources) ? status.resources : [];
   if (resources.length === 0) return 'none';
   return `${status.resourceMode || 'warn'} ${resources.join(', ')}`;
+}
+
+function formatLaneTransportSummary(status = {}) {
+  const summary = status.transportSummary;
+  if (!summary || typeof summary !== 'object') return 'n/a';
+  const entries = Object.entries(summary)
+    .filter(([, value]) => value !== null && value !== undefined && value !== '' && (!Array.isArray(value) || value.length > 0))
+    .map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(',') : value}`);
+  return entries.length > 0 ? entries.join(' ') : 'n/a';
 }
 
 function buildLaneRefArg(status = {}) {
@@ -100,7 +113,7 @@ function buildLaneRecommendedCommand(status = {}) {
   }
 }
 
-function buildLaneInspectBundle(laneOpts, status, getResidentLaneResult, getResidentLaneLogs) {
+function buildLaneInspectBundle(laneOpts, status, getResidentLaneResult, getResidentLaneLogs, getResidentLaneHistory) {
   const requestId = status.currentRequestId || status.lastCompletedRequestId || status.lastRequestId || null;
   return {
     status: {
@@ -115,6 +128,29 @@ function buildLaneInspectBundle(laneOpts, status, getResidentLaneResult, getResi
       ...laneOpts,
       tail: laneOpts.tail || 40,
     }),
+    history: buildLaneHistoryBundle(getResidentLaneHistory({
+      ...laneOpts,
+      limit: laneOpts.limit || 10,
+      requestId: laneOpts.requestId || requestId || undefined,
+    })),
+  };
+}
+
+function buildLaneHistoryBundle(history) {
+  return {
+    ...history,
+    entries: history.entries.map((entry) => ({
+      timestamp: entry.timestamp,
+      event: entry.event,
+      lane_id: entry.lane_id || null,
+      lane_dir: entry.lane_dir || null,
+      request_id: entry.request_id || null,
+      session_name: entry.session_name || null,
+      tool: entry.tool || null,
+      status: entry.status || null,
+      reason: entry.reason || null,
+      exit_code: entry.exit_code ?? null,
+    })),
   };
 }
 
@@ -221,6 +257,7 @@ Commands:
   lane wait [flags]                     Wait for a resident lane request to complete
   lane status [flags]                   Show resident lane status and recovery hints
   lane inspect [flags]                  Show status, latest result, and bounded logs together
+  lane history [flags]                  Query resident-lane audit history
   lane logs [flags]                     Read the bounded resident lane log tail
   lane stop [flags]                     Stop a resident interactive lane
   lane cleanup [flags]                  Remove one resident lane's local artifacts
@@ -302,6 +339,7 @@ Examples:
   guardrail lane wait --id claude-live --request-id req-123
   guardrail lane result --id claude-live --request-id req-123
   guardrail lane inspect --id claude-live --tail 60
+  guardrail lane history --id claude-live --limit 20
   guardrail lane logs --id claude-live --tail 60
   guardrail lane stop --id claude-live
   guardrail lane cleanup --id claude-live
@@ -763,7 +801,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'result', 'wait', 'status', 'inspect', 'logs', 'stop', 'cleanup', 'list', 'prune', 'adapters'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'result', 'wait', 'status', 'inspect', 'history', 'logs', 'stop', 'cleanup', 'list', 'prune', 'adapters'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -809,6 +847,10 @@ export function parseArgs(argv) {
       '--wrapper-command': 'wrapperCommand',
       '--wrapper-arg': 'wrapperArgs',
       '--wrapper-args': 'wrapperArgs',
+      '--ssh-target': 'sshTarget',
+      '--ssh-arg': 'sshArgs',
+      '--ssh-args': 'sshArgs',
+      '--remote-working-dir': 'remoteWorkingDir',
       '--no-session-persistence': { key: 'noSessionPersistence', boolean: true },
       '--auth-fd': 'authFd',
       '--poll-interval-ms': 'pollIntervalMs',
@@ -818,6 +860,8 @@ export function parseArgs(argv) {
       '--wait': { key: 'wait', boolean: true },
       '--timeout-ms': 'timeoutMs',
       '--tail': 'tail',
+      '--limit': 'limit',
+      '--event': 'event',
       '--status': 'status',
       '--alive': { key: 'alive', boolean: true },
       '--has-conflicts': { key: 'hasConflicts', boolean: true },
@@ -1382,6 +1426,7 @@ async function main() {
       console.log(`Lane started: ${summary.sessionName}`);
       if (laneOpts.laneId) console.log(`  Lane id:       ${laneOpts.laneId}`);
       console.log(`  Tool:          ${summary.tool || summary.adapterId || laneOpts.tool || 'claude'}`);
+      console.log(`  Transport:     ${formatLaneTransportSummary(summary)}`);
       console.log(`  Scope:         ${formatLaneScope(summary)}`);
       console.log(`  Resources:     ${formatLaneResources(summary)}`);
       console.log(`  Lane dir:      ${summary.laneDir}`);
@@ -1708,6 +1753,7 @@ async function main() {
           const name = lane.laneId || lane.sessionName || lane.laneDir;
           console.log(`${name}: ${lane.status}${lane.alive ? ' (alive)' : ''}`);
           console.log(`  Tool:          ${lane.tool ?? lane.adapterId ?? 'claude'}`);
+          console.log(`  Transport:     ${formatLaneTransportSummary(lane)}`);
           console.log(`  Scope:         ${formatLaneScope(lane)}`);
           console.log(`  Resources:     ${formatLaneResources(lane)}`);
           console.log(`  Repo:          ${lane.guardrailRepo ?? 'n/a'}`);
@@ -1748,19 +1794,20 @@ async function main() {
   }
 
   if (parsed.subcommand === 'lane-inspect') {
-    const { getResidentLaneLogs, getResidentLaneResult, getResidentLaneStatus } = await import('./resident-lane.js');
+    const { getResidentLaneHistory, getResidentLaneLogs, getResidentLaneResult, getResidentLaneStatus } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     if (!laneOpts.laneId && !laneOpts.laneDir) {
       console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane inspect');
       process.exit(1);
     }
     const status = getResidentLaneStatus(laneOpts);
-    const bundle = buildLaneInspectBundle(laneOpts, status, getResidentLaneResult, getResidentLaneLogs);
+    const bundle = buildLaneInspectBundle(laneOpts, status, getResidentLaneResult, getResidentLaneLogs, getResidentLaneHistory);
     if (parsed.json) {
       console.log(JSON.stringify(bundle, null, 2));
     } else {
       console.log(`Lane status: ${bundle.status.status}`);
       console.log(`  Tool:               ${bundle.status.tool ?? bundle.status.adapterId ?? 'claude'}`);
+      console.log(`  Transport:          ${formatLaneTransportSummary(bundle.status)}`);
       console.log(`  Scope:              ${formatLaneScope(bundle.status)}`);
       console.log(`  Resources:          ${formatLaneResources(bundle.status)}`);
       console.log(`  Request:            ${bundle.status.currentRequestId ?? bundle.status.lastRequestId ?? 'n/a'}`);
@@ -1774,6 +1821,34 @@ async function main() {
         console.log('');
         console.log(`Lane log tail (${bundle.logs.tailLines} lines):`);
         process.stdout.write(`${bundle.logs.text}${bundle.logs.text.endsWith('\n') ? '' : '\n'}`);
+      }
+      if (bundle.history?.entries?.length > 0) {
+        console.log('');
+        console.log(`Lane history (${bundle.history.entries.length}/${bundle.history.totalMatches} entries, chain=${bundle.history.chainValid ? 'valid' : 'broken'}):`);
+        for (const entry of bundle.history.entries) {
+          console.log(`  ${entry.timestamp} ${entry.event} request=${entry.request_id ?? 'n/a'} status=${entry.status ?? 'n/a'} reason=${entry.reason ?? 'n/a'}`);
+        }
+      }
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-history') {
+    const { getResidentLaneHistory } = await import('./resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane history');
+      process.exit(1);
+    }
+    const history = buildLaneHistoryBundle(getResidentLaneHistory(laneOpts));
+    if (parsed.json) {
+      console.log(JSON.stringify(history, null, 2));
+    } else {
+      console.log(`Lane audit: ${history.auditPath}`);
+      console.log(`  Entries: ${history.count}/${history.totalMatches}`);
+      console.log(`  Chain:   ${history.chainValid ? 'valid' : 'broken'}`);
+      for (const entry of history.entries) {
+        console.log(`  ${entry.timestamp} ${entry.event} request=${entry.request_id ?? 'n/a'} status=${entry.status ?? 'n/a'} reason=${entry.reason ?? 'n/a'} exit=${entry.exit_code ?? 'n/a'}`);
       }
     }
     process.exit(0);
@@ -1844,6 +1919,7 @@ async function main() {
     } else {
       console.log(`Lane status: ${enrichedStatus.status}`);
       console.log(`  Tool:               ${enrichedStatus.tool ?? enrichedStatus.adapterId ?? 'claude'}`);
+      console.log(`  Transport:          ${formatLaneTransportSummary(enrichedStatus)}`);
       console.log(`  Scope:              ${formatLaneScope(enrichedStatus)}`);
       console.log(`  Resources:          ${formatLaneResources(enrichedStatus)}`);
       if (laneOpts.laneId) console.log(`  Lane id:            ${laneOpts.laneId}`);
