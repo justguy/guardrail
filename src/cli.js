@@ -156,10 +156,13 @@ Commands:
   lane start [flags]                    Start a resident interactive lane
   lane send [flags]                     Send one message through a resident lane
   lane result [flags]                   Read the latest or named resident lane result
+  lane wait [flags]                     Wait for a resident lane request to complete
   lane status [flags]                   Show resident lane status and recovery hints
+  lane logs [flags]                     Read the bounded resident lane log tail
   lane stop [flags]                     Stop a resident interactive lane
   lane list [flags]                     List resident lanes in this Guardrail repo
   lane prune [flags]                    Remove dead resident-lane artifacts
+  lane adapters                         List bundled resident lane adapters
   repo status [--path <repo>]          Show tracked and untracked repo changes
   workflow run [flags]                  Run a workflow definition under Guardrail
   workflow lint --definition <path>     Lint a workflow definition for issues
@@ -188,6 +191,7 @@ Commands:
   adapter mcp batch --tool <name>       Perform a bounded ordered MCP tools/call batch over stdio
   adapter shim --tool <n> --commands <c>  Create PATH shims for adapter interception
   adapter profile install <source>      Install an adapter profile (path/url/github:// or bare name with --index/--index-key)
+  adapter profile discover [tool]       Discover tools from trusted signed adapter indexes
   adapter profile index verify <path> --index-key <pubkey.pem>  Verify a signed adapter profile index file
   adapter profile list                  List adapter profiles
   adapter profile show <tool>           Show adapter profile details
@@ -229,7 +233,9 @@ Examples:
   guardrail lane start --id codex-live --tool codex
   guardrail lane send --id claude-live --prompt "2x3=?"
   guardrail lane result --id claude-live
+  guardrail lane wait --id claude-live --request-id req-123
   guardrail lane result --id claude-live --request-id req-123
+  guardrail lane logs --id claude-live --tail 60
   guardrail lane stop --id claude-live
   guardrail lane list --json
   guardrail lane prune --json
@@ -681,7 +687,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'result', 'status', 'stop', 'list', 'prune'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'result', 'wait', 'status', 'logs', 'stop', 'list', 'prune', 'adapters'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -725,6 +731,7 @@ export function parseArgs(argv) {
       '--request-id': 'requestId',
       '--prompt': 'prompt',
       '--timeout-ms': 'timeoutMs',
+      '--tail': 'tail',
       '--scope-type': 'scopeType',
       '--scope-mode': 'scopeMode',
       '--scope-path': 'scopePaths',
@@ -1420,6 +1427,34 @@ async function main() {
     process.exit(result.status === 'missing' ? 1 : 0);
   }
 
+  if (parsed.subcommand === 'lane-wait') {
+    const { waitForResidentLaneResult } = await import('./resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane wait');
+      process.exit(1);
+    }
+    const result = await waitForResidentLaneResult(laneOpts);
+    await appendLaneAuditEntry(laneOpts, 'lane_wait', {
+      request_id: result.requestId || null,
+      status: result.status,
+      reason: result.reason || null,
+    });
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.status === 'completed') {
+      process.stdout.write(result.result?.stdout || '');
+    } else {
+      console.log(result.message);
+      if (result.requestId) console.log(`Request id: ${result.requestId}`);
+      if (result.resultPath) console.log(`Result path: ${result.resultPath}`);
+      if (result.failureReason) console.log(`Failure reason: ${result.failureReason}`);
+      if (result.failureStage) console.log(`Failure stage: ${result.failureStage}`);
+      if (result.logPath) console.log(`Log path: ${result.logPath}`);
+    }
+    process.exit(result.status === 'completed' ? 0 : (result.status === 'pending' ? 0 : 1));
+  }
+
   if (parsed.subcommand === 'lane-stop') {
     const { stopResidentLane } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
@@ -1476,6 +1511,41 @@ async function main() {
             console.log(`  Conflicts:     ${lane.scopeConflicts.length}`);
           }
         }
+      }
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-adapters') {
+    const { listResidentLaneAdapters } = await import('./resident-lane.js');
+    const adapters = listResidentLaneAdapters();
+    if (parsed.json) {
+      console.log(JSON.stringify({ adapters }, null, 2));
+    } else {
+      console.log('Resident lane adapters:');
+      for (const adapter of adapters) {
+        console.log(`  ${adapter.id} - ${adapter.description}`);
+      }
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-logs') {
+    const { getResidentLaneLogs } = await import('./resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane logs');
+      process.exit(1);
+    }
+    const logs = getResidentLaneLogs(laneOpts);
+    if (parsed.json) {
+      console.log(JSON.stringify(logs, null, 2));
+    } else {
+      console.log(`Lane log: ${logs.logPath ?? 'n/a'}`);
+      if (logs.text) {
+        process.stdout.write(`${logs.text}${logs.text.endsWith('\n') ? '' : '\n'}`);
+      } else {
+        console.log('(no log output recorded)');
       }
     }
     process.exit(0);

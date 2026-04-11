@@ -4,11 +4,12 @@ import { generateKeyPairSync, sign as signBytes } from 'node:crypto';
 import {
   mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, mkdirSync,
 } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import {
+  discoverTrustedAdapterProfiles,
   installFromPath, installFromUrl, installFromGitHub, installAdapterProfile,
 } from '../src/adapter-profile-install.js';
 import { hashProfile } from '../src/adapter-profile.js';
@@ -56,9 +57,9 @@ function writeProfileFile(dir, profile, name = 'profile.json') {
   return path;
 }
 
-function makeConfig(dir, trustedSources) {
+function makeConfig(dir, trustedSources, extra = {}) {
   const path = join(dir, 'config.json');
-  writeFileSync(path, JSON.stringify({ trusted_sources: trustedSources }));
+  writeFileSync(path, JSON.stringify({ trusted_sources: trustedSources, ...extra }));
   return path;
 }
 
@@ -569,7 +570,7 @@ describe('installAdapterProfile — source routing', () => {
     await assert.rejects(
       () => installAdapterProfile('aider', { profileDir: join(work, 'store') }),
       (err) => {
-        assert.ok(err.message.includes('Bare-name adapter install requires a signed index.'));
+        assert.ok(err.message.includes('trusted signed index'));
         return true;
       }
     );
@@ -606,6 +607,114 @@ describe('installAdapterProfile — source routing', () => {
     assert.equal(result.installed, true);
     assert.equal(result.tool, 'aider');
     assert.ok(seenUrl && seenUrl.includes('/adapter-profiles/'));
+  });
+
+  it('resolves a bare tool name through configured trusted signed indexes without explicit flags', async () => {
+    const { index, publicKeyPem } = makeSignedAdapterIndex({
+      aider: {
+        owner: 'guardrail-dev',
+        repo: 'adapter-profiles',
+        path: 'aider.json',
+        sha: 'a'.repeat(40),
+        version: '1.0.0',
+        content_hash: 'b'.repeat(64),
+      },
+    });
+    const indexPath = join(work, 'adapter-profiles.index.json');
+    const keyPath = join(work, 'adapter-profiles.index.pub.pem');
+    writeFileSync(indexPath, JSON.stringify(index, null, 2));
+    writeFileSync(keyPath, publicKeyPem);
+
+    let seenUrl = null;
+    const result = await installAdapterProfile('aider', {
+      profileDir: join(work, 'store'),
+      configPath: makeConfig(work, ['github://guardrail-dev/adapter-profiles/'], {
+        trusted_adapter_indexes: [{ path: basename(indexPath), key: basename(keyPath) }],
+      }),
+      fetchJson: async (url) => {
+        seenUrl = url;
+        return makeProfile({ tool: 'aider' });
+      },
+    });
+
+    assert.equal(result.installed, true);
+    assert.equal(result.tool, 'aider');
+    assert.ok(seenUrl && seenUrl.includes('/adapter-profiles/'));
+    assert.equal(result.pin.index.key_id, index.signature.key_id);
+    assert.equal(result.pin.index.tool, 'aider');
+  });
+
+  it('discovers tools from configured trusted signed indexes', () => {
+    const { index, publicKeyPem } = makeSignedAdapterIndex({
+      aider: {
+        owner: 'guardrail-dev',
+        repo: 'adapter-profiles',
+        path: 'aider.json',
+        sha: 'a'.repeat(40),
+        version: '1.0.0',
+        content_hash: 'b'.repeat(64),
+      },
+    });
+    const indexPath = join(work, 'adapter-profiles.index.json');
+    const keyPath = join(work, 'adapter-profiles.index.pub.pem');
+    writeFileSync(indexPath, JSON.stringify(index, null, 2));
+    writeFileSync(keyPath, publicKeyPem);
+
+    const result = discoverTrustedAdapterProfiles({
+      configPath: makeConfig(work, ['github://guardrail-dev/adapter-profiles/'], {
+        trusted_adapter_indexes: [{ path: basename(indexPath), key: basename(keyPath) }],
+      }),
+    });
+
+    assert.equal(result.indexCount, 1);
+    assert.equal(result.matchCount, 1);
+    assert.equal(result.matches[0].tool, 'aider');
+    assert.equal(result.matches[0].keyId, index.signature.key_id);
+  });
+
+  it('rejects ambiguous bare-name installs across multiple trusted signed indexes', async () => {
+    const { index: firstIndex, publicKeyPem: firstKey } = makeSignedAdapterIndex({
+      aider: {
+        owner: 'guardrail-dev',
+        repo: 'adapter-profiles',
+        path: 'aider.json',
+        sha: 'a'.repeat(40),
+        version: '1.0.0',
+        content_hash: 'b'.repeat(64),
+      },
+    });
+    const { index: secondIndex, publicKeyPem: secondKey } = makeSignedAdapterIndex({
+      aider: {
+        owner: 'other-org',
+        repo: 'adapter-profiles',
+        path: 'aider.json',
+        sha: 'c'.repeat(40),
+        version: '2.0.0',
+        content_hash: 'd'.repeat(64),
+      },
+    });
+    const firstIndexPath = join(work, 'first.index.json');
+    const firstKeyPath = join(work, 'first.index.pub.pem');
+    const secondIndexPath = join(work, 'second.index.json');
+    const secondKeyPath = join(work, 'second.index.pub.pem');
+    writeFileSync(firstIndexPath, JSON.stringify(firstIndex, null, 2));
+    writeFileSync(firstKeyPath, firstKey);
+    writeFileSync(secondIndexPath, JSON.stringify(secondIndex, null, 2));
+    writeFileSync(secondKeyPath, secondKey);
+
+    await assert.rejects(
+      () => installAdapterProfile('aider', {
+        profileDir: join(work, 'store'),
+        configPath: makeConfig(work, ['github://guardrail-dev/adapter-profiles/', 'github://other-org/adapter-profiles/'], {
+          trusted_adapter_indexes: [
+            { path: basename(firstIndexPath), key: basename(firstKeyPath) },
+            { path: basename(secondIndexPath), key: basename(secondKeyPath) },
+          ],
+        }),
+        fetchJson: async () => makeProfile({ tool: 'aider' }),
+      }),
+      /matched multiple trusted signed indexes/
+    );
   });
 
   it('enforces trusted_execution_sources for GitHub installs via active org policy', async () => {

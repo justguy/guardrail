@@ -4,8 +4,12 @@ import { homedir } from 'node:os';
 import { validateProfile, hashProfile } from './adapter-profile.js';
 import { loadRawJson } from './recipe.js';
 import { parseGitHubUrl, checkTrustedSource, loadConfig } from './recipe-install.js';
-import { resolveAdapterProfileFromSignedIndex } from './adapter-profile-index.js';
-import { isTrustedExecutionSource, resolveActiveOrgPolicy } from './org-policy.js';
+import {
+  loadAdapterProfileIndex,
+  resolveAdapterProfileFromSignedIndex,
+  verifyAdapterProfileIndex,
+} from './adapter-profile-index.js';
+import { isTrustedAdapterIndex, isTrustedExecutionSource, resolveActiveOrgPolicy } from './org-policy.js';
 
 // ---------------------------------------------------------------------------
 // Shared validation helper — produces a stable error prefix that downstream
@@ -19,6 +23,150 @@ function assertValidProfile(raw) {
       `Adapter profile validation failed: ${validation.errors.join('; ')}`
     );
   }
+}
+
+function trustedAdapterIndexesFromConfig(config = {}, configPath = null) {
+  const entries = Array.isArray(config?.trusted_adapter_indexes) ? config.trusted_adapter_indexes : [];
+  return entries.map((entry) => ({
+    indexPath: resolve(dirname(configPath || resolve(homedir(), '.guardrail', 'config.json')), entry.path),
+    indexKeyPath: resolve(dirname(configPath || resolve(homedir(), '.guardrail', 'config.json')), entry.key),
+  }));
+}
+
+function readVerifiedTrustedIndex(entry, opts = {}) {
+  assertTrustedAdapterIndex(entry.indexPath, opts);
+  if (!existsSync(entry.indexKeyPath)) {
+    throw new Error(`Adapter profile index public key not found: ${entry.indexKeyPath}`);
+  }
+  const index = loadAdapterProfileIndex(entry.indexPath);
+  const publicKeyPem = readFileSync(entry.indexKeyPath, 'utf8');
+  const verify = verifyAdapterProfileIndex(index, publicKeyPem);
+  if (!verify.valid) {
+    throw new Error(verify.reason);
+  }
+  return { entry, index };
+}
+
+function collectTrustedIndexMatches(toolName, opts = {}) {
+  const configPath = opts.configPath || resolve(homedir(), '.guardrail', 'config.json');
+  const config = loadConfig(configPath, { strict: true });
+  const trustedIndexes = trustedAdapterIndexesFromConfig(config, configPath);
+  if (trustedIndexes.length === 0) {
+    throw new Error(
+      'Bare-name adapter install requires a trusted signed index.\n'
+      + 'Either pass --index <path> --index-key <pubkey.pem>, or configure trusted_adapter_indexes in ~/.guardrail/config.json.'
+    );
+  }
+
+  const matches = [];
+  for (const entry of trustedIndexes) {
+    const { index } = readVerifiedTrustedIndex(entry, opts);
+    const profileEntry = index.profiles?.[toolName];
+    if (!profileEntry) continue;
+    matches.push({
+      indexPath: entry.indexPath,
+      indexKeyPath: entry.indexKeyPath,
+      indexSignature: index.signature,
+      entry: profileEntry,
+      source: `github://${profileEntry.owner}/${profileEntry.repo}/${profileEntry.path}@${profileEntry.sha}`,
+    });
+  }
+  return matches;
+}
+
+function assertTrustedAdapterIndex(indexPath, opts = {}) {
+  const policy = resolveActiveOrgPolicy({
+    orgPolicy: opts.orgPolicy,
+    orgPolicyName: opts.orgPolicyName,
+    orgPolicyDir: opts.orgPolicyDir,
+    fallbackDir: opts.policyFallbackDir || process.cwd(),
+  }).policy;
+  if (!isTrustedAdapterIndex(indexPath, policy, opts.policyFallbackDir || process.cwd())) {
+    const policyLabel = policy?.name || 'active';
+    throw new Error(
+      `Adapter index "${indexPath}" is not trusted by org policy "${policyLabel}". `
+      + 'Add a matching prefix to trusted_adapter_indexes.'
+    );
+  }
+}
+
+function resolveBareNameFromTrustedIndexes(source, opts = {}) {
+  if (opts.indexPath || opts.indexKeyPath) {
+    if (!opts.indexPath || !opts.indexKeyPath) {
+      throw new Error('Bare-name adapter install requires both --index <path> and --index-key <pubkey.pem>.');
+    }
+    assertTrustedAdapterIndex(opts.indexPath, opts);
+    return resolveAdapterProfileFromSignedIndex(source, {
+      indexPath: opts.indexPath,
+      indexKeyPath: opts.indexKeyPath,
+    });
+  }
+
+  const matches = collectTrustedIndexMatches(source, opts);
+  if (matches.length === 0) {
+    throw new Error(`Adapter profile "${source}" was not found in any trusted signed index.`);
+  }
+  if (matches.length > 1) {
+    const details = matches.map((match) => {
+      const keyId = match.indexSignature?.key_id || '<unknown-key>';
+      return `- ${match.indexPath} (${keyId}) -> ${match.source}`;
+    }).join('\n');
+    throw new Error(
+      `Adapter profile "${source}" matched multiple trusted signed indexes.\n`
+      + 'Pass --index <path> --index-key <pubkey.pem> to disambiguate.\n'
+      + details
+    );
+  }
+  return matches[0];
+}
+
+export function discoverTrustedAdapterProfiles(opts = {}) {
+  const configPath = opts.configPath || resolve(homedir(), '.guardrail', 'config.json');
+  const config = loadConfig(configPath, { strict: true });
+  const trustedIndexes = trustedAdapterIndexesFromConfig(config, configPath);
+  const toolFilter = typeof opts.toolName === 'string' && opts.toolName.trim() !== ''
+    ? opts.toolName.trim()
+    : null;
+
+  const indexes = trustedIndexes.map((entry) => {
+    const { index } = readVerifiedTrustedIndex(entry, opts);
+    const tools = Object.entries(index.profiles || {})
+      .filter(([toolName]) => !toolFilter || toolName === toolFilter)
+      .map(([toolName, profileEntry]) => ({
+        tool: toolName,
+        owner: profileEntry.owner,
+        repo: profileEntry.repo,
+        path: profileEntry.path,
+        sha: profileEntry.sha,
+        version: profileEntry.version,
+        contentHash: profileEntry.content_hash,
+        source: `github://${profileEntry.owner}/${profileEntry.repo}/${profileEntry.path}@${profileEntry.sha}`,
+      }));
+    return {
+      indexPath: entry.indexPath,
+      indexKeyPath: entry.indexKeyPath,
+      keyId: index.signature?.key_id || null,
+      toolCount: tools.length,
+      tools,
+    };
+  }).filter((entry) => !toolFilter || entry.tools.length > 0);
+
+  const matches = indexes.flatMap((entry) => entry.tools.map((tool) => ({
+    ...tool,
+    indexPath: entry.indexPath,
+    indexKeyPath: entry.indexKeyPath,
+    keyId: entry.keyId,
+  })));
+
+  return {
+    configPath,
+    toolName: toolFilter,
+    indexCount: indexes.length,
+    matchCount: matches.length,
+    ambiguous: !!toolFilter && matches.length > 1,
+    indexes,
+    matches,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +337,15 @@ export async function installFromGitHub(source, opts = {}) {
     content_hash: hash,
     installed_at: new Date().toISOString(),
   };
+  if (opts.indexResolution) {
+    pin.index = {
+      index_path: opts.indexResolution.indexPath,
+      key_id: opts.indexResolution.indexSignature?.key_id || null,
+      tool: opts.indexResolution.tool || raw.tool,
+      version: opts.indexResolution.entry?.version || raw.version,
+      content_hash: opts.indexResolution.entry?.content_hash || null,
+    };
+  }
   writeFileSync(pinPath, JSON.stringify(pin, null, 2) + '\n');
 
   return { ...result, pin };
@@ -209,11 +366,14 @@ export async function installAdapterProfile(source, opts = {}) {
     return installFromUrl(source, opts);
   }
   if (/^[a-z][a-z0-9-]*$/.test(source) && !existsSync(source)) {
-    const resolved = resolveAdapterProfileFromSignedIndex(source, {
-      indexPath: opts.indexPath,
-      indexKeyPath: opts.indexKeyPath,
+    const resolved = resolveBareNameFromTrustedIndexes(source, opts);
+    return installFromGitHub(resolved.source, {
+      ...opts,
+      indexResolution: {
+        ...resolved,
+        tool: source,
+      },
     });
-    return installFromGitHub(resolved.source, opts);
   }
   return installFromPath(source, opts);
 }

@@ -349,6 +349,7 @@ describe('MCP block gate', () => {
     assert.equal(supervisorCalled, false, 'supervisor must not run when MCP blocks');
     assert.equal(result.adapterResult.guardrail.category, 'blocked');
     assert.equal(result.adapterResult.guardrail.code, 'MCP_BLOCKED');
+    assert.ok(result.adapterResult.guardrail.reason.includes('bounded structured request'));
     assert.ok(
       result.adapterResult.guardrail.reason.includes('MCP'),
       `expected reason to include 'MCP': ${result.adapterResult.guardrail.reason}`,
@@ -405,6 +406,7 @@ describe('MCP block gate', () => {
     assert.equal(supervisorCalled, false);
     assert.equal(result.adapterResult.guardrail.category, 'blocked');
     assert.equal(result.adapterResult.guardrail.code, 'MCP_BLOCKED');
+    assert.ok(result.adapterResult.guardrail.reason.includes('bounded structured request'));
     assert.ok(result.adapterResult.guardrail.reason.includes('MCP'));
     assert.equal(typeof result.exitCode, 'number');
   });

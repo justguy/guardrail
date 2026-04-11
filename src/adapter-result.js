@@ -185,6 +185,27 @@ export function buildBlockedResult(code, reason) {
   };
 }
 
+export function buildSuccessResult(reason = DEFAULT_REASONS.success) {
+  return {
+    schemaVersion: 'adapter-result/v1',
+    guardrail: {
+      nativeStatus: 'success',
+      category: 'success',
+      code: ADAPTER_REASON_CODES.OK,
+      reason,
+      exitCode: 0,
+      contractHash: '',
+      manifestPath: '',
+      riskLevel: '',
+      riskReasons: [],
+      driftDetected: false,
+      driftSummary: [],
+    },
+    process: emptyProcess(),
+    telemetry: { runId: '', durationMs: 0 },
+  };
+}
+
 /**
  * Build a synthetic failed adapter-result/v1 for cases where the adapter
  * pipeline itself hit an error before delegating to the supervisor.

@@ -246,6 +246,9 @@ guardrail lane status --id claude-live
 # Read the latest or named result without reopening the outer transport
 guardrail lane result --id claude-live
 
+# Wait on a long-running request without dropping to raw host inspection
+guardrail lane wait --id claude-live --request-id req-123
+
 # Tear the lane down explicitly when done
 guardrail lane stop --id claude-live
 
@@ -254,6 +257,9 @@ guardrail lane list --json
 
 # Remove stale/expired/stopped lane artifacts once you're done diagnosing them
 guardrail lane prune --json
+
+# Inspect the bundled resident-lane adapters before startup
+guardrail lane adapters --json
 
 # Start a Codex-backed lane with the same lifecycle/status/result surface
 guardrail lane start \
@@ -270,7 +276,7 @@ guardrail lane start \
   --scope-path docs/references
 ```
 
-Resident lanes are for direct interactive use when the executable boundary should stay fixed but later user messages should not count as execution drift. The shipped lane control plane now supports both `claude` and `codex` adapters behind the same `lane start` / `lane send` / `lane result` / `lane status` / `lane stop` surface. The current helper:
+Resident lanes are for direct interactive use when the executable boundary should stay fixed but later user messages should not count as execution drift. The shipped lane control plane now supports both `claude` and `codex` adapters behind the same `lane start` / `lane send` / `lane result` / `lane wait` / `lane status` / `lane stop` surface, and `lane adapters` exposes the bundled adapter inventory. The current helper:
 - creates owner-only FIFOs (`0600`) under the lane directory
 - stores an ephemeral per-lane HMAC key outside the workspace at `~/.guardrail/lanes/<id>.key`
 - accepts only strict JSON requests with `id` and `prompt`
@@ -284,7 +290,7 @@ Resident lanes are for direct interactive use when the executable boundary shoul
 Resident lanes are also the first step toward the broader "manager of managers" direction for Guardrail. Today Guardrail ships lifecycle control for individual named lanes, repo-local lane registry/pruning, tool-selectable adapters, and first-pass swarm scope coordination. Broader portfolio UX, richer resource classes, and transport plugins remain roadmap items.
 
 Lane startup still has to happen in a runtime where the downstream CLI auth already works. Direct AI recipes can now declare bounded `requires_auth` checks too, so Guardrail fails before launch with `missing_auth_prerequisite` instead of letting the underlying CLI die late. The same bounded preflight now applies when those recipes are executed through workflow `recipe_ref` steps, so chained recipe workflows stop before launch on missing tool auth instead of surfacing a late downstream CLI failure. `lane start` now launches the daemon through a short-lived helper so the resident lane survives the wrapped CLI process exiting, records a fresh boot nonce in the lane identity record, and fails closed if another live lane with the same lane id already exists in that repo lane registry. Lanes can also declare `--scope-type repo|worktree|paths` plus `--scope-mode warn|block` and repeated `--scope-path <relative-path>` values. Guardrail compares those declared scopes only against other live lanes in the same repo registry and surfaces overlapping ownership through `lane start`, `lane status`, and `lane list`; `block` prevents startup, while `warn` starts the lane and records the conflict set. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again. Use `--tool claude` (default) or `--tool codex` to bind that lane to the right wrapped executor.
-Guardrail now exposes first-class startup and long-turn state for resident lanes. If a request outlives the client-side wait window, `lane send` returns a structured `pending` response with the request id instead of collapsing into `lane_expired`. `lane start` also now fails early with `lane_boot_failed` when the daemon dies during bootstrap or in the immediate post-start window, and `lane status` reports `failureReason`, `failureStage`, and `logPath` when a lane is in `failed` state. If the daemon disappears before the first request and leaves no explicit failure metadata, Guardrail now infers that as `failed/post_start` instead of showing a bare `stale` lane. Use `lane status` to see whether the lane is `ready`, `busy`, `failed`, `expired`, `stale`, or `stopped`, including the current request id/start time, lane identity metadata, and the last completed result path. Use `lane result` to read the stored output for the latest or named request once it completes. Use `lane list` to inspect every repo-local lane in one portfolio view, and `lane prune` to remove dead lane artifacts with explicit audit entries once diagnosis is complete. Raw host inspection should be the last resort, not the default recovery path.
+Guardrail now exposes first-class startup and long-turn state for resident lanes. If a request outlives the client-side wait window, `lane send` returns a structured `pending` response with the request id instead of collapsing into `lane_expired`. `lane start` also now fails early with `lane_boot_failed` when the daemon dies during bootstrap or in the immediate post-start window, and `lane status` reports `failureReason`, `failureStage`, and `logPath` when a lane is in `failed` state. If the daemon disappears before the first request and leaves no explicit failure metadata, Guardrail now infers that as `failed/post_start` instead of showing a bare `stale` lane. Use `lane status` to see whether the lane is `ready`, `busy`, `failed`, `expired`, `stale`, or `stopped`, including the current request id/start time, lane identity metadata, and the last completed result path. Use `lane result` to read the stored output for the latest or named request once it completes, and `lane wait` when you want Guardrail to wait on that same result instead of dropping to raw host inspection. Use `lane list` to inspect every repo-local lane in one portfolio view, `lane adapters` to inspect bundled adapter support, and `lane prune` to remove dead lane artifacts with explicit audit entries once diagnosis is complete. Raw host inspection should be the last resort, not the default recovery path.
 If a direct recipe run and a composed host-runtime recipe both fail with the same downstream tool-auth error such as `Not logged in`, treat that as missing auth in the target host runtime, not as Guardrail drift. Direct recipes now preflight in the current runtime; composed host-runtime recipes re-run the same bounded auth check inside the hosted surface before the downstream CLI starts. For Claude, the bundled recipes now use a real bounded `claude --print` probe instead of trusting `claude auth status` alone. Hosted transport wrappers still isolate the child env with `env -i` and rehydrate only the approved vars, so seeing `env -i` in a pane capture is expected; missing runtime vars or false-positive shell-level auth are the real failure modes. The bundled `cmux-claude-exec` recipe now defaults to one hosted auth repair attempt too: if the hosted probe or exec hits login, Guardrail runs `claude auth login --console` in that exact hosted runtime, reruns the probe, and retries the original exec once. If login itself still needs a human to finish it, the run now fails with `auth_repair_pending_user_input` instead of pretending the slice ran. For repeated interaction or monitoring after startup, prefer the resident FIFO lane over repeated raw host-surface inspection commands so you do not trigger another approval-bearing transport hop every turn.
 
 Communication matrix:
@@ -298,9 +304,11 @@ Communication matrix:
 - `scope-type` / `scope-mode` / `scope-path`: optional lane ownership declaration for concurrent agents (`repo`, `worktree`, or explicit repo-relative paths; compare only against other live lanes)
 - `lane send`: later message traffic through the resident lane
 - `lane result`: read the stored output for the latest or named request
+- `lane wait`: wait for a resident-lane request to complete through the bounded lane surface
 - `lane status`: inspect ready/busy/failed/expired/stale/stopped lane state plus tool, current request visibility, and startup failure detail
 - `lane stop`: explicit teardown
 - `lane list`: enumerate repo-local lanes and their current state
+- `lane adapters`: inspect bundled lane adapters before startup
 - `lane prune`: remove dead lane artifacts from the repo-local registry
 
 Scope coordination rules:
@@ -771,8 +779,8 @@ Guardrail includes an **adapter system** for agent tools and local wrappers. The
 
 MCP status:
 - `stdin-json` and `env-shim` are the runnable adapter transports today
-- MCP profiles are recognized and may declare a validated `mcp_transport` contract, but runtime support is still intentionally blocked
-- blocked MCP runs now tell you which transport contract was recognized so users can distinguish “profile is malformed” from “transport exists on paper but is not live yet”
+- MCP profiles are recognized and may declare a validated `mcp_transport` contract, and Guardrail now supports bounded MCP discovery plus bounded `call` / `batch` runtime paths over declared `stdio` transport
+- shell-style MCP execution is still intentionally blocked, and blocked MCP runs tell you which transport contract was recognized so users can distinguish “profile is malformed” from “transport exists on paper but is not live yet”
 - `guardrail adapter probe --tool <name>` is the bounded MCP discovery path: it runs an approval-bearing stdio probe that only performs `initialize` plus `tools/list` for MCP profiles with declared `stdio` transport
 - `guardrail adapter mcp tools --tool <name>` is the first explicit MCP inventory surface: it returns the discovered tool metadata Guardrail saw during that bounded `initialize` + `tools/list` exchange so agents can inspect callable tool names before invoking one
 - `guardrail adapter mcp call --tool <name> --mcp-tool <tool> --params-json <json>` is the first bounded MCP runtime path: it performs exactly one `tools/call` over the declared `stdio` transport under Guardrail approval, without turning general `adapter run` into an ambient MCP execution surface
@@ -784,7 +792,7 @@ Current architecture:
 - **Stable public schema**: the adapter engine translates that internal result into a versioned public contract: `adapter-result/v1`
 - **Pure-data profiles**: public profiles declare a `schema_target`, map fields from `adapter-result/v1`, and cannot execute arbitrary code
 - **Pinned distribution**: public profiles install from SHA-pinned GitHub URLs, not from bare names
-- **Protocol limits**: Phase 1 supports `stdin-json` and `env-shim`; `mcp` profiles may exist but runtime support is deferred and blocked before execution
+- **Protocol limits**: Phase 1 supports `stdin-json`, `env-shim`, and bounded `mcp` execution over declared stdio transports; arbitrary shell-style MCP runs remain blocked
 - **Bounded MCP probe**: `adapter probe` is additive and opt-in; it uses the declared `mcp_transport` contract, runs the transport under Guardrail, and only performs capability discovery (`initialize` + `tools/list`)
 - **Logging and audit**: adapter runs emit structured log/audit events, and any stdout/stderr exposed to adapters is clipped to bounded sizes
 - **Auth preflight**: profiles may declare `requires_env` and `requires_auth`; Guardrail fails early when required env mappings or bounded CLI auth prerequisites are missing. `requires_env` requires explicit `--env-allow` mapping; missing entries fail closed with `missing_auth_mapping`. `requires_auth` runs bounded local checks (for example `claude_login`, `claude_exec_probe`, and `gh_auth`) and fails with `missing_auth_prerequisite` when the current runtime is not authenticated.
@@ -798,8 +806,9 @@ guardrail adapter probe --tool cline
 guardrail adapter mcp tools --tool cline
 guardrail adapter mcp call --tool cline --mcp-tool echo --params-json '{"text":"hi"}'
 guardrail adapter mcp batch --tool cline --calls-json '[{"tool":"echo","params":{"text":"hi"}},{"tool":"echo","params":{"text":"bye"}}]'
+guardrail adapter run --tool cline --mcp-tool echo --params-json '{"text":"hi"}'
+guardrail adapter profile discover aider --json
 guardrail adapter profile install aider --index ./adapter-profiles.index.json --index-key ./adapter-profiles.index.pub.pem
-guardrail adapter run --tool cline -- echo "still blocked in v0.2"
 guardrail adapter profile index verify ./adapter-profiles.index.json --index-key ./adapter-profiles.index.pub.pem
 guardrail adapter profile install github://guardrail-dev/adapter-profiles/openclaw.json@<sha>
 ```
@@ -817,13 +826,14 @@ Adapter caveats:
 - `requires_auth` is preflight-only and does not perform interactive login. If a tool reports `missing_auth_prerequisite`, authenticate the runtime first (for example `claude auth login` or `gh auth login`) and retry. The current exception is the bundled composed Claude host-runtime path, which can perform one bounded hosted `claude auth login --console` repair attempt before it gives up with `auth_repair_pending_user_input`.
 - The same bounded auth/runtime preflight now applies to workflow `recipe_ref` execution for referenced recipes. If a chained recipe declares `requires_auth`, the workflow stops before launch with the same `missing_auth_prerequisite` semantics instead of letting the child CLI fail late.
 - Adapter `run` also enforces approval reuse: first approval is interactive and binds an adapter manifest; without one, `adapter run` returns a blocked result with `No approved manifest found`.
-- `adapter probe` is discovery only. It does not run user commands through MCP profiles, and it does not make `adapter run` live for MCP tools. Use it to confirm that the declared stdio transport can initialize and expose tools under Guardrail.
+- `adapter probe` is discovery only. It does not run user commands through MCP profiles. Use it to confirm that the declared stdio transport can initialize and expose tools under Guardrail.
 - `adapter mcp tools` is the agent-facing inventory view for that same bounded discovery path. Use it when you need the actual MCP tool names or input-schema-bearing metadata Guardrail observed before choosing a tool.
 - `adapter mcp call` is the first bounded MCP execution slice. It still requires explicit MCP tool selection plus JSON params, and it does not reinterpret arbitrary shell commands as MCP calls. Guardrail now validates the requested MCP tool against the discovered tool set when the profile declares required capability discovery.
 - `adapter mcp batch` is the next bounded execution slice. It still requires an explicit JSON array of `{ tool, params }` objects, still runs under one bounded stdio session, and now validates the requested tool set against bounded discovery when the profile requires capability discovery; it does not reinterpret arbitrary shell commands as ambient MCP execution.
-- Signed adapter-profile index verification is now shipped via `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`, and Guardrail can now also resolve `adapter profile install <tool-name>` through that verified local index when you pass both `--index` and `--index-key`. This is still a local/team distribution flow, not ambient public discovery.
-- `adapter run` for MCP profiles is still blocked at CLI level in v0.2. If you need bounded MCP execution now, use `adapter mcp call` or `adapter mcp batch`; if you need general IDE-style protocol execution, use the env-shim path until broader MCP runtime semantics ship.
-- Bare-name adapter-profile install still fails closed by default. It only succeeds when you explicitly provide a signed local index and matching public key with `--index` and `--index-key`.
+- `adapter run` for MCP profiles now accepts only bounded structured requests. Use `--mcp-tool` with `--params-json` for one explicit MCP call or `--calls-json` for an explicit ordered batch. Shell-style `adapter run -- <command>` remains intentionally blocked for MCP profiles.
+- Signed adapter-profile index verification is now shipped via `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`, and Guardrail can now also resolve `adapter profile install <tool-name>` through that verified local index when you pass both `--index` and `--index-key` or configure `trusted_adapter_indexes` in `~/.guardrail/config.json`.
+- `adapter profile discover [tool-name] [--json]` lists the tools currently exposed by those configured trusted signed indexes before you install one.
+- Bare-name installs through trusted signed indexes now fail closed on ambiguity and record the chosen index path plus signer `key_id` in the installed pin metadata. This is still a local/team distribution flow, not ambient unsigned public discovery.
 - `--env-allow` is bounded and explicit. It only controls what environment keys are handed to the adapter process for that run.
 - `claude-exec` and `codex-exec` are approval-bounded wrappers, not outer sandboxes. If you run them outside your host sandbox/container boundary, the underlying AI CLI runs with host privileges subject to its own permission model. Guardrail now calls this out as a yellow-to-red risk reason in approval UX.
 

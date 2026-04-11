@@ -710,6 +710,13 @@ describe('parseAdapterArgs', async () => {
     assert.equal(r.subcommand, 'adapter-profile-list');
   });
 
+  it('parses adapter profile discover aider --json', () => {
+    const r = parseAdapterArgs(['profile', 'discover', 'aider', '--json']);
+    assert.equal(r.subcommand, 'adapter-profile-discover');
+    assert.equal(r.toolName, 'aider');
+    assert.equal(r.json, true);
+  });
+
   it('parses adapter profile index verify ./index.json', () => {
     const r = parseAdapterArgs(['profile', 'index', 'verify', './index.json']);
     assert.equal(r.subcommand, 'adapter-profile-index-verify');
@@ -1170,7 +1177,7 @@ describe('cli adapter subcommand', async () => {
     ]);
 
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /MCP protocol is not yet supported/);
+    assert.match(result.stderr, /bounded structured request/);
   });
 });
 
@@ -1375,7 +1382,7 @@ describe('adapter-result parity with supervisor statuses', async () => {
 describe('MCP gate parity between runAdapter and CLI', async () => {
   const { ADAPTER_REASON_CODES } = await import('../src/adapter-engine.js');
 
-  it('runAdapter returns a structured MCP_BLOCKED result for mcp profiles', async () => {
+  it('runAdapter returns a structured MCP_BLOCKED result for mcp profiles without a bounded MCP request', async () => {
     const dir = makeTempDir();
     const profilePath = writeProfile(dir, makeJsonProfile({
       tool: 'mcp-blocked',
@@ -1409,14 +1416,13 @@ describe('MCP gate parity between runAdapter and CLI', async () => {
     assert.equal(supervisorCalled, false);
     assert.equal(result.adapterResult.guardrail.category, 'blocked');
     assert.equal(result.adapterResult.guardrail.code, ADAPTER_REASON_CODES.MCP_BLOCKED);
-    assert.match(result.adapterResult.guardrail.reason, /MCP/);
+    assert.match(result.adapterResult.guardrail.reason, /bounded structured request/);
     assert.match(result.adapterResult.guardrail.reason, /Declared transport: stdio/);
-    assert.match(result.adapterResult.guardrail.reason, /mcp-roadmap/);
     // Profile exit_codes.blocked = 12 in makeJsonProfile defaults.
     assert.equal(result.exitCode, 12);
   });
 
-  it('CLI still prints the user-facing MCP error and exits 1', () => {
+  it('CLI still prints the user-facing MCP error and exits 1 for shell-style MCP runs', () => {
     const result = runNode([
       resolve('src/cli.js'),
       'adapter', 'run',
@@ -1424,7 +1430,86 @@ describe('MCP gate parity between runAdapter and CLI', async () => {
       '--', 'echo', 'hello',
     ]);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /MCP protocol is not yet supported/);
+    assert.match(result.stderr, /bounded structured request/);
+  });
+
+  it('runAdapter routes bounded MCP requests through the MCP call path', async () => {
+    const dir = makeTempDir();
+    const profilePath = writeProfile(dir, makeJsonProfile({
+      tool: 'mcp-run',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: 'fake-mcp',
+        args: [],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+      response: {
+        format: 'json',
+        success: { status: 'success' },
+        blocked: { status: 'blocked', reason: '$.guardrail.reason' },
+        failed: { status: 'failed' },
+      },
+    }));
+
+    const supervisorFn = async (options) => {
+      if (options.args.some((arg) => String(arg).includes('adapter-mcp-stdio-probe.js'))) {
+        return {
+          runId: 'probe',
+          status: 'success',
+          reason: 'ok',
+          exitCode: 0,
+          worker: {
+            launched: true,
+            stdout: JSON.stringify({
+              ok: true,
+              transport: 'stdio',
+              server: {
+                toolNames: ['echo'],
+                toolCount: 1,
+                tools: [{ name: 'echo', description: 'echo', hasInputSchema: true }],
+              },
+              toolCount: 1,
+              tools: [{ name: 'echo', description: 'echo', hasInputSchema: true }],
+            }),
+            stderr: '',
+          },
+          telemetry: { durationMs: 1 },
+        };
+      }
+      return {
+        runId: 'call',
+        status: 'success',
+        reason: 'ok',
+        exitCode: 0,
+        worker: {
+          launched: true,
+          stdout: JSON.stringify({
+            ok: true,
+            call: {
+              tool: 'echo',
+              result: { content: [{ type: 'text', text: 'hi' }] },
+            },
+          }),
+          stderr: '',
+        },
+        telemetry: { durationMs: 1 },
+      };
+    };
+
+    const result = await runAdapter({
+      profilePath,
+      mcpTool: 'echo',
+      params: { text: 'hi' },
+      supervisorFn,
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.adapterResult.guardrail.category, 'success');
+    assert.equal(result.renderedResponse.tool, 'echo');
+    assert.equal(result.renderedResponse.result.content[0].text, 'hi');
   });
 });
 

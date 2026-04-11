@@ -52,6 +52,11 @@ function parseRunArgs(argv, startIndex, result) {
       '--tool': valueFlag('tool'),
       '--profile': valueFlag('profilePath'),
       '--env-allow': repeatedValueFlag('envAllow'),
+      '--mcp-tool': valueFlag('mcpTool'),
+      '--params-json': valueFlag('paramsJson'),
+      '--calls-json': valueFlag('callsJson'),
+      '--timeout-ms': valueFlag('timeoutMs'),
+      '--json': (parsed, _argv, index) => { parsed.json = true; return { nextIndex: index + 1 }; },
     }[argv[i]];
     if (!handler) return { error: 'usage' };
     const next = handler(result, argv, i);
@@ -99,6 +104,8 @@ function parseMcpBatchArgs(argv, startIndex, result) {
  *
  * Supported commands:
  *   adapter run --tool <name> [--profile <path>] [--env-allow <VAR>] -- <command> [args...]
+ *   adapter run --tool <name> --mcp-tool <tool> [--params-json <json>] [--env-allow <VAR>] [--timeout-ms <ms>]
+ *   adapter run --tool <name> --calls-json <json> [--env-allow <VAR>] [--timeout-ms <ms>]
  *   adapter probe --tool <name> [--profile <path>] [--env-allow <VAR>] [--timeout-ms <ms>]
  *   adapter mcp tools --tool <name> [--profile <path>] [--env-allow <VAR>] [--timeout-ms <ms>]
  *   adapter mcp call --tool <name> --mcp-tool <tool> [--params-json <json>] [--env-allow <VAR>] [--timeout-ms <ms>]
@@ -121,6 +128,11 @@ export function parseAdapterArgs(argv) {
       tool: null,
       profilePath: null,
       envAllow: [],
+      mcpTool: null,
+      paramsJson: '{}',
+      callsJson: null,
+      timeoutMs: null,
+      json: false,
       command: null,
       args: [],
     });
@@ -226,6 +238,19 @@ export function parseAdapterArgs(argv) {
       return { subcommand: 'adapter-profile-list' };
     }
 
+    if (profileAction === 'discover') {
+      return parseFlags(argv, 3, {
+        subcommand: 'adapter-profile-discover',
+        toolName: argv[2] && !argv[2].startsWith('--') ? argv[2] : null,
+        json: false,
+      }, {
+        '--json': (parsed, _argv, index) => {
+          parsed.json = true;
+          return { nextIndex: index + 1 };
+        },
+      });
+    }
+
     if (profileAction === 'index') {
       if (argv[2] !== 'verify' || argv.length < 4) return { error: 'usage' };
       return parseFlags(argv, 4, {
@@ -318,6 +343,32 @@ function formatAdapterProfileIndexVerify(result, jsonOutput) {
   ].join('\n');
 }
 
+function formatAdapterProfileDiscover(result, jsonOutput) {
+  if (jsonOutput) {
+    return JSON.stringify(result, null, 2);
+  }
+
+  if (result.indexCount === 0) {
+    return 'No trusted signed adapter indexes configured.';
+  }
+
+  const lines = [
+    `Trusted adapter indexes: ${result.indexCount}`,
+    `Matching tools: ${result.matchCount}`,
+  ];
+  for (const index of result.indexes) {
+    lines.push(`- ${index.indexPath}${index.keyId ? ` (${index.keyId})` : ''}`);
+    for (const tool of index.tools) {
+      lines.push(`    ${tool.tool} -> ${tool.source}`);
+    }
+  }
+  if (result.ambiguous && result.toolName) {
+    lines.push('');
+    lines.push(`"${result.toolName}" is ambiguous across trusted indexes. Pass --index/--index-key to install from one explicitly.`);
+  }
+  return lines.join('\n');
+}
+
 function formatMcpCallResult(result, jsonOutput) {
   if (jsonOutput) {
     return JSON.stringify(result, null, 2);
@@ -372,6 +423,8 @@ export async function runAdapterCli(adapterArgv, options = {}) {
     console.error('Usage: guardrail adapter <run|probe|shim|profile> [options]');
     console.error('');
     console.error('  adapter run --tool <name> [--env-allow VAR] -- <command> [args...]');
+    console.error('  adapter run --tool <name> --mcp-tool <tool> [--params-json JSON] [--env-allow VAR] [--timeout-ms MS]');
+    console.error('  adapter run --tool <name> --calls-json JSON [--env-allow VAR] [--timeout-ms MS]');
     console.error('  adapter probe --tool <name> [--env-allow VAR] [--timeout-ms MS]');
     console.error('  adapter mcp tools --tool <name> [--env-allow VAR] [--timeout-ms MS]');
     console.error('  adapter mcp call --tool <name> --mcp-tool <tool> [--params-json JSON] [--env-allow VAR] [--timeout-ms MS]');
@@ -381,6 +434,7 @@ export async function runAdapterCli(adapterArgv, options = {}) {
     console.error('  adapter shim --remove <command>');
     console.error('  adapter shim --install-path [--write]');
     console.error('  adapter profile install <path|url|github://|bare-name> [--index path] [--index-key pubkey.pem]');
+    console.error('  adapter profile discover [tool-name] [--json]');
     console.error('  adapter profile index verify <path> --index-key <pubkey.pem>');
     console.error('  adapter profile list');
     console.error('  adapter profile show <tool>');
@@ -398,24 +452,56 @@ export async function runAdapterCli(adapterArgv, options = {}) {
 
     const { runAdapter, ADAPTER_REASON_CODES } = await import('./adapter-engine.js');
     try {
+      let parsedParams = {};
+      let parsedCalls = null;
+      if (parsed.paramsJson != null) {
+        try {
+          parsedParams = JSON.parse(parsed.paramsJson || '{}');
+        } catch (err) {
+          console.error(`Error: --params-json must be valid JSON: ${err.message}`);
+          process.exit(1);
+          return;
+        }
+        if (parsedParams == null || typeof parsedParams !== 'object' || Array.isArray(parsedParams)) {
+          console.error('Error: --params-json must decode to a JSON object.');
+          process.exit(1);
+          return;
+        }
+      }
+      if (parsed.callsJson != null) {
+        try {
+          parsedCalls = JSON.parse(parsed.callsJson);
+        } catch (err) {
+          console.error(`Error: --calls-json must be valid JSON: ${err.message}`);
+          process.exit(1);
+          return;
+        }
+        if (!Array.isArray(parsedCalls) || parsedCalls.length === 0) {
+          console.error('Error: --calls-json must decode to a non-empty JSON array.');
+          process.exit(1);
+          return;
+        }
+      }
+
       const result = await runAdapter({
         tool: parsed.tool,
         profilePath: parsed.profilePath,
         command: parsed.command,
         args: parsed.args,
         envAllow: parsed.envAllow || [],
+        mcpTool: parsed.mcpTool,
+        params: parsedParams,
+        calls: parsedCalls,
+        timeoutMs: parsed.timeoutMs || 5000,
       });
 
       const code = result?.adapterResult?.guardrail?.code;
       if (code === ADAPTER_REASON_CODES.MCP_BLOCKED) {
-        console.error('Error: MCP protocol is not yet supported in v0.2.');
+        console.error(`Error: ${result.adapterResult.guardrail.reason}`);
         const transportType = result?.adapterResult?.guardrail?.reason?.match(/Declared transport: ([^.]+)\./)?.[1];
         if (transportType) {
           console.error(`Declared MCP transport: ${transportType}`);
         }
-        console.error('');
-        console.error('For Cline integration now, use the env-shim path or install a shim-oriented profile.');
-        console.error('See: docs/adapter-implementation-plan.md#mcp-roadmap');
         process.exit(1);
         return;
       }
@@ -428,10 +514,25 @@ export async function runAdapterCli(adapterArgv, options = {}) {
         return;
       }
 
-      const output = typeof result.renderedResponse === 'string'
-        ? result.renderedResponse
-        : JSON.stringify(result.renderedResponse, null, 2);
-      console.log(output);
+      const output = !!parsed.json || !!options.jsonOutput
+        ? JSON.stringify({
+          adapterResult: result.adapterResult,
+          renderedResponse: result.renderedResponse,
+          ...(result.mcpCall ? { mcpCall: result.mcpCall } : {}),
+          ...(result.mcpBatch ? { mcpBatch: result.mcpBatch } : {}),
+        }, null, 2)
+        : (typeof result.renderedResponse === 'string'
+          ? result.renderedResponse
+          : result.renderedResponse != null
+            ? JSON.stringify(result.renderedResponse, null, 2)
+            : (result.adapterResult?.guardrail?.reason || 'Adapter run failed.'));
+      if (!!parsed.json || !!options.jsonOutput) {
+        console.log(output);
+      } else if (result.exitCode === 0) {
+        console.log(output);
+      } else {
+        console.error(output);
+      }
       process.exit(result.exitCode);
     } catch (err) {
       console.error(err.message);
@@ -681,6 +782,21 @@ export async function runAdapterCli(adapterArgv, options = {}) {
       console.log(`Installed adapter profile "${result.tool}" v${result.version}`);
       console.log(`  Path: ${result.path}`);
       console.log(`  Hash: ${result.hash}`);
+      process.exit(0);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (parsed.subcommand === 'adapter-profile-discover') {
+    const { discoverTrustedAdapterProfiles } = await import('./adapter-profile-install.js');
+    try {
+      const result = discoverTrustedAdapterProfiles({
+        toolName: parsed.toolName,
+      });
+      console.log(formatAdapterProfileDiscover(result, !!parsed.json || !!options.jsonOutput));
       process.exit(0);
     } catch (err) {
       console.error(err.message);

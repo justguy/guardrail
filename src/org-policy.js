@@ -15,6 +15,7 @@ import { join, resolve, sep } from 'node:path';
  * @property {string[]} trusted_recipe_roots
  * @property {string[]} trusted_execution_sources
  * @property {string[]} trusted_registries
+ * @property {string[]} trusted_adapter_indexes
  * @property {boolean} overrides_local - Always true for org policies.
  */
 
@@ -27,6 +28,7 @@ export function validateOrgPolicy(policy) {
   if (!Array.isArray(policy.trusted_recipe_roots || [])) errors.push('trusted_recipe_roots must be an array');
   if (!Array.isArray(policy.trusted_execution_sources || [])) errors.push('trusted_execution_sources must be an array');
   if (!Array.isArray(policy.trusted_registries || [])) errors.push('trusted_registries must be an array');
+  if (!Array.isArray(policy.trusted_adapter_indexes || [])) errors.push('trusted_adapter_indexes must be an array');
   return errors;
 }
 
@@ -106,6 +108,11 @@ export function resolveHierarchy(orgPolicy, teamPolicy, userPolicy) {
       ...(teamPolicy?.trusted_registries ?? []),
       ...(userPolicy?.trusted_registries ?? []),
     ],
+    trusted_adapter_indexes: [
+      ...(orgPolicy?.trusted_adapter_indexes ?? []),
+      ...(teamPolicy?.trusted_adapter_indexes ?? []),
+      ...(userPolicy?.trusted_adapter_indexes ?? []),
+    ],
     source: orgPolicy ? 'org' : teamPolicy ? 'team' : 'user',
   };
 
@@ -121,6 +128,9 @@ export function resolveHierarchy(orgPolicy, teamPolicy, userPolicy) {
   }
   if (orgPolicy?.trusted_registries?.length > 0) {
     effective.trusted_registries = orgPolicy.trusted_registries;
+  }
+  if (orgPolicy?.trusted_adapter_indexes?.length > 0) {
+    effective.trusted_adapter_indexes = orgPolicy.trusted_adapter_indexes;
   }
 
   return effective;
@@ -161,6 +171,18 @@ export function isTrustedRegistry(registry, orgPolicy, baseDir = process.cwd()) 
   return policyRegistries.some((rawRegistry) => {
     if (typeof rawRegistry !== 'string' || rawRegistry.length === 0) return false;
     const normalized = rawRegistry.includes('://') ? rawRegistry : resolve(baseDir, rawRegistry);
+    return candidate === normalized || candidate.startsWith(`${normalized}${sep}`);
+  });
+}
+
+export function isTrustedAdapterIndex(indexPath, orgPolicy, baseDir = process.cwd()) {
+  const policyIndexes = orgPolicy?.trusted_adapter_indexes;
+  if (!Array.isArray(policyIndexes) || policyIndexes.length === 0) return true;
+
+  const candidate = indexPath.includes('://') ? indexPath : resolve(baseDir, indexPath);
+  return policyIndexes.some((rawIndex) => {
+    if (typeof rawIndex !== 'string' || rawIndex.length === 0) return false;
+    const normalized = rawIndex.includes('://') ? rawIndex : resolve(baseDir, rawIndex);
     return candidate === normalized || candidate.startsWith(`${normalized}${sep}`);
   });
 }

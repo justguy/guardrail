@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 import {
   createLaneBootError,
+  getResidentLaneLogs,
   getResidentLaneResult,
   getResidentLaneStatus,
   lanePaths,
@@ -24,6 +25,7 @@ import {
   stopResidentLane,
   trackLaneRequestId,
   validateLaneRequest,
+  waitForResidentLaneResult,
   waitForResidentLaneBootstrap,
 } from './resident-lane-core.js';
 
@@ -507,6 +509,7 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
 
 export {
   createLaneBootError,
+  getResidentLaneLogs,
   getResidentLaneResult,
   getResidentLaneStatus,
   lanePaths,
@@ -518,5 +521,6 @@ export {
   stopResidentLane,
   trackLaneRequestId,
   validateLaneRequest,
+  waitForResidentLaneResult,
   waitForResidentLaneBootstrap,
 };

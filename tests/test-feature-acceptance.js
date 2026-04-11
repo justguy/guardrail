@@ -621,33 +621,47 @@ describe('README Feature: Resident Lane Mode', () => {
     const responseFifo = join(laneDir, 'responses.fifo');
     assert.equal(spawnSync('mkfifo', [requestFifo]).status, 0);
     assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
-
-    const requestFd = openSync(requestFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK);
-    const responseFd = openSync(responseFifo, fsConstants.O_RDWR);
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
 
     const laneServer = (async () => {
+      const requestFd = openSync(requestFifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+      let responseFd = null;
       const chunk = Buffer.alloc(4096);
       let buffer = '';
       const startedAt = Date.now();
-      for (;;) {
-        if ((Date.now() - startedAt) > 5000) {
-          throw new Error('Timed out waiting for lane request');
-        }
-        try {
-          const bytesRead = readSync(requestFd, chunk, 0, chunk.length, null);
-          if (bytesRead > 0) {
-            buffer += chunk.toString('utf8', 0, bytesRead);
-            const newlineIndex = buffer.indexOf('\n');
-            if (newlineIndex >= 0) {
-              const request = JSON.parse(buffer.slice(0, newlineIndex));
-              writeSync(responseFd, `${JSON.stringify({ requestId: request.id, ok: true, stdout: '6\n' })}\n`, undefined, 'utf8');
-              return;
-            }
+      try {
+        for (;;) {
+          if ((Date.now() - startedAt) > 5000) {
+            throw new Error('Timed out waiting for lane request');
           }
-        } catch (err) {
-          if (err?.code !== 'EAGAIN') throw err;
+          try {
+            const bytesRead = readSync(requestFd, chunk, 0, chunk.length, null);
+            if (bytesRead > 0) {
+              buffer += chunk.toString('utf8', 0, bytesRead);
+              const newlineIndex = buffer.indexOf('\n');
+              if (newlineIndex >= 0) {
+                const request = JSON.parse(buffer.slice(0, newlineIndex));
+                responseFd = openSync(responseFifo, fsConstants.O_WRONLY);
+                writeSync(responseFd, `${JSON.stringify({ requestId: request.id, ok: true, stdout: '6\n' })}\n`, undefined, 'utf8');
+                return;
+              }
+            }
+          } catch (err) {
+            if (err?.code !== 'EAGAIN') throw err;
+          }
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
         }
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+      } finally {
+        closeSync(requestFd);
+        if (responseFd !== null) {
+          closeSync(responseFd);
+        }
       }
     })();
 
@@ -680,19 +694,14 @@ describe('README Feature: Resident Lane Mode', () => {
       });
     });
 
-    try {
-      const [result] = await Promise.all([laneSend, laneServer]);
-      assert.equal(result.exitCode, 0, `lane send should succeed: ${result.stderr}`);
-      assert.equal(result.stdout, '6');
-      const entries = queryAuditLog(join(guardrailRepo, '.guardrail', 'audit.jsonl'), {});
-      const laneSendEntry = entries.find((entry) => entry.event === 'lane_send');
-      assert.ok(laneSendEntry, 'expected lane_send audit entry');
-      assert.equal(laneSendEntry.status, 'success');
-      assert.equal(laneSendEntry.trace_id, 'lane:resident');
-    } finally {
-      closeSync(requestFd);
-      closeSync(responseFd);
-    }
+    const [result] = await Promise.all([laneSend, laneServer]);
+    assert.equal(result.exitCode, 0, `lane send should succeed: ${result.stderr}`);
+    assert.equal(result.stdout, '6');
+    const entries = queryAuditLog(join(guardrailRepo, '.guardrail', 'audit.jsonl'), {});
+    const laneSendEntry = entries.find((entry) => entry.event === 'lane_send');
+    assert.ok(laneSendEntry, 'expected lane_send audit entry');
+    assert.equal(laneSendEntry.status, 'success');
+    assert.equal(laneSendEntry.trace_id, 'lane:resident');
   });
 
   it('guardrail lane send returns lane_expired when the host key is missing', () => {
@@ -791,6 +800,29 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.failureStage, 'bootstrap');
   });
 
+  it('guardrail lane logs returns a bounded tail of the lane log', () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    const logsDir = join(laneDir, 'logs');
+    mkdirSync(logsDir, { recursive: true });
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: 12345,
+      status: 'failed',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      logPath: join(logsDir, 'lane.log'),
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+    writeFileSync(join(logsDir, 'lane.log'), 'one\ntwo\nthree\nfour\n', 'utf8');
+
+    const r = run(`${CLI} lane logs --lane-dir ${laneDir} --tail 2 --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.tailLines, 2);
+    assert.equal(parsed.text, 'three\nfour');
+    assert.equal(parsed.hasLog, true);
+  });
+
   it('guardrail lane status infers post-start failure from stale startup state', () => {
     const dir = tmpDir();
     const laneDir = join(dir, 'lane');
@@ -883,6 +915,43 @@ describe('README Feature: Resident Lane Mode', () => {
     const parsed = JSON.parse(r.stdout);
     assert.equal(parsed.status, 'completed');
     assert.equal(parsed.result.stdout, '6\n');
+  });
+
+  it('guardrail lane wait returns the stored output once a completed request exists', () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    mkdirSync(join(laneDir, 'results'), { recursive: true });
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      lastRequestId: 'req-2',
+      lastCompletedRequestId: 'req-2',
+      lastResultPath: join(laneDir, 'results', 'req-2.json'),
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+    writeFileSync(join(laneDir, 'results', 'req-2.json'), JSON.stringify({
+      requestId: 'req-2',
+      ok: true,
+      exitCode: 0,
+      stdout: '8\n',
+    }), 'utf8');
+
+    const r = run(`${CLI} lane wait --lane-dir ${laneDir} --request-id req-2 --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.status, 'completed');
+    assert.equal(parsed.result.stdout, '8\n');
+  });
+
+  it('guardrail lane adapters lists bundled lane adapters', () => {
+    const r = run(`${CLI} lane adapters --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.ok(Array.isArray(parsed.adapters));
+    assert.ok(parsed.adapters.some((adapter) => adapter.id === 'claude'));
+    assert.ok(parsed.adapters.some((adapter) => adapter.id === 'codex'));
   });
 
   it('guardrail lane stop appends an audit entry and removes the host key', () => {
@@ -1195,11 +1264,18 @@ describe('README Feature: Adapter System', () => {
     assert.ok(raw.includes('No approved manifest found'));
   });
 
-  it('guardrail adapter run blocks MCP profiles at parse/gate time', () => {
+  it('guardrail adapter run blocks shell-style MCP profiles without a bounded request', () => {
     const r = run(`${CLI} adapter run --tool cline -- echo should-fail`);
     assert.ok(r.exitCode !== 0);
-    assert.ok((r.stderr || '').includes('MCP protocol is not yet supported in v0.2.'));
-    assert.ok((r.stderr || '').includes('mcp-roadmap'));
+    assert.ok((r.stderr || '').includes('bounded structured request'));
+  });
+
+  it('guardrail adapter run accepts bounded MCP requests via --mcp-tool', () => {
+    const r = run(`${CLI} adapter run --tool cline --mcp-tool echo --params-json '{}'`);
+    const raw = [r.stdout, r.stderr].filter(Boolean).join('\n');
+    assert.ok(r.exitCode !== 0);
+    assert.ok(raw.includes('No approved manifest found'), raw);
+    assert.ok(!raw.includes('bounded structured request'), raw);
   });
 
   it('guardrail adapter probe routes MCP profiles into bounded discovery instead of the hard MCP block', () => {
@@ -1317,6 +1393,55 @@ describe('README Feature: Adapter System', () => {
     assert.ok(r.stdout.includes('Adapter profile index verified'));
     assert.ok(r.stdout.includes('openclaw'));
   });
+
+  it('guardrail adapter profile discover lists tools from configured trusted signed indexes', () => {
+    const dir = tmpDir();
+    const fakeHome = join(dir, 'home');
+    mkdirSync(join(fakeHome, '.guardrail'), { recursive: true });
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+    const unsigned = {
+      version: 1,
+      generated_at: '2026-04-10T00:00:00.000Z',
+      profiles: {
+        aider: {
+          owner: 'guardrail-dev',
+          repo: 'adapter-profiles',
+          path: 'aider.json',
+          sha: 'a'.repeat(40),
+          version: '1.0.0',
+          content_hash: 'b'.repeat(64),
+        },
+      },
+    };
+    const indexPath = join(fakeHome, '.guardrail', 'adapter-profiles.index.json');
+    const indexKeyPath = join(fakeHome, '.guardrail', 'adapter-profiles.index.pub.pem');
+    const signature = signBytes(null, Buffer.from(serializeStable(unsigned), 'utf8'), privateKey).toString('base64');
+    writeFileSync(indexPath, JSON.stringify({
+      ...unsigned,
+      signature: {
+        algorithm: 'ed25519',
+        key_id: 'test-key',
+        sig: `base64:${signature}`,
+      },
+    }, null, 2));
+    writeFileSync(indexKeyPath, publicKey.export({ type: 'spki', format: 'pem' }));
+    writeFileSync(join(fakeHome, '.guardrail', 'config.json'), JSON.stringify({
+      trusted_sources: ['github://guardrail-dev/adapter-profiles/'],
+      trusted_adapter_indexes: [{
+        path: 'adapter-profiles.index.json',
+        key: 'adapter-profiles.index.pub.pem',
+      }],
+    }, null, 2));
+
+    const r = run(`${CLI} adapter profile discover aider --json`, {
+      env: { ...process.env, HOME: fakeHome },
+    });
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.matchCount, 1);
+    assert.equal(parsed.matches[0].tool, 'aider');
+    assert.equal(parsed.matches[0].keyId, 'test-key');
+  });
 });
 
 // ==========================================================================
@@ -1364,16 +1489,21 @@ describe('README Feature: Recipe Execution + Versioning', () => {
   });
 
   it('all shipped infrastructure-safe recipes dry-run successfully', () => {
+    const fakeHome = join(tmpDir(), 'home');
+    mkdirSync(fakeHome, { recursive: true });
     const runs = [
       `${CLI} run --recipe git-branch-cleanup --input repo_path=. --dry-run`,
       `${CLI} run --recipe dep-upgrade --input package_dir=. --input scope=patch --dry-run`,
       `${CLI} run --recipe github-pr-merge --input repo=org/repo --input max_prs=3 --input label=approved --dry-run`,
       `${CLI} run --recipe infra-deploy --input environment=staging --input config_path=configs/main.tf --dry-run`,
       `${CLI} run --recipe npm-publish --input package_dir=pkg --input tag=latest --dry-run`,
+      `${CLI} run --recipe openclaw-fix-tests --dry-run`,
       `${CLI} run --recipe openclaw-wrapper --input flow_id=fix-tests --input scope=write --dry-run`,
     ];
     for (const cmd of runs) {
-      const r = run(cmd);
+      const r = run(cmd, {
+        env: { ...process.env, HOME: fakeHome },
+      });
       assert.equal(r.exitCode, 0, `Failed: ${cmd}\n${r.stderr}`);
       assert.ok(r.stdout.includes('Safe'), `Not safe: ${cmd}`);
     }

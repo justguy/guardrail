@@ -535,6 +535,16 @@ describe('Recipe System: Example Recipes', () => {
     assert.ok(r.tags.includes('openclaw'));
   });
 
+  it('openclaw-fix-tests recipe is fixed to the task-specific flow and write scope', () => {
+    const r = loadRecipe(join(recipeDir, 'openclaw-fix-tests.recipe.json'));
+    assert.equal(r.category, 'openclaw');
+    assert.equal(r.approval_required, true);
+    const args = r.steps.flatMap((step) => step.run?.args || []);
+    assert.ok(args.includes('fix-tests'));
+    assert.ok(args.includes('write'));
+    assert.ok(!args.includes('admin'));
+  });
+
   it('git-commit recipe is valid and categorized', () => {
     const r = loadRecipe(join(recipeDir, 'git-commit.recipe.json'));
     assert.equal(r.category, 'git');
@@ -570,6 +580,7 @@ describe('Recipe System: Example Recipes', () => {
       'docker-push',
       'infra-deploy',
       'terraform-plan-only',
+      'openclaw-fix-tests',
       'openclaw-wrapper',
       'npm-publish',
     ];

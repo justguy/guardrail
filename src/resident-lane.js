@@ -6,12 +6,29 @@ const ADAPTERS = {
   codex: codexLane,
 };
 
+const ADAPTER_METADATA = {
+  claude: {
+    id: 'claude',
+    name: 'Claude',
+    description: 'Resident lane adapter for Claude CLI execution.',
+  },
+  codex: {
+    id: 'codex',
+    name: 'Codex',
+    description: 'Resident lane adapter for Codex CLI execution.',
+  },
+};
+
 function selectedTool(rawOptions = {}) {
   return rawOptions.tool || rawOptions.adapterId || 'claude';
 }
 
 function selectedAdapter(rawOptions = {}) {
   return ADAPTERS[selectedTool(rawOptions)] || ADAPTERS.claude;
+}
+
+export function listResidentLaneAdapters() {
+  return Object.values(ADAPTER_METADATA);
 }
 
 export function parseResidentLaneArgs(argv) {
@@ -85,6 +102,7 @@ export function launchResidentLaneDaemonHelper(rawOptions) {
 
 export {
   createLaneBootError,
+  getResidentLaneLogs,
   getResidentLaneResult,
   getResidentLaneStatus,
   lanePaths,
@@ -96,5 +114,6 @@ export {
   stopResidentLane,
   trackLaneRequestId,
   validateLaneRequest,
+  waitForResidentLaneResult,
   waitForResidentLaneBootstrap,
 } from './claude-resident-lane.js';

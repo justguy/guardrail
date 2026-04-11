@@ -30,6 +30,8 @@ const MAX_REQUEST_BYTES = 50_000;
 const MAX_PROMPT_CHARS = 32_000;
 const MAX_REQUEST_ID_CHARS = 128;
 const PARTIAL_REQUEST_TIMEOUT_MS = 5_000;
+const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
+const DEFAULT_WAIT_POLL_INTERVAL_MS = 250;
 
 function withinPathScope(candidate, root) {
   return candidate === root || candidate.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
@@ -239,6 +241,22 @@ function readLogTail(path, maxLines = 10) {
   } catch {
     return '';
   }
+}
+
+export function getResidentLaneLogs(rawOptions = {}) {
+  const status = getResidentLaneStatus(rawOptions);
+  const tailLines = parseInteger(rawOptions.tail, 40, 'tail', 1);
+  const text = readLogTail(status.logPath, tailLines);
+  return {
+    laneDir: status.laneDir,
+    laneId: status.laneId || null,
+    status: status.status,
+    tool: status.tool ?? status.adapterId ?? null,
+    logPath: status.logPath || null,
+    tailLines,
+    text,
+    hasLog: text.trim().length > 0,
+  };
 }
 
 function isPidAlive(pid) {
@@ -892,6 +910,51 @@ export function getResidentLaneResult(rawOptions) {
     requestId,
     resultPath,
   };
+}
+
+export async function waitForResidentLaneResult(rawOptions = {}) {
+  const timeoutMs = parseInteger(rawOptions.timeoutMs, DEFAULT_WAIT_TIMEOUT_MS, 'timeout_ms', 1);
+  const pollIntervalMs = parseInteger(rawOptions.pollIntervalMs, DEFAULT_WAIT_POLL_INTERVAL_MS, 'poll_interval_ms', 1);
+  const startedAt = Date.now();
+
+  for (;;) {
+    const result = getResidentLaneResult(rawOptions);
+    if (result.status === 'completed') return result;
+
+    const status = getResidentLaneStatus(rawOptions);
+    if (status.status === 'failed') {
+      return {
+        status: 'failed',
+        reason: 'lane_failed',
+        message: 'Resident lane failed before the requested result was produced.',
+        requestId: rawOptions.requestId || status.currentRequestId || status.lastRequestId || null,
+        failureReason: status.failureReason || null,
+        failureStage: status.failureStage || null,
+        logPath: status.logPath || null,
+      };
+    }
+    if (status.status === 'expired' || status.status === 'stale' || status.status === 'stopped' || status.status === 'missing') {
+      return {
+        status: 'missing',
+        reason: 'lane_unavailable',
+        message: 'Resident lane is no longer available.',
+        requestId: rawOptions.requestId || status.currentRequestId || status.lastRequestId || null,
+      };
+    }
+
+    if ((Date.now() - startedAt) >= timeoutMs) {
+      return {
+        status: 'pending',
+        reason: 'request_still_running',
+        message: 'Resident lane request is still running.',
+        requestId: rawOptions.requestId || status.currentRequestId || status.lastRequestId || null,
+        currentRequestStartedAt: status.currentRequestStartedAt || null,
+        resultPath: result.resultPath || null,
+      };
+    }
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, pollIntervalMs));
+  }
 }
 
 function cleanupLaneArtifacts(options, status, extra = {}) {

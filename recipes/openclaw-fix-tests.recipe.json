@@ -1,0 +1,58 @@
+{
+  "id": "openclaw-fix-tests",
+  "name": "OpenClaw Fix Tests",
+  "description": "Run the fixed OpenClaw test-repair flow with write scope and output verification.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {},
+  "steps": [
+    {
+      "id": "validate-scope",
+      "description": "Verify the fixed test-repair flow is allowed with write scope",
+      "run": {
+        "command": "openclaw",
+        "args": ["scope", "check", "--flow", "fix-tests", "--scope", "write"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "execute-flow",
+      "description": "Execute the fixed OpenClaw test-repair flow within write scope",
+      "run": {
+        "command": "openclaw",
+        "args": ["run", "--flow", "fix-tests", "--scope", "write", "--no-escalate"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "verify-output",
+      "description": "Validate the fixed flow output against the declared write scope",
+      "run": {
+        "command": "openclaw",
+        "args": ["verify", "--flow", "fix-tests", "--check-scope", "write", "--check-output"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "The flow id is fixed to fix-tests",
+      "Execution is fixed to write scope with no escalation",
+      "Outputs must pass OpenClaw verification before the recipe completes"
+    ],
+    "invariants": [
+      "No alternate OpenClaw flow can be substituted at runtime",
+      "No scope other than write is allowed for this recipe",
+      "A failed verification blocks recipe success"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "openclaw",
+  "tags": ["openclaw", "fix-tests", "task-specific"],
+  "channel": "verified",
+  "signature": null
+}

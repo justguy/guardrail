@@ -242,6 +242,7 @@ export async function runAdapter(opts = {}) {
     tool, profilePath,
     command: directCommand, args: directArgs, cwd: directCwd,
     rawInput, supervisorFn = runSupervisor, envAllow = [], authCheckFn,
+    mcpTool = null, params = undefined, calls = undefined, timeoutMs = 5000,
   } = opts;
 
   // 1. Load and validate profile (fail closed)
@@ -249,16 +250,67 @@ export async function runAdapter(opts = {}) {
   if (profileResult.error) return profileResult.error;
   const profile = profileResult.profile;
 
-  // 2. MCP gate: structured block that uses the profile's blocked exit_codes
-  // mapping. See docs/adapter-implementation-plan.md#mcp-roadmap.
+  // 2. MCP adapter mode: bounded structured calls only. Ambient shell-style
+  // command execution for MCP profiles remains intentionally blocked.
   if (profile.protocol === 'mcp') {
+    const rawCalls = Array.isArray(rawInput?.calls) ? rawInput.calls : undefined;
+    const rawMcpTool = typeof rawInput?.mcpTool === 'string'
+      ? rawInput.mcpTool
+      : (typeof rawInput?.tool === 'string' ? rawInput.tool : null);
+    const rawParams = rawInput?.params;
+    const requestedCalls = Array.isArray(calls) ? calls : rawCalls;
+    const requestedTool = typeof mcpTool === 'string' && mcpTool.trim() !== ''
+      ? mcpTool
+      : rawMcpTool;
+    const requestedParams = params === undefined ? rawParams : params;
+
+    if (Array.isArray(requestedCalls) && requestedCalls.length > 0) {
+      const result = await callAdapterMcpToolBatch({
+        tool,
+        profilePath,
+        cwd: directCwd,
+        supervisorFn,
+        envAllow,
+        authCheckFn,
+        timeoutMs,
+        calls: requestedCalls,
+      });
+      return {
+        adapterResult: result.adapterResult || null,
+        renderedResponse: result.batch || null,
+        exitCode: result.exitCode,
+        mcpBatch: result.batch || null,
+      };
+    }
+
+    if (typeof requestedTool === 'string' && requestedTool.trim() !== '') {
+      const normalizedParams = requestedParams === undefined ? {} : requestedParams;
+      const result = await callAdapterMcpTool({
+        tool,
+        profilePath,
+        cwd: directCwd,
+        supervisorFn,
+        envAllow,
+        authCheckFn,
+        timeoutMs,
+        mcpTool: requestedTool,
+        params: normalizedParams,
+      });
+      return {
+        adapterResult: result.adapterResult || null,
+        renderedResponse: result.call || null,
+        exitCode: result.exitCode,
+        mcpCall: result.call || null,
+      };
+    }
+
     const transportSummary = profile.mcp_transport?.type
       ? ` Declared transport: ${profile.mcp_transport.type}.`
       : '';
-    const reason = 'MCP protocol is not yet supported in v0.2.'
+    const reason = 'MCP adapter run requires a bounded structured request.'
       + transportSummary + ' '
-      + 'For Cline integration now, use the env-shim path or install a shim-oriented profile. '
-      + 'See docs/adapter-implementation-plan.md#mcp-roadmap';
+      + 'Use adapter run with --mcp-tool/--params-json or --calls-json, '
+      + 'or use adapter mcp call / adapter mcp batch directly.';
     return wrapBlocked(ADAPTER_REASON_CODES.MCP_BLOCKED, reason, profile);
   }
 
@@ -761,8 +813,9 @@ export async function callAdapterMcpToolBatch(opts = {}) {
 
   return {
     ok: true,
+    adapterResult,
     batch: parsedBatch.batch,
-    exitCode: 0,
+    exitCode: resolveProfileExitCode(profile, 'success', adapterResult.guardrail.exitCode),
   };
 }
 

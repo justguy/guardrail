@@ -64,7 +64,12 @@ function recipeDir(registryDir, id) {
 export function loadConfig(configPath, opts = {}) {
   const strict = opts?.strict === true;
   const path = configPath || resolve(homedir(), '.guardrail', 'config.json');
-  const fallback = { trusted_sources: [], recipe_roots: [], default_recipe_roots: [] };
+  const fallback = {
+    trusted_sources: [],
+    recipe_roots: [],
+    default_recipe_roots: [],
+    trusted_adapter_indexes: [],
+  };
   if (!existsSync(path)) return fallback;
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -78,6 +83,9 @@ export function loadConfig(configPath, opts = {}) {
       if (parsed?.default_recipe_roots !== undefined && !Array.isArray(parsed.default_recipe_roots)) {
         throw new Error(`Invalid Guardrail config at ${path}: default_recipe_roots must be an array when present`);
       }
+      if (parsed?.trusted_adapter_indexes !== undefined && !Array.isArray(parsed.trusted_adapter_indexes)) {
+        throw new Error(`Invalid Guardrail config at ${path}: trusted_adapter_indexes must be an array when present`);
+      }
       const roots = [
         ...(Array.isArray(parsed?.recipe_roots) ? parsed.recipe_roots : []),
         ...(Array.isArray(parsed?.default_recipe_roots) ? parsed.default_recipe_roots : []),
@@ -85,6 +93,18 @@ export function loadConfig(configPath, opts = {}) {
       for (const value of roots) {
         if (typeof value !== 'string' || value.trim() === '') {
           throw new Error(`Invalid Guardrail config at ${path}: recipe root entries must be non-empty strings`);
+        }
+      }
+      for (const entry of (Array.isArray(parsed?.trusted_adapter_indexes) ? parsed.trusted_adapter_indexes : [])) {
+        const valid = entry
+          && typeof entry === 'object'
+          && !Array.isArray(entry)
+          && typeof entry.path === 'string'
+          && entry.path.trim() !== ''
+          && typeof entry.key === 'string'
+          && entry.key.trim() !== '';
+        if (!valid) {
+          throw new Error(`Invalid Guardrail config at ${path}: trusted_adapter_indexes entries must be objects with non-empty path and key strings`);
         }
       }
     }
@@ -96,6 +116,7 @@ export function loadConfig(configPath, opts = {}) {
       trusted_sources: Array.isArray(parsed?.trusted_sources) ? parsed.trusted_sources : [],
       recipe_roots: recipeRoots,
       default_recipe_roots: defaultRecipeRoots,
+      trusted_adapter_indexes: Array.isArray(parsed?.trusted_adapter_indexes) ? parsed.trusted_adapter_indexes : [],
       ...parsed,
     };
   } catch (err) {
