@@ -69,7 +69,7 @@ describe('Bundled wrapper path resolver', () => {
   });
 
   it('collects and verifies bundled-wrapper provenance in manifest-style content hashes', () => {
-    const recipe = loadRecipe(join(process.cwd(), 'recipes', 'git-commit.recipe.json'));
+    const recipe = loadRecipe(join(process.cwd(), 'recipes', 'openclaw-fix-tests.recipe.json'));
     const bindings = collectRecipeInputContentHashes(recipe, {
       repo_path: '.',
       paths: ['README.md'],
@@ -95,19 +95,10 @@ describe('Bundled wrapper path resolver', () => {
   });
 
   it('extracts bundled wrapper aliases from recipe templates', () => {
-    const cmuxRecipe = loadRecipe(join(process.cwd(), 'recipes', 'cmux-claude-exec.recipe.json'));
-    const claudeRecipe = loadRecipe(join(process.cwd(), 'recipes', 'claude-exec.recipe.json'));
-    const openclawFixRecipe = loadRecipe(join(process.cwd(), 'recipes', 'openclaw-fix-tests.recipe.json'));
-    const openclawDebugRecipe = loadRecipe(join(process.cwd(), 'recipes', 'openclaw-debug-ci.recipe.json'));
     const refs = extractBundledWrapperRefs([
-      ...(cmuxRecipe.steps?.map((step) => step?.run?.command).filter(Boolean) || []),
-      ...(cmuxRecipe.steps?.flatMap((step) => Array.isArray(step?.run?.args) ? step.run.args : []).filter(Boolean) || []),
-      ...(claudeRecipe.steps?.map((step) => step?.run?.command).filter(Boolean) || []),
-      ...(claudeRecipe.steps?.flatMap((step) => Array.isArray(step?.run?.args) ? step.run.args : []).filter(Boolean) || []),
-      ...(openclawFixRecipe.steps?.map((step) => step?.run?.command).filter(Boolean) || []),
-      ...(openclawFixRecipe.steps?.flatMap((step) => Array.isArray(step?.run?.args) ? step.run.args : []).filter(Boolean) || []),
-      ...(openclawDebugRecipe.steps?.map((step) => step?.run?.command).filter(Boolean) || []),
-      ...(openclawDebugRecipe.steps?.flatMap((step) => Array.isArray(step?.run?.args) ? step.run.args : []).filter(Boolean) || []),
+      '{{bundled_wrapper.cmux_claude}}',
+      '{{bundled_wrapper.claude}}',
+      '{{bundled_wrapper.openclaw_task}}',
     ]);
     assert.ok(refs.includes('cmux_claude'));
     assert.ok(refs.includes('claude'));

@@ -469,10 +469,12 @@ For open-source distribution, treat recipes as auditable artifacts, not safety c
 | Category | Examples |
 |----------|----------|
 | **GitHub** | `gh-open-pr`, `gh-release` |
-| **Git** | `git-clone-allowed`, `git-push` |
+| **Git** | `git-clone-allowed`, `git-push`, `git-commit-amend`, `git-force-push-safe` |
 | **Package** | `npm-install`, `pip-install` |
 | **Infra / Cloud** | `docker-build`, `docker-push`, `terraform-plan-only` |
 | **AI / Agent** | `openclaw-fix-tests`, `openclaw-debug-ci` |
+
+Task-specific OpenClaw recipes are intentionally narrow: `openclaw-fix-tests` and `openclaw-debug-ci` are bound through a dedicated bundled wrapper (`openclaw_task`) that enforces the fixed flow/scope contract before running `openclaw scope check`, `openclaw run --no-escalate`, and `openclaw verify`.
 
 ### Using Recipes
 
@@ -512,6 +514,12 @@ guardrail run --recipe pip-install --input requirements_file=tests/fixtures/requ
 
 # Non-force push of the current HEAD to an explicit non-protected branch
 guardrail run --recipe git-push --input repo_path=. --input remote=origin --input branch=feature/demo --dry-run
+
+# Amending the current HEAD with lease-like safety check
+guardrail run --recipe git-commit-amend --input repo_path=. --input message_file=.guardrail/commit-message.txt --input expected_head=abcdef123456789 --dry-run
+
+# Force push through lease validation using explicit local/remote OIDs
+guardrail run --recipe git-force-push-safe --input repo_path=. --input remote=origin --input branch=feature/demo --input expected_head=abcdef123456789 --input expected_remote_oid=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --dry-run
 
 # Create a bounded PR through GitHub CLI with a reviewed body file
 guardrail run --recipe gh-open-pr \

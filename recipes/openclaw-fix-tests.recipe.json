@@ -10,29 +10,11 @@
   "inputs": {},
   "steps": [
     {
-      "id": "validate-scope",
-      "description": "Verify the fixed test-repair flow is allowed with write scope",
+      "id": "run-task",
+      "description": "Run the bounded OpenClaw fix-tests task via the dedicated task wrapper",
       "run": {
-        "command": "openclaw",
-        "args": ["scope", "check", "--flow", "fix-tests", "--scope", "write"],
-        "mode": "structured"
-      }
-    },
-    {
-      "id": "execute-flow",
-      "description": "Execute the fixed OpenClaw test-repair flow within write scope",
-      "run": {
-        "command": "openclaw",
-        "args": ["run", "--flow", "fix-tests", "--scope", "write", "--no-escalate"],
-        "mode": "structured"
-      }
-    },
-    {
-      "id": "verify-output",
-      "description": "Validate the fixed flow output against the declared write scope",
-      "run": {
-        "command": "openclaw",
-        "args": ["verify", "--flow", "fix-tests", "--check-scope", "write", "--check-output"],
+        "command": "node",
+        "args": ["{{bundled_wrapper.openclaw_task}}", "--flow", "fix-tests", "--scope", "write", "--no-escalate"],
         "mode": "structured"
       }
     }

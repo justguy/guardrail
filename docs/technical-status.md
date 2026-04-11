@@ -22,6 +22,8 @@ src/
   codex-exec-wrapper.js  Structured wrapper for codex exec with prompt/input_files support
   claude-exec-wrapper.js Structured wrapper for claude --print with prompt/input_files support
   git-commit-wrapper.js  Structured wrapper for exact-path staging plus git commit from a message file
+  git-commit-amend-wrapper.js  Structured wrapper for bounded HEAD amendment with expected-head validation
+  git-force-push-safe-wrapper.js  Structured wrapper for lease-bound force push with explicit remote/OID preconditions
   supervisor.js          Single-command execution orchestrator (approval, convergence, retry)
   worker-interface.js    Child process spawning (structured vs shell modes)
   policy-engine.js       Risk evaluation, trust classification, binary/env/path analysis
@@ -71,6 +73,7 @@ src/
   agent-session.js       Bounded agent session contract model, canonical hashing, atomic load/save, slot sanitization
   agent-session-lifecycle.js  Pure lifecycle evaluation: start / continue / attach → ok or fail-closed code
   agent-session-enforce.js    Recipe-supervisor glue: resolve enforcement tool, build candidate, prepare gate, persist after success
+  openclaw-task-wrapper.js  Dedicated OpenClaw task wrapper (fix-tests/debug-ci): bound flow+scope execution and verification
   verify.js              Self-verification checks (core imports, signing, safe defaults, risk)
   demo-scenarios.js      Demo pack: recipe, trust, blocked scenarios
 
@@ -82,6 +85,10 @@ recipes/
   dep-upgrade            Packages: dependency upgrade within patch/minor scope (community, medium)
   infra-deploy           Infra: Terraform validate/plan/apply scoped to env (verified, high)
   openclaw-wrapper       OpenClaw: wrapped flow with scope enforcement (community, high)
+  openclaw-fix-tests     OpenClaw: fixed fix-tests task flow (write scope)
+  openclaw-debug-ci      OpenClaw: fixed debug-ci task flow (read scope)
+  git-commit-amend       Git: bounded HEAD amendment with expected_head and approved message file
+  git-force-push-safe    Git: lease-bound force push with explicit local/remote OID checks
   codex-exec             Custom: structured Codex wrapper with input_files prompt context, lifecycle-bound session contract, and host-boundary warning (community, high)
   claude-exec            Custom: structured Claude wrapper with input_files, cwd, tools, budget, lifecycle-bound session contract, and host-boundary warning (community, medium)
   cmux-claude-exec       Custom: explicit terminal-orchestration wrapper that composes the bundled claude-exec contract into one approval, executes it in a fresh cmux workspace, and captures pane state (community, high)
@@ -235,7 +242,7 @@ docs/                    Product requirements, specs, invariants, implementation
 | Recipe inspect | Done | `guardrail recipe inspect` verifies hash integrity, detects tampering |
 | Local + remote recipe loading | Done | Filesystem + HTTP/HTTPS fetch + validate |
 | CLI commands | Done | `guardrail list`, `guardrail create`, `guardrail pack`, `guardrail recipe validate/inspect` |
-| Bundled recipes | Done | npm-publish, npm-install, pip-install, git-branch-cleanup, git-push, git-commit, github-pr-merge, dep-upgrade, infra-deploy, openclaw-wrapper, openclaw-fix-tests, openclaw-debug-ci, codex-exec, claude-exec, cmux-claude-exec. Recent public/community additions are wrapper-backed `npm-install`, `pip-install`, `git-push`, and `openclaw-debug-ci`; secret mutation and destructive deploy/cloud variants remain intentionally outside the public shipped set. |
+| Bundled recipes | Done | npm-publish, npm-install, pip-install, git-branch-cleanup, git-push, git-commit, git-commit-amend, git-force-push-safe, github-pr-merge, dep-upgrade, infra-deploy, openclaw-wrapper, openclaw-fix-tests, openclaw-debug-ci, codex-exec, claude-exec, cmux-claude-exec. Recent public/community additions are wrapper-backed `npm-install`, `pip-install`, `git-push`, `git-commit-amend`, `git-force-push-safe`, and the OpenClaw task recipes. Secret mutation and destructive deploy/cloud variants remain intentionally outside the public shipped set. `openclaw-deploy` remains deferred until it can be bounded to a materially narrower account/resource envelope. |
 
 ### Bucket 5 — Policy, UX, Adoption
 
@@ -550,9 +557,9 @@ Three product phases, each with its own go-to-market motion.
 | R0a | Ship-now bounded recipe batch (`gh-open-pr`, `git-clone-allowed`, `gh-release`, `docker-build`, `docker-push`, `terraform-plan-only`) | v0.3 | Safe expansion of high-signal day-one recipes | Done — Guardrail now ships the full initial bounded recipe batch as structured recipes with explicit repo/registry/path/tag inputs, reviewed-file inputs where needed, and no dependence on new approval primitives. Terraform remains split between `terraform-plan-only` and the stronger mutation-bearing `infra-deploy` path. |
 | R0b | Secret mutation recipes (`gh-secret-set` and similar) | v0.4 | High-value secret-management automation under Guardrail | Deferred (enterprise/high-trust) — public/community Guardrail still lacks the write-only secret-input UX, multi-stage approval, and guaranteed audit/log redaction needed to ship secret-mutation recipes honestly. |
 | R0c | Broad package install recipes (`npm-install`, `pip-install`) | v0.4 | Safer dependency bootstrap and repair flows | Done — Guardrail now ships bounded `npm-install` and `pip-install` recipes backed by dedicated safe wrappers. `npm-install` is fixed to reviewed local metadata plus `npm ci --ignore-scripts --fund=false --audit=false`, requires the reviewed lockfile to live inside the approved package directory, and never accepts freeform package names. `pip-install` is fixed to a reviewed hashed requirements file plus `python -m pip install --require-hashes --no-deps --no-input --disable-pip-version-check -r <file>`, and rejects nested requirements, editable installs, direct URLs, alternate indexes, and unhashed package lines before execution. Registry overrides, extra-index URLs, and lifecycle/build-script execution remain blocked. |
-| R0d | Direct push and history-mutation recipes (`git-push`, amend/force variants) | v0.4 | Git automation without silent branch or history damage | Done (partial) — Guardrail now ships the first bounded direct-push recipe, `git-push`, backed by a safety wrapper that only allows non-force `git push origin HEAD:<branch>` to explicit topic branches. The wrapper rejects detached HEAD, mismatched current-branch identity, protected branch names, behind-upstream states, missing remotes, and any history-rewrite flags before execution. Amend, force-push, delete, and broader history-mutation variants remain intentionally deferred. |
+| R0d | Direct push and history-mutation recipes (`git-push`, amend/force variants) | v0.4 | Git automation without silent branch or history damage | Done — Guardrail now ships `git-push`, `git-commit-amend`, and `git-force-push-safe` as bounded direct Git mutation recipes. `git-commit-amend` requires approved message file + exact HEAD precondition, and `git-force-push-safe` requires explicit local/remote OID validation before `git push --force-with-lease`. These wrappers still reject detached HEAD, topic-branch drift, protected branches, missing remotes, and missing expected OID inputs; destructive delete/unsafely-wide history-mutation remains intentionally deferred. |
 | R0e | Destructive cloud mutation recipes (`aws s3 sync --delete`, `aws ec2 terminate-instances`) | v0.4 | Guardrailed cloud operations for high-trust environments | Deferred (enterprise/high-trust) — open-source Guardrail still lacks resource/account binding, dry-run parity guarantees, destructive-change summaries, and multi-stage approval strong enough to publish destructive cloud-mutation recipes honestly. |
-| R0f | Task-specific OpenClaw recipes (`fix-tests`, `debug-ci`, `deploy`) | v0.3 | Safer task-oriented agent entrypoints on top of the existing wrapper | Done (partial) — Guardrail now ships `openclaw-fix-tests` and `openclaw-debug-ci`, each of which fixes both the flow id and the allowed scope while preserving the wrapper’s pre-run scope check, `--no-escalate` execution path, and output verification step. The shipped task contracts are `flow=fix-tests` with `scope=write` and `flow=debug-ci` with `scope=read`; both still route through `openclaw-wrapper`, so the shared artifact/result verification and bounded execution envelope stay intact. `openclaw-deploy` remains deferred until deploy can be bound to a narrower environment/resource contract instead of inheriting the same trust profile as destructive cloud mutation. |
+| R0f | Task-specific OpenClaw recipes (`fix-tests`, `debug-ci`, `deploy`) | v0.3 | Safer task-oriented agent entrypoints on top of the existing wrapper | Done — `openclaw-fix-tests` and `openclaw-debug-ci` now call `{{bundled_wrapper.openclaw_task}}`, a dedicated wrapper that hard-binds the task flow to its allowed scope before running `openclaw scope check`, `openclaw run --no-escalate`, and `openclaw verify` in one command package. `openclaw-deploy` remains deferred until a materially narrower account/resource-bound contract is available. |
 
 ### Adapter System (v0.2–v0.3)
 

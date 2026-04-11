@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, realpathSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, realpathSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -326,6 +326,50 @@ describe('Recipe System: Execution Failure Detail Propagation', () => {
     assert.match(result.reason, /Not logged in/);
     assert.match(result.reason, /Please run \/login/);
   });
+
+  it('runs rollback steps after a non-idempotent recipe step fails', async () => {
+    const dir = tmpDir();
+    const markerPath = join(dir, 'rollback-marker.txt');
+    const recipe = makeRecipe({
+      approval_required: false,
+      channel: 'community',
+      steps: [{
+        id: 'mutate',
+        description: 'mutate then fail',
+        idempotent: false,
+        run: {
+          command: 'node',
+          args: ['-e', 'process.exit(1)'],
+          mode: 'structured',
+          timeoutMs: 5000,
+        },
+      }],
+      rollback: {
+        steps: [{
+          id: 'undo',
+          description: 'record rollback',
+          run: {
+            command: 'node',
+            args: ['-e', `require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "rolled back\\n")`],
+            mode: 'structured',
+            timeoutMs: 5000,
+          },
+        }],
+      },
+    });
+
+    const result = await executeRecipe(recipe, { target: 'hello' }, {
+      allowUnverified: true,
+      approved: true,
+      cwd: dir,
+      stateDir: join(dir, '.guardrail'),
+    });
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.rollbackRan, true);
+    assert.equal(result.rollbackResults.length, 1);
+    assert.equal(readFileSync(markerPath, 'utf8'), 'rolled back\n');
+  });
 });
 
 // ===========================================================================
@@ -567,7 +611,8 @@ describe('Recipe System: Example Recipes', () => {
     assert.ok(args.includes('--no-escalate'));
     assert.ok(r.steps.length === 1);
     assert.ok(!args.includes('admin'));
-    assert.ok(r.steps.every((step) => step.run?.command === '{{bundled_wrapper.openclaw_task}}'));
+    assert.ok(r.steps.every((step) => step.run?.command === 'node'));
+    assert.ok(args.includes('{{bundled_wrapper.openclaw_task}}'));
   });
 
   it('openclaw-debug-ci recipe is fixed to the debug-ci flow and read scope', () => {
@@ -580,7 +625,8 @@ describe('Recipe System: Example Recipes', () => {
     assert.ok(args.includes('--no-escalate'));
     assert.ok(r.steps.length === 1);
     assert.ok(!args.includes('admin'));
-    assert.ok(r.steps.every((step) => step.run?.command === '{{bundled_wrapper.openclaw_task}}'));
+    assert.ok(r.steps.every((step) => step.run?.command === 'node'));
+    assert.ok(args.includes('{{bundled_wrapper.openclaw_task}}'));
   });
 
   it('git-commit recipe is valid and categorized', () => {
@@ -639,6 +685,20 @@ describe('Recipe System: Example Recipes', () => {
     assert.ok(!args.includes('--force --'));
   });
 
+  it('openclaw-deploy recipe is valid and binds deploy metadata through the task wrapper', () => {
+    const r = loadRecipe(join(recipeDir, 'openclaw-deploy.recipe.json'));
+    assert.equal(r.category, 'openclaw');
+    assert.equal(r.risk_level, 'high');
+    assert.equal(r.approval_required, true);
+    const args = r.steps.flatMap((step) => step.run?.args || []);
+    assert.ok(args.includes('{{bundled_wrapper.openclaw_task}}'));
+    assert.ok(args.includes('--flow'));
+    assert.ok(args.includes('deploy'));
+    assert.ok(args.includes('--environment'));
+    assert.ok(args.includes('--service-manifest'));
+    assert.ok(args.includes('--release-file'));
+  });
+
   it('git-push recipe is bounded to non-force pushes only', () => {
     const r = loadRecipe(join(recipeDir, 'git-push.recipe.json'));
     assert.equal(r.category, 'git');
@@ -667,6 +727,7 @@ describe('Recipe System: Example Recipes', () => {
       'terraform-plan-only',
       'openclaw-fix-tests',
       'openclaw-debug-ci',
+      'openclaw-deploy',
       'openclaw-wrapper',
       'npm-publish',
       'git-commit-amend',

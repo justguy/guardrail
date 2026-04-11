@@ -75,6 +75,8 @@
 | infra-deploy | environment=staging config_path=configs/main.tf | 3 | PASS |
 | npm-publish | package_dir=pkg tag=latest | 4 | PASS |
 | openclaw-wrapper | flow_id=fix-tests scope=write | 3 | PASS |
+| openclaw-fix-tests | (fixed write task) | 1 | PASS |
+| openclaw-debug-ci | (fixed read task) | 1 | PASS |
 
 ## CI / Non-Interactive Mode
 
