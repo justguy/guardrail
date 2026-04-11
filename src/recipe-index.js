@@ -1,23 +1,42 @@
 import { readdirSync, existsSync } from 'node:fs';
-import { isAbsolute, join, normalize, resolve, sep } from 'node:path';
+import { isAbsolute, join, normalize, resolve, win32 } from 'node:path';
 import { loadRecipe, VALID_CATEGORIES } from './recipe.js';
 
-const LOOKUP_CASE_INSENSITIVE = process.platform === 'win32';
+const WINDOWS_ABSOLUTE_PATH_RE = /^[a-zA-Z]:[\\/]/;
+const WINDOWS_UNC_PATH_RE = /^\\\\/;
+
+function looksLikeWindowsPath(value) {
+  return WINDOWS_ABSOLUTE_PATH_RE.test(value) || WINDOWS_UNC_PATH_RE.test(value);
+}
 
 // ---------------------------------------------------------------------------
 // Search directory normalization utilities
 // ---------------------------------------------------------------------------
 
-function toPortablePath(value) {
+export function normalizePortablePath(value) {
   if (!value || typeof value !== 'string') return '';
-  const normalized = normalize(value);
-  const withSlash = normalized.split(sep).join('/');
-  return LOOKUP_CASE_INSENSITIVE ? withSlash.toLowerCase() : withSlash;
+  const portableInput = value.replace(/\\+/g, '/');
+  const platformNormalized = looksLikeWindowsPath(value) ? win32.normalize(portableInput) : normalize(portableInput);
+  const slashNormalized = platformNormalized.replace(/\\/g, '/');
+  const collapsed = slashNormalized.startsWith('//')
+    ? `//${slashNormalized.slice(2).replace(/\/{2,}/g, '/')}`
+    : slashNormalized.replace(/\/{2,}/g, '/');
+  const trimmed = collapsed.length > 1 && !WINDOWS_ABSOLUTE_PATH_RE.test(collapsed)
+    ? collapsed.replace(/\/+$/, '')
+    : collapsed;
+  const preserveCase = !looksLikeWindowsPath(trimmed);
+  return preserveCase ? trimmed : trimmed.toLowerCase();
+}
+
+function resolveRecipeLookupPath(rawPath, basePath = process.cwd()) {
+  if (!rawPath || typeof rawPath !== 'string') return '';
+  if (looksLikeWindowsPath(rawPath) || isAbsolute(rawPath)) return rawPath;
+  return resolve(basePath, rawPath);
 }
 
 export function normalizeSearchDirectory(rawDir, basePath = process.cwd()) {
   if (!rawDir || typeof rawDir !== 'string') return null;
-  return isAbsolute(rawDir) ? resolve(rawDir) : resolve(basePath, rawDir);
+  return resolveRecipeLookupPath(rawDir, basePath);
 }
 
 export function normalizeSearchDirectories(dirs, basePath = process.cwd()) {
@@ -27,7 +46,7 @@ export function normalizeSearchDirectories(dirs, basePath = process.cwd()) {
     const resolved = normalizeSearchDirectory(rawDir, basePath);
     if (!resolved) continue;
     if (!existsSync(resolved)) continue;
-    const canonical = toPortablePath(resolved);
+    const canonical = normalizePortablePath(resolved);
     if (seen.has(canonical)) continue;
     seen.add(canonical);
     normalized.push(resolved);
@@ -37,7 +56,7 @@ export function normalizeSearchDirectories(dirs, basePath = process.cwd()) {
 
 export function normalizePathForRecipeLookup(rawPath, basePath = process.cwd()) {
   if (!rawPath || typeof rawPath !== 'string') return '';
-  return toPortablePath(isAbsolute(rawPath) ? rawPath : resolve(basePath, rawPath));
+  return normalizePortablePath(resolveRecipeLookupPath(rawPath, basePath));
 }
 
 // ---------------------------------------------------------------------------

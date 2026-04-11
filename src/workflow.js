@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { dirname, relative, sep } from 'node:path';
+import { dirname, posix } from 'node:path';
 import { homedir } from 'node:os';
 import { serializeStable, checkRegexSafety } from './contract.js';
 import { deepEqual, pretty, indexById, resolvePath } from './shared.js';
@@ -25,6 +25,13 @@ import { deriveAuthEnvRequirements } from './adapter-auth.js';
 export const TERMINAL_STATES = new Set(['done', 'abort']);
 
 const WORKFLOW_MANIFEST_VERSION = 2;
+
+const WINDOWS_ABSOLUTE_PATH_RE = /^[a-zA-Z]:[\\/]/;
+const WINDOWS_UNC_PATH_RE = /^\\\\/;
+
+function isWindowsLikePath(value) {
+  return WINDOWS_ABSOLUTE_PATH_RE.test(value) || WINDOWS_UNC_PATH_RE.test(value);
+}
 
 const VALID_STEP_TYPES = new Set([
   'task',
@@ -586,7 +593,25 @@ function resolveRecipeAllowUnverified(step, options = {}) {
 }
 
 function toPortableRelativePath(rootPath, filePath) {
-  return relative(rootPath, filePath).split(sep).join('/');
+  const normalizedRoot = normalizePathForRecipeLookup(rootPath);
+  const normalizedFile = normalizePathForRecipeLookup(filePath);
+  if (!normalizedRoot || !normalizedFile) return '';
+
+  if (isWindowsLikePath(normalizedRoot) || isWindowsLikePath(normalizedFile)) {
+    const rootLower = normalizedRoot.toLowerCase();
+    const fileLower = normalizedFile.toLowerCase();
+    const rootBase = rootLower.endsWith('/') ? rootLower : `${rootLower}/`;
+
+    if (fileLower === rootLower) return '';
+    if (fileLower.startsWith(rootBase)) {
+      return normalizedFile.slice(rootBase.length);
+    }
+
+    return fileLower;
+  }
+
+  const relativePath = posix.relative(normalizedRoot, normalizedFile);
+  return relativePath.split('/').join('/');
 }
 
 function resolveExternalRootLocator(sourceRoot, projectRoot, options = {}) {

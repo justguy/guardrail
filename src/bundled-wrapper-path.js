@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizePathForRecipeLookup } from './recipe-index.js';
 
 const MODULE_DIR = realpathSync(dirname(fileURLToPath(import.meta.url)));
 const PACKAGE_ROOT = resolve(MODULE_DIR, '..');
@@ -12,10 +13,13 @@ const WRAPPER_FILE_MAP = {
   codex: 'codex-exec-wrapper.js',
   git_commit: 'git-commit-wrapper.js',
   git_commit_plan: 'git-commit-plan-wrapper.js',
+  git_commit_amend: 'git-commit-amend-wrapper.js',
   git_push_safe: 'git-push-safe-wrapper.js',
+  git_force_push_safe: 'git-force-push-safe-wrapper.js',
   npm_install_safe: 'npm-install-safe-wrapper.js',
   pip_install_safe: 'pip-install-safe-wrapper.js',
   cmux_claude: 'cmux-claude-recipe-wrapper.js',
+  openclaw_task: 'openclaw-task-wrapper.js',
 };
 
 let packageVersionCache;
@@ -48,21 +52,24 @@ export function resolveBundledWrapperPath(wrapperName, resolvedInputs = {}) {
   const overrideRoot = coerceRepoBase(resolvedInputs);
   const baseDir = overrideRoot || PACKAGE_ROOT;
   const wrapperPath = resolve(baseDir, 'src', fileName);
-
   if (!existsSync(wrapperPath)) {
     throw new Error(`Bundled wrapper missing at ${wrapperPath}`);
   }
 
+  const resolvedWrapperPath = realpathSync(wrapperPath);
+  const resolvedSourceRoot = realpathSync(baseDir);
+
   return {
-    wrapperPath: realpathSync(wrapperPath),
-    sourceRoot: realpathSync(baseDir),
+    wrapperPath: normalizePathForRecipeLookup(resolvedWrapperPath),
+    sourceRoot: normalizePathForRecipeLookup(resolvedSourceRoot),
+    rawWrapperPath: resolvedWrapperPath,
     source: overrideRoot ? 'runtime_override' : 'bundled_local',
   };
 }
 
 export function resolveBundledWrapperProvenance(wrapperName, resolvedInputs = {}) {
   const details = resolveBundledWrapperPath(wrapperName, resolvedInputs);
-  const wrapperContent = readFileSync(details.wrapperPath);
+  const wrapperContent = readFileSync(details.rawWrapperPath);
   const sha256 = createHash('sha256').update(wrapperContent).digest('hex');
 
   return {

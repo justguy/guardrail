@@ -4,6 +4,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  rmSync,
   mkdtempSync,
   realpathSync,
 } from 'node:fs';
@@ -28,6 +29,13 @@ describe('Bundled wrapper path resolver', () => {
     assert.ok(existsSync(resolved.wrapperPath));
     assert.equal(resolved.source, 'bundled_local');
     assert.ok(resolved.wrapperPath.endsWith('src/claude-exec-wrapper.js'));
+  });
+
+  it('resolves the OpenClaw task helper alias', () => {
+    const resolved = resolveBundledWrapperPath('openclaw_task');
+    assert.ok(existsSync(resolved.wrapperPath));
+    assert.equal(resolved.source, 'bundled_local');
+    assert.ok(resolved.wrapperPath.endsWith('src/openclaw-task-wrapper.js'));
   });
 
   it('supports legacy guardrail_repo override values as a compatibility fallback', () => {
@@ -89,14 +97,21 @@ describe('Bundled wrapper path resolver', () => {
   it('extracts bundled wrapper aliases from recipe templates', () => {
     const cmuxRecipe = loadRecipe(join(process.cwd(), 'recipes', 'cmux-claude-exec.recipe.json'));
     const claudeRecipe = loadRecipe(join(process.cwd(), 'recipes', 'claude-exec.recipe.json'));
+    const openclawFixRecipe = loadRecipe(join(process.cwd(), 'recipes', 'openclaw-fix-tests.recipe.json'));
+    const openclawDebugRecipe = loadRecipe(join(process.cwd(), 'recipes', 'openclaw-debug-ci.recipe.json'));
     const refs = extractBundledWrapperRefs([
       ...(cmuxRecipe.steps?.map((step) => step?.run?.command).filter(Boolean) || []),
       ...(cmuxRecipe.steps?.flatMap((step) => Array.isArray(step?.run?.args) ? step.run.args : []).filter(Boolean) || []),
       ...(claudeRecipe.steps?.map((step) => step?.run?.command).filter(Boolean) || []),
       ...(claudeRecipe.steps?.flatMap((step) => Array.isArray(step?.run?.args) ? step.run.args : []).filter(Boolean) || []),
+      ...(openclawFixRecipe.steps?.map((step) => step?.run?.command).filter(Boolean) || []),
+      ...(openclawFixRecipe.steps?.flatMap((step) => Array.isArray(step?.run?.args) ? step.run.args : []).filter(Boolean) || []),
+      ...(openclawDebugRecipe.steps?.map((step) => step?.run?.command).filter(Boolean) || []),
+      ...(openclawDebugRecipe.steps?.flatMap((step) => Array.isArray(step?.run?.args) ? step.run.args : []).filter(Boolean) || []),
     ]);
     assert.ok(refs.includes('cmux_claude'));
     assert.ok(refs.includes('claude'));
+    assert.ok(refs.includes('openclaw_task'));
   });
 });
 
@@ -109,5 +124,35 @@ describe('Bundled wrapper provenance record', () => {
     assert.equal(record.realPath, record.wrapperPath);
     assert.equal(typeof record.packageVersion, 'string');
     assert.equal(record.sha256.length, 64);
+  });
+
+  it('distinguishes bundled wrapper provenance by resolved source root', () => {
+    const workspace = tmpDir();
+    const legacyA = join(workspace, 'legacy-a', 'src');
+    const legacyB = join(workspace, 'legacy-b', 'src');
+    const sourceRoot = resolve(process.cwd(), 'src');
+    const sourceWrapper = join(sourceRoot, 'claude-exec-wrapper.js');
+
+    mkdirSync(legacyA, { recursive: true });
+    mkdirSync(legacyB, { recursive: true });
+    copyFileSync(sourceWrapper, join(legacyA, 'claude-exec-wrapper.js'));
+    copyFileSync(sourceWrapper, join(legacyB, 'claude-exec-wrapper.js'));
+
+    const originalCwd = process.cwd();
+
+    try {
+      process.chdir(workspace);
+      const left = resolveBundledWrapperProvenance('claude', { guardrail_repo: './legacy-a' });
+      const right = resolveBundledWrapperProvenance('claude', { guardrail_repo: './legacy-b' });
+
+      assert.equal(left.wrapperPath.endsWith('legacy-a/src/claude-exec-wrapper.js'), true);
+      assert.equal(right.wrapperPath.endsWith('legacy-b/src/claude-exec-wrapper.js'), true);
+      assert.notEqual(left.sourceRoot, right.sourceRoot);
+      assert.notEqual(left.wrapperPath, right.wrapperPath);
+      assert.notEqual(left.realPath, right.realPath);
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 });

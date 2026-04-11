@@ -818,6 +818,62 @@ describe('Workflow Manifest Save/Load', () => {
     }
   });
 
+  it('normalizes explicit search dir variants to the same workflow source locator', () => {
+    const left = mkdtempSync(join(tmpdir(), 'wf-portable-explicit-left-'));
+    const recipe = {
+      id: 'portable-explicit-dir-recipe',
+      name: 'Portable Explicit Dir Recipe',
+      description: 'Portable search root drift test',
+      version: '1.0.0',
+      author: 'tester',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{
+        id: 'main',
+        description: 'echo portable explicit',
+        run: { command: 'echo', args: ['portable-explicit'], mode: 'structured' },
+      }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    };
+
+    try {
+      const recipeDir = join(left, 'recipes');
+      mkdirSync(recipeDir, { recursive: true });
+      writeRecipeFile(recipeDir, recipe);
+
+      const def = makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'portable-explicit-dir-recipe',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      });
+
+      const leftNormalized = normalizeWorkflowDefinition(def, left, {
+        recipeSearchDirs: [join(left, 'recipes')],
+      });
+      const rightNormalized = normalizeWorkflowDefinition(def, left, {
+        recipeSearchDirs: [join(left, 'recipes', '..', 'recipes', '.')],
+      });
+
+      assert.equal(
+        leftNormalized.steps[0].recipeRef.sourceLocator,
+        rightNormalized.steps[0].recipeRef.sourceLocator,
+      );
+      assert.equal(
+        leftNormalized.steps[0].recipeRef.sourcePath,
+        rightNormalized.steps[0].recipeRef.sourcePath,
+      );
+    } finally {
+      rmSync(left, { recursive: true, force: true });
+    }
+  });
+
   it('trust-class drift is detected even when risk level is unchanged', () => {
     const def = makeDefinition();
     const m1 = buildManifest(def, tmpDir);

@@ -5,7 +5,15 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { validateRecipe, loadRecipe, hashRecipe, VALID_CATEGORIES, VALID_CHANNELS } from '../src/recipe.js';
-import { buildIndex, filterRecipes, fuzzySearch, groupByCategory, formatRecipeList } from '../src/recipe-index.js';
+import {
+  buildIndex,
+  filterRecipes,
+  fuzzySearch,
+  groupByCategory,
+  formatRecipeList,
+  normalizePathForRecipeLookup,
+  normalizePortablePath,
+} from '../src/recipe-index.js';
 import { signRecipe, verifySignature, classifyTrust, enforceChannel, staticAnalysis } from '../src/recipe-channel.js';
 import { checkDangerous, checkScope, dryRun, executeRecipe } from '../src/recipe-executor.js';
 
@@ -161,6 +169,20 @@ describe('Recipe System: Indexing + Filtering', () => {
     const output = formatRecipeList(recipes);
     assert.ok(output.includes('test'));
     assert.ok(output.includes('verified'));
+  });
+
+  it('normalizes mixed windows-style path forms to shared portable keys', () => {
+    const left = normalizePortablePath('C:\\Users\\Alice\\Projects\\Guardrail\\recipes\\claude-exec-recipe.json');
+    const right = normalizePortablePath('c:/Users/Alice/Projects/Guardrail/recipes/claude-exec-recipe.json');
+    assert.equal(left, right);
+    const trimmed = normalizePathForRecipeLookup('C:\\Users\\Alice\\Projects\\Guardrail\\recipes\\claude-exec-recipe.json');
+    assert.equal(trimmed, left);
+  });
+
+  it('keeps mixed-path root driftable when roots differ', () => {
+    const left = normalizePortablePath('C:\\Users\\Alice\\Projects\\GuardrailA\\recipes\\claude-exec-recipe.json');
+    const right = normalizePortablePath('C:\\Users\\Alice\\Projects\\GuardrailB\\recipes\\claude-exec-recipe.json');
+    assert.notEqual(left, right);
   });
 });
 
@@ -542,7 +564,10 @@ describe('Recipe System: Example Recipes', () => {
     const args = r.steps.flatMap((step) => step.run?.args || []);
     assert.ok(args.includes('fix-tests'));
     assert.ok(args.includes('write'));
+    assert.ok(args.includes('--no-escalate'));
+    assert.ok(r.steps.length === 1);
     assert.ok(!args.includes('admin'));
+    assert.ok(r.steps.every((step) => step.run?.command === '{{bundled_wrapper.openclaw_task}}'));
   });
 
   it('openclaw-debug-ci recipe is fixed to the debug-ci flow and read scope', () => {
@@ -552,7 +577,10 @@ describe('Recipe System: Example Recipes', () => {
     const args = r.steps.flatMap((step) => step.run?.args || []);
     assert.ok(args.includes('debug-ci'));
     assert.ok(args.includes('read'));
+    assert.ok(args.includes('--no-escalate'));
+    assert.ok(r.steps.length === 1);
     assert.ok(!args.includes('admin'));
+    assert.ok(r.steps.every((step) => step.run?.command === '{{bundled_wrapper.openclaw_task}}'));
   });
 
   it('git-commit recipe is valid and categorized', () => {
@@ -588,6 +616,29 @@ describe('Recipe System: Example Recipes', () => {
     assert.ok(pipInstall.steps[0].run.args.includes('{{bundled_wrapper.pip_install_safe}}'));
   });
 
+  it('git-commit-amend recipe is valid and uses the amend helper wrapper', () => {
+    const r = loadRecipe(join(recipeDir, 'git-commit-amend.recipe.json'));
+    assert.equal(r.category, 'git');
+    assert.equal(r.risk_level, 'high');
+    assert.equal(r.approval_required, true);
+    const args = r.steps.flatMap((step) => step.run?.args || []);
+    assert.ok(args.includes('{{bundled_wrapper.git_commit_amend}}'));
+    assert.ok(args.includes('--expected-head'));
+    assert.ok(args.includes('--message-file'));
+  });
+
+  it('git-force-push-safe recipe is valid and uses lease-based force helper', () => {
+    const r = loadRecipe(join(recipeDir, 'git-force-push-safe.recipe.json'));
+    assert.equal(r.category, 'git');
+    assert.equal(r.risk_level, 'high');
+    assert.equal(r.approval_required, true);
+    const args = r.steps.flatMap((step) => step.run?.args || []);
+    assert.ok(args.includes('{{bundled_wrapper.git_force_push_safe}}'));
+    assert.ok(args.includes('--expected-head'));
+    assert.ok(args.includes('--expected-remote-oid'));
+    assert.ok(!args.includes('--force --'));
+  });
+
   it('git-push recipe is bounded to non-force pushes only', () => {
     const r = loadRecipe(join(recipeDir, 'git-push.recipe.json'));
     assert.equal(r.category, 'git');
@@ -618,6 +669,8 @@ describe('Recipe System: Example Recipes', () => {
       'openclaw-debug-ci',
       'openclaw-wrapper',
       'npm-publish',
+      'git-commit-amend',
+      'git-force-push-safe',
     ];
     for (const name of files) {
       const r = loadRecipe(join(recipeDir, `${name}.recipe.json`));
