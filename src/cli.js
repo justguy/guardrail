@@ -163,6 +163,7 @@ function buildLanePortfolioBundle(timeline) {
     ...timeline,
     entries: timeline.entries.map((entry) => ({
       timestamp: entry.timestamp,
+      source: entry.source || null,
       event: entry.event,
       lane_id: entry.lane_id || null,
       lane_dir: entry.lane_dir || null,
@@ -175,6 +176,7 @@ function buildLanePortfolioBundle(timeline) {
       failure_stage: entry.failure_stage || null,
       scope_conflict_count: entry.scope_conflict_count ?? null,
       resource_conflict_count: entry.resource_conflict_count ?? null,
+      tombstone_path: entry.tombstone_path || null,
     })),
   };
 }
@@ -1728,6 +1730,8 @@ async function main() {
       reason: result.status,
       stopped_live_lane: !!result.stoppedLiveLane,
       cleaned_lane_dir: result.lane?.laneDir || null,
+      cleanup_reason: result.lane?.cleanupReason || null,
+      tombstone_path: result.lane?.tombstonePath || null,
     });
     if (parsed.json) {
       console.log(JSON.stringify(result, null, 2));
@@ -1902,14 +1906,17 @@ async function main() {
       console.log(`  Chain valid:    ${timeline.chainValid ? 'yes' : 'no'}`);
       console.log(`  Live lanes:     ${timeline.liveLaneCount}`);
       console.log(`  Matched events: ${timeline.totalMatches}`);
+      const eventSummary = Object.entries(timeline.eventCounts || {}).map(([event, count]) => `${event}=${count}`).join(' ');
+      if (eventSummary) console.log(`  Events:         ${eventSummary}`);
       if (timeline.entries.length > 0) {
         console.log('');
         for (const entry of timeline.entries) {
-          console.log(`${entry.timestamp} ${entry.event} ${entry.lane_id || entry.lane_dir || 'unknown'}`);
+          console.log(`${entry.timestamp} ${entry.event} ${entry.lane_id || entry.lane_dir || 'unknown'}${entry.source ? ` [${entry.source}]` : ''}`);
           console.log(`  Repo:    ${entry.guardrail_repo || 'n/a'}`);
           console.log(`  Tool:    ${entry.tool || 'n/a'}`);
           console.log(`  Status:  ${entry.status || 'n/a'}`);
           if (entry.reason) console.log(`  Reason:  ${entry.reason}`);
+          if (entry.tombstone_path) console.log(`  Tombstone: ${entry.tombstone_path}`);
         }
       }
     }

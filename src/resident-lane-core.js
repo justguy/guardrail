@@ -1101,10 +1101,6 @@ function laneTimelineEntryMatches(entry, rawOptions = {}) {
   return true;
 }
 
-export function residentLanePortfolioAuditPath(rawOptions = {}) {
-  return join(resolve(rawOptions.hostStateDir || defaultHostStateDir()), 'resident-lane-portfolio.jsonl');
-}
-
 function readLaneTimelineAuditEntries(guardrailRepo, rawOptions = {}) {
   const auditPath = resolve(guardrailRepo, '.guardrail', 'audit.jsonl');
   const repoEntries = queryAuditLog(auditPath, {
@@ -1121,7 +1117,7 @@ function readLaneTimelineAuditEntries(guardrailRepo, rawOptions = {}) {
       session_id: entry.session_id || null,
       tool: entry.tool || null,
       status: entry.status || null,
-      reason: entry.reason || entry.prune_reason || null,
+      reason: entry.reason || entry.prune_reason || entry.cleanup_reason || null,
       request_id: entry.request_id || null,
       guardrail_repo: guardrailRepo,
       detail: entry,
@@ -1189,7 +1185,7 @@ function readLaneTimelinePortfolioAuditEntries(rawOptions = {}) {
       session_id: entry.session_id || null,
       tool: entry.tool || null,
       status: entry.status || null,
-      reason: entry.reason || entry.prune_reason || null,
+      reason: entry.reason || entry.prune_reason || entry.cleanup_reason || null,
       request_id: entry.request_id || null,
       guardrail_repo: entry.guardrail_repo ? resolve(entry.guardrail_repo) : null,
       tombstone_path: entry.tombstone_path || null,
@@ -1260,6 +1256,9 @@ export function getResidentLaneTimeline(rawOptions = {}) {
       chainValid: hostAudit.chainValid,
       count: entries.length,
       totalMatches: hostAudit.entries.length,
+      eventCounts: summary.byEvent,
+      toolCounts: summary.byTool,
+      statusCounts: summary.byStatus,
       summary,
       snapshot,
       entries,
@@ -1313,6 +1312,9 @@ export function getResidentLaneTimeline(rawOptions = {}) {
     chainValid: repoSummaries.every((repo) => repo.chainValid !== false),
     count: entries.length,
     totalMatches: allEntries.length,
+    eventCounts: summary.byEvent,
+    toolCounts: summary.byTool,
+    statusCounts: summary.byStatus,
     summary,
     snapshot,
     entries,
