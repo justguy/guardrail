@@ -588,6 +588,35 @@ P0 means the architecture must carry the seam now even if the hosted backend doe
 | P1 | Secret mutation + runtime secret governance | Yes, before honest enterprise secret-management automation ships. | Yes, as a design seam only. Local key management, redaction, and env/runtime guardrails already exist. | Add write-only secret-input UX, secret-handle references, execution-time injection/revocation, and secret access audit trails so deferred secret-mutation recipes can eventually ship honestly. Folds item 31 and unblocks `R0b`. |
 | P2 | Regulated-enterprise maturity work | No for the enterprise-aware architecture claim. Yes for highly regulated or large-scale procurement. | Partial. Trusted registries/indexes, signed index verification, audit exports, portability, and local compliance surfaces exist. | Add legal-hold workflows/UI, WORM retention backends, DSAR/subject-access flows, supply-chain attestations, certification programs, enterprise dashboards, and deeper air-gapped/upgrade automation. Folds items 24, 37, and 38. |
 
+### P0 Execution Queue (Autonomous-Slice Ready)
+
+The P0 rows above are architectural priorities. They are still too coarse for unattended agent execution unless they are broken into one-slice-at-a-time packets with explicit proofs. The queue below is the execution order another agent should follow when using Guardrail itself to invoke Claude/Codex, land code, run focused tests, review the diff/result, update docs, and only then continue.
+
+| Slice | Goal | Required code changes | Proof of done before moving on |
+|-------|------|-----------------------|--------------------------------|
+| P0a | Universal authorization seam | Add one shared `authorize(action, facts)` boundary and route command, workflow, template, recipe, adapter, and lane lifecycle through it before execution. | Focused supervisor parity tests prove every execution surface hits the same decision seam; blocked decisions return one structured policy result shape. |
+| P0b | Policy simulation + decision traces | Add simulation/explain surfaces so operators can ask “what would this policy do?” without executing, and persist decision traces for real evaluations. | New CLI/API/tests show simulation output and explainable decision traces for allow/deny outcomes. |
+| P0c | Sovereign record metadata model | Standardize hosted-record metadata helpers for `organization_id`, `workspace_id`, `retention_class`, payload hash, and sensitivity/classification labels. Wire those fields into the local event/audit/export schema now even if hosted persistence is not built yet. | Audit/export tests prove the metadata fields round-trip and remain hash-stable where required. |
+| P0d | Single crypto boundary | Ensure all sensitive-at-rest writes go through one encrypt/decrypt abstraction instead of ad hoc local storage paths. Remove or flag any bypasses. | Search + tests prove there is one crypto boundary for sensitive-at-rest state and no direct write path remains for covered data classes. |
+| P0e | Event schema v1 | Freeze a versioned event vocabulary for execution, admin, read/access, policy, and incident events so later billing/SIEM/webhook backends attach to a stable shape. | Tests and docs show event versioning plus separate execution vs access/admin events. |
+| P0f | Model gateway seam | Add one model-gateway interface and move all model/provider invocation decisions behind it, even if the initial implementation still delegates to local wrappers or adapters. | Focused tests prove recipe/adapter AI paths resolve model/provider decisions through the gateway contract rather than scattered direct calls. |
+| P0g | Pre-egress scrubbing + classification hooks | Add the hook points for sensitivity labels, scrubber policy, and pre-egress review before prompts/artifacts leave the trust boundary. | Tests show the gateway can call classification/scrubbing hooks and block or redact on policy. |
+| P0h | Emergency controls | Add revocation, break-glass, and kill-switch state/commands for lanes, sessions, and future hosted actors. | CLI/tests prove an active execution surface can be revoked/stopped through one audited emergency path. |
+
+### Autonomous Execution Rule For P0
+
+For each P0 slice above, the working agent should use the same loop:
+
+1. Run a trivial probe through the exact guarded path that will be used for the real slice.
+2. Execute only one slice.
+3. Require the declared artifact to exist before claiming success.
+4. Run focused tests for that slice.
+5. Review/fix the result.
+6. Update `README.md` and this roadmap entry.
+7. Only then move to the next slice.
+
+If a slice cannot produce its declared artifact or cannot pass its focused tests, the agent should stop on that slice and fix the path first instead of starting the next one.
+
 ### Recipe Distribution (v0.2–v0.5)
 
 | # | Feature | Target | Unlocks | Status |
