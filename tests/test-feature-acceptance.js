@@ -670,6 +670,36 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.counts.ready, 1);
   });
 
+  it('guardrail lane list --all-repos includes host-registry lanes and honors resource filters', () => {
+    const dir = tmpDir();
+    const homeDir = join(dir, 'home');
+    const repoDir = join(dir, 'repo');
+    mkdirSync(join(repoDir, '.guardrail', 'lanes'), { recursive: true });
+    mkdirSync(join(homeDir, '.guardrail', 'lanes', 'resident-lanes'), { recursive: true });
+    writeFileSync(join(homeDir, '.guardrail', 'lanes', 'resident-lanes', 'remote-lane.json'), JSON.stringify({
+      laneId: 'remote-lane',
+      laneDir: join(dir, 'other-repo', '.guardrail', 'lanes', 'remote-lane'),
+      guardrailRepo: join(dir, 'other-repo'),
+      ownerRepoId: 'remote-owner',
+      tool: 'codex',
+      sessionName: 'remote-lane',
+      resourceMode: 'block',
+      resources: ['git-branch:main'],
+      pid: process.pid,
+      status: 'ready',
+      updatedAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane list --guardrail-repo ${repoDir} --all-repos --resource-filter git-branch:main --json`, {
+      env: { ...process.env, HOME: homeDir },
+    });
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.lanes.length, 1);
+    assert.equal(parsed.lanes[0].laneId, 'remote-lane');
+    assert.equal(parsed.lanes[0].source, 'host-registry');
+  });
+
   it('guardrail lane send writes one prompt through a resident lane FIFO', async () => {
     const dir = tmpDir();
     const guardrailRepo = join(dir, 'repo');
@@ -1081,7 +1111,10 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.ok(Array.isArray(parsed.adapters));
     assert.ok(parsed.adapters.some((adapter) => adapter.id === 'claude'));
     assert.ok(parsed.adapters.some((adapter) => adapter.id === 'codex'));
+    assert.ok(parsed.adapters.some((adapter) => adapter.id === 'local-exec'));
+    assert.ok(parsed.adapters.some((adapter) => adapter.id === 'prompt-wrapper'));
     assert.ok(parsed.adapters.every((adapter) => Array.isArray(adapter.capabilities)));
+    assert.ok(parsed.adapters.every((adapter) => adapter.source === 'bundled'));
   });
 
   it('guardrail lane start rejects unknown tools', () => {
@@ -1089,6 +1122,13 @@ describe('README Feature: Resident Lane Mode', () => {
     const r = run(`${CLI} lane start --guardrail-repo ${dir} --id bad-tool --tool madeup --json`);
     assert.equal(r.exitCode, 1);
     assert.ok(r.stderr.includes('Unknown resident lane tool'));
+  });
+
+  it('guardrail lane start rejects local-exec without a fixed command', () => {
+    const dir = tmpDir();
+    const r = run(`${CLI} lane start --guardrail-repo ${dir} --id bad-local --tool local-exec --json`);
+    assert.equal(r.exitCode, 1);
+    assert.ok(r.stderr.includes('Provide --command'));
   });
 
   it('guardrail lane stop appends an audit entry and removes the host key', () => {

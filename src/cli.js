@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -27,8 +27,12 @@ function defaultLaneDir(laneId) {
 }
 
 function defaultLaneKeyPath(laneId, guardrailRepo = '.') {
+  let repoPath = resolve(process.cwd(), guardrailRepo);
+  try {
+    repoPath = realpathSync(repoPath);
+  } catch {}
   const repoId = createHash('sha256')
-    .update(resolve(process.cwd(), guardrailRepo))
+    .update(repoPath)
     .digest('hex')
     .slice(0, 16);
   return resolve(homedir(), '.guardrail', 'lanes', repoId, `${laneId}.key`);
@@ -51,6 +55,9 @@ function normalizeLaneCliOptions(raw = {}) {
     scopeType: raw.scopeType || 'none',
     scopeMode: raw.scopeMode || 'warn',
     scopePaths: raw.scopePaths || [],
+    resourceMode: raw.resourceMode || raw.scopeMode || 'warn',
+    resources: raw.resources || [],
+    hostStateDir: raw.hostStateDir || '',
   };
 }
 
@@ -60,6 +67,12 @@ function formatLaneScope(status = {}) {
   const paths = Array.isArray(status.scopePaths) ? status.scopePaths : [];
   const details = paths.length > 0 ? ` ${paths.join(', ')}` : '';
   return `${scopeType}/${status.scopeMode || 'warn'}${details}`;
+}
+
+function formatLaneResources(status = {}) {
+  const resources = Array.isArray(status.resources) ? status.resources : [];
+  if (resources.length === 0) return 'none';
+  return `${status.resourceMode || 'warn'} ${resources.join(', ')}`;
 }
 
 function buildLaneRefArg(status = {}) {
@@ -167,6 +180,7 @@ function buildLaneStartFailureResponse(err) {
     logPath: details.logPath || null,
     pid: details.pid ?? null,
     scopeConflicts: Array.isArray(details.scopeConflicts) ? details.scopeConflicts : [],
+    resourceConflicts: Array.isArray(details.resourceConflicts) ? details.resourceConflicts : [],
   };
 }
 
@@ -281,6 +295,8 @@ Examples:
   guardrail run --template ./templates/npm-publish.json --input package_dir=packages/my-lib --input tag=beta
   guardrail lane start --id claude-live
   guardrail lane start --id codex-live --tool codex
+  guardrail lane start --id lint-live --tool local-exec --command node --arg scripts/lint-worker.js
+  guardrail lane start --id wrapper-live --tool prompt-wrapper --wrapper-command ./scripts/my-wrapper.js --wrapper-arg mode=review
   guardrail lane send --id claude-live --prompt "2x3=?"
   guardrail lane result --id claude-live
   guardrail lane wait --id claude-live --request-id req-123
@@ -290,6 +306,7 @@ Examples:
   guardrail lane stop --id claude-live
   guardrail lane cleanup --id claude-live
   guardrail lane list --json
+  guardrail lane list --all-repos --resource-filter git-branch:main --json
   guardrail lane prune --json
   guardrail repo status --path .
   guardrail adapter mcp tools --tool cline
@@ -783,6 +800,15 @@ export function parseArgs(argv) {
       '--scope-mode': 'scopeMode',
       '--scope-path': 'scopePaths',
       '--scope-paths': 'scopePaths',
+      '--resource-mode': 'resourceMode',
+      '--resource': 'resources',
+      '--resources': 'resources',
+      '--command': 'command',
+      '--arg': 'commandArgs',
+      '--args': 'commandArgs',
+      '--wrapper-command': 'wrapperCommand',
+      '--wrapper-arg': 'wrapperArgs',
+      '--wrapper-args': 'wrapperArgs',
       '--no-session-persistence': { key: 'noSessionPersistence', boolean: true },
       '--auth-fd': 'authFd',
       '--poll-interval-ms': 'pollIntervalMs',
@@ -800,6 +826,9 @@ export function parseArgs(argv) {
       '--session-name-filter': 'filterSessionName',
       '--scope-type-filter': 'scopeTypeFilter',
       '--scope-mode-filter': 'scopeModeFilter',
+      '--resource-filter': 'resourceFilter',
+      '--host-state-dir': 'hostStateDir',
+      '--all-repos': { key: 'allRepos', boolean: true },
       '--lanes-dir': 'lanesDir',
       '--include-failed': { key: 'includeFailed', boolean: true },
     });
@@ -1271,7 +1300,7 @@ async function main() {
   // --- lane start/send -----------------------------------------------------
 
   if (parsed.subcommand === 'lane-start') {
-    const { assertValidResidentLaneTool, launchResidentLane } = await import('./resident-lane.js');
+    const { assertValidResidentLaneTool, launchResidentLane, normalizeResidentLaneOptions: validateResidentLaneOptions } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     if (!laneOpts.laneId && !laneOpts.laneDir) {
       console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane start');
@@ -1283,6 +1312,7 @@ async function main() {
     }
     try {
       assertValidResidentLaneTool(laneOpts);
+      validateResidentLaneOptions(laneOpts, resolve(laneOpts.guardrailRepo || '.'));
     } catch (err) {
       console.error(err.message);
       process.exit(1);
@@ -1322,21 +1352,30 @@ async function main() {
               console.error(`  ${conflict.laneId || conflict.laneDir} (${conflict.enforcement})`);
             }
           }
+          if (failure.resourceConflicts.length > 0) {
+            console.error('Resource conflicts:');
+            for (const conflict of failure.resourceConflicts) {
+              console.error(`  ${conflict.laneId || conflict.laneDir} (${conflict.enforcement})`);
+            }
+          }
         }
         process.exit(1);
       }
     } finally {
       if (keyFd !== null) closeSync(keyFd);
     }
-    await appendLaneAuditEntry(laneOpts, 'lane_start', {
-      reused: !!summary.reused,
-      pid: summary.pid ?? null,
-      auth_mode: summary.authMode ?? 'none',
-      scope_type: summary.scopeType ?? 'none',
-      scope_mode: summary.scopeMode ?? 'warn',
-      scope_conflict_count: Array.isArray(summary.scopeConflicts) ? summary.scopeConflicts.length : 0,
-      status: 'success',
-    });
+      await appendLaneAuditEntry(laneOpts, 'lane_start', {
+        reused: !!summary.reused,
+        pid: summary.pid ?? null,
+        auth_mode: summary.authMode ?? 'none',
+        scope_type: summary.scopeType ?? 'none',
+        scope_mode: summary.scopeMode ?? 'warn',
+        scope_conflict_count: Array.isArray(summary.scopeConflicts) ? summary.scopeConflicts.length : 0,
+        resource_mode: summary.resourceMode ?? 'warn',
+        resource_count: Array.isArray(summary.resources) ? summary.resources.length : 0,
+        resource_conflict_count: Array.isArray(summary.resourceConflicts) ? summary.resourceConflicts.length : 0,
+        status: 'success',
+      });
     if (parsed.json) {
       console.log(JSON.stringify(summary, null, 2));
     } else {
@@ -1344,6 +1383,7 @@ async function main() {
       if (laneOpts.laneId) console.log(`  Lane id:       ${laneOpts.laneId}`);
       console.log(`  Tool:          ${summary.tool || summary.adapterId || laneOpts.tool || 'claude'}`);
       console.log(`  Scope:         ${formatLaneScope(summary)}`);
+      console.log(`  Resources:     ${formatLaneResources(summary)}`);
       console.log(`  Lane dir:      ${summary.laneDir}`);
       if (summary.keyPath) console.log(`  Key path:      ${summary.keyPath}`);
       console.log(`  Request FIFO:  ${summary.requestFifo}`);
@@ -1357,6 +1397,12 @@ async function main() {
       if (Array.isArray(summary.scopeConflicts) && summary.scopeConflicts.length > 0) {
         console.log('  Scope conflicts:');
         for (const conflict of summary.scopeConflicts) {
+          console.log(`    ${conflict.laneId || conflict.laneDir} (${conflict.enforcement})`);
+        }
+      }
+      if (Array.isArray(summary.resourceConflicts) && summary.resourceConflicts.length > 0) {
+        console.log('  Resource conflicts:');
+        for (const conflict of summary.resourceConflicts) {
           console.log(`    ${conflict.laneId || conflict.laneDir} (${conflict.enforcement})`);
         }
       }
@@ -1650,6 +1696,8 @@ async function main() {
         laneOpts.filterSessionName ? `sessionName=${laneOpts.filterSessionName}` : null,
         laneOpts.scopeTypeFilter ? `scopeType=${laneOpts.scopeTypeFilter}` : null,
         laneOpts.scopeModeFilter ? `scopeMode=${laneOpts.scopeModeFilter}` : null,
+        laneOpts.resourceFilter ? `resources=${Array.isArray(laneOpts.resourceFilter) ? laneOpts.resourceFilter.join(',') : laneOpts.resourceFilter}` : null,
+        laneOpts.allRepos ? 'allRepos=true' : null,
       ].filter(Boolean);
       if (activeFilters.length > 0) {
         console.log(`  Filters: ${activeFilters.join(' ')}`);
@@ -1661,14 +1709,17 @@ async function main() {
           console.log(`${name}: ${lane.status}${lane.alive ? ' (alive)' : ''}`);
           console.log(`  Tool:          ${lane.tool ?? lane.adapterId ?? 'claude'}`);
           console.log(`  Scope:         ${formatLaneScope(lane)}`);
+          console.log(`  Resources:     ${formatLaneResources(lane)}`);
+          console.log(`  Repo:          ${lane.guardrailRepo ?? 'n/a'}`);
           console.log(`  Lane dir:      ${lane.laneDir}`);
           console.log(`  Session:       ${lane.sessionName ?? 'n/a'}`);
           console.log(`  Request:       ${lane.currentRequestId ?? lane.lastRequestId ?? 'n/a'}`);
           console.log(`  Last result:   ${lane.lastResultPath ?? 'n/a'}`);
           console.log(`  Action:        ${lane.recommendedAction}`);
           console.log(`  Next command:  ${lane.recommendedCommand ?? 'n/a'}`);
-          if (Array.isArray(lane.scopeConflicts) && lane.scopeConflicts.length > 0) {
-            console.log(`  Conflicts:     ${lane.scopeConflicts.length}`);
+          const totalConflicts = (lane.scopeConflicts?.length || 0) + (lane.resourceConflicts?.length || 0);
+          if (totalConflicts > 0) {
+            console.log(`  Conflicts:     ${totalConflicts}`);
           }
         }
       }
@@ -1685,6 +1736,9 @@ async function main() {
       console.log('Resident lane adapters:');
       for (const adapter of adapters) {
         console.log(`  ${adapter.id} - ${adapter.description}`);
+        if (adapter.source) {
+          console.log(`    Source: ${adapter.source}`);
+        }
         if (Array.isArray(adapter.capabilities) && adapter.capabilities.length > 0) {
           console.log(`    Capabilities: ${adapter.capabilities.join(', ')}`);
         }
@@ -1708,6 +1762,7 @@ async function main() {
       console.log(`Lane status: ${bundle.status.status}`);
       console.log(`  Tool:               ${bundle.status.tool ?? bundle.status.adapterId ?? 'claude'}`);
       console.log(`  Scope:              ${formatLaneScope(bundle.status)}`);
+      console.log(`  Resources:          ${formatLaneResources(bundle.status)}`);
       console.log(`  Request:            ${bundle.status.currentRequestId ?? bundle.status.lastRequestId ?? 'n/a'}`);
       console.log(`  Last result:        ${bundle.status.lastResultPath ?? 'n/a'}`);
       console.log(`  Action:             ${bundle.status.recommendedAction}`);
@@ -1790,6 +1845,7 @@ async function main() {
       console.log(`Lane status: ${enrichedStatus.status}`);
       console.log(`  Tool:               ${enrichedStatus.tool ?? enrichedStatus.adapterId ?? 'claude'}`);
       console.log(`  Scope:              ${formatLaneScope(enrichedStatus)}`);
+      console.log(`  Resources:          ${formatLaneResources(enrichedStatus)}`);
       if (laneOpts.laneId) console.log(`  Lane id:            ${laneOpts.laneId}`);
       console.log(`  Lane dir:           ${enrichedStatus.laneDir}`);
       if (enrichedStatus.sessionName) console.log(`  Session name:       ${enrichedStatus.sessionName}`);
@@ -1814,6 +1870,12 @@ async function main() {
       if (Array.isArray(enrichedStatus.scopeConflicts) && enrichedStatus.scopeConflicts.length > 0) {
         console.log('  Scope conflicts:');
         for (const conflict of enrichedStatus.scopeConflicts) {
+          console.log(`    ${conflict.laneId || conflict.laneDir} (${conflict.enforcement})`);
+        }
+      }
+      if (Array.isArray(enrichedStatus.resourceConflicts) && enrichedStatus.resourceConflicts.length > 0) {
+        console.log('  Resource conflicts:');
+        for (const conflict of enrichedStatus.resourceConflicts) {
           console.log(`    ${conflict.laneId || conflict.laneDir} (${conflict.enforcement})`);
         }
       }

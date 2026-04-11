@@ -307,17 +307,20 @@ AI execution recipes:
   - `node src/cli.js lane status --id <lane-id>`
   - `node src/cli.js lane cleanup --id <lane-id>`
   - `node src/cli.js lane stop --id <lane-id>`
-- `node src/cli.js lane list [--status <status>] [--tool-filter <tool>] [--has-conflicts] [--json]`
+- `node src/cli.js lane list [--status <status>] [--tool-filter <tool>] [--resource-filter <class:name>] [--has-conflicts] [--all-repos] [--json]`
 - `node src/cli.js lane prune [--include-failed] [--json]`
 - `node src/cli.js lane adapters`
-- `lane start` is the one-time host-runtime step. It launches the resident daemon through a short-lived helper in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under a repo-scoped host path derived from the Guardrail repo identity, writes an explicit `.guardrail/lanes/<id>/identity.json` record plus a fresh boot nonce, records the selected tool, and fixes the executable boundary for later messages.
+- `lane start` is the one-time host-runtime step. It launches the resident daemon through a short-lived helper in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under a repo-scoped host path derived from the Guardrail repo identity, writes an explicit `.guardrail/lanes/<id>/identity.json` record plus a fresh boot nonce, records the selected tool, writes a host-side live-lane registry entry, and fixes the executable boundary for later messages.
 - Unknown `--tool` values now fail closed. Treat that as a contract error, not as an invitation to guess or let Guardrail silently fall back to another adapter.
 - Lanes can also declare optional work ownership up front:
   - `--scope-type repo|worktree|paths`
   - `--scope-mode warn|block`
   - repeated `--scope-path <repo-relative-path>` when `scope-type=paths`
+- Lanes can also declare optional non-path resources:
+  - repeated `--resource <class:name>`
+  - `--resource-mode warn|block`
 - When callers narrow `working_dir` below the repo root and omit explicit scope flags, Guardrail now infers a default `worktree/warn` ownership scope from that working directory.
-- Scope conflicts are compared only against other live lanes in the same repo lane registry. `warn` allows startup but surfaces the conflicting live lanes in `lane start`, `lane status`, and `lane list`. `block` fails closed before startup.
+- Scope and resource conflicts are compared against other live lanes. Repo-local views stay the default, and `lane list --all-repos` expands that view to include host-registry lanes from other checkouts that share the same Guardrail host state. `warn` allows startup but surfaces the conflicting live lanes in `lane start`, `lane status`, and `lane list`. `block` fails closed before startup.
 - `lane send` is the per-message step. It reads the host-side key through the Guardrail CLI, signs the request, writes the strict JSON payload into the lane FIFO, and reads the matching response back without reopening the outer transport/runtime hop.
 - If a request outlives the client-side wait window, `lane send` now returns a structured `pending` result with the request id instead of reporting `lane_expired`. Treat that as “the lane accepted the request and it is still running,” not as proof that Claude failed. If you already know you want Guardrail to keep polling, use `lane send --wait` so you stay inside the bounded wait path.
 - `lane result` is the bounded recovery/read step for those cases. Use it to fetch the stored output for the latest or named request after a long-running turn completes.
@@ -327,11 +330,13 @@ AI execution recipes:
 - `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
 - `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is ready, busy, failed, expired, stale, or stopped, includes the current request id/start time plus the last completed result path, surfaces `failureReason`, `failureStage`, `logPath`, lane identity, and boot nonce metadata when bootstrap, immediate post-start, or runtime startup failed, and now also emits a concrete next command instead of only a generic action label. If the daemon disappears before the first request and no explicit failure metadata was written, Guardrail now infers that as `failed/post_start` instead of leaving a silent stale lane.
 - `lane cleanup` is the bounded single-lane teardown path for failed/dead lanes. Prefer it over manual filesystem cleanup once you know one specific lane should not be reused.
-- `lane list` is the portfolio view. Use it before starting another lane when multiple agents may already be active in the same repo, and narrow it first with filters like `--status`, `--tool-filter`, `--lane-id-filter`, `--session-name-filter`, `--scope-type-filter`, `--scope-mode-filter`, `--alive`, or `--has-conflicts` when you are triaging a crowded repo.
-- `lane list` and `lane status` now surface declared scope ownership and overlapping live-lane conflicts. Read those first instead of guessing whether another agent already owns the same write surface.
+- `lane list` is the portfolio view. Use it before starting another lane when multiple agents may already be active in the same repo, add `--all-repos` when you need to include host-registry lanes from other checkouts, and narrow it first with filters like `--status`, `--tool-filter`, `--lane-id-filter`, `--session-name-filter`, `--scope-type-filter`, `--scope-mode-filter`, `--resource-filter`, `--alive`, or `--has-conflicts` when you are triaging a crowded repo.
+- `lane list` and `lane status` now surface declared scope ownership, explicit resource claims, and overlapping live-lane conflicts. Read those first instead of guessing whether another agent already owns the same write surface or branch/service-level resource.
 - `lane prune` removes dead lane artifacts (`stale`, `expired`, `stopped` by default). Use it after diagnosis/cleanup, not as a first reaction to a live lane you have not inspected yet.
 - Claude-oriented lane flags: `--system-prompt`, `--permission-mode`, `--allowed-tools`, `--max-budget-usd`, `--effort`, `--output-format`.
 - Codex-oriented lane flags: `--profile`, `--sandbox`, `--image-files`, `--color`, `--oss`, `--local-provider`, `--skip-git-repo-check`, `--ephemeral`, `--full-auto`.
+- Local-exec lane flags: `--command`, repeated `--arg`.
+- Prompt-wrapper lane flags: `--wrapper-command`, repeated `--wrapper-arg`.
 - The practical review-loop shape is:
   - start one approved Claude session with the full planned doc set in `input_files`
   - keep `system_prompt` fixed for the entire loop
@@ -365,8 +370,8 @@ AI execution recipes:
   - partial/incomplete writes time out and are discarded
 - The host-side lane key is ephemeral by default. If the daemon idles out, crashes, or is stopped, the key is deleted. Later `lane send` calls should treat missing key/FIFO state as `lane_expired` and start a fresh lane instead of trying to resume stale secrets.
 - Treat lane startup as the approval-bearing/runtime-bearing step. Treat later `lane send` turns as bounded session traffic, not as a new launcher/surface request.
-- Guardrail now fails closed if another live lane with the same lane id already exists in the same repo lane registry. Do not work around that by inventing a second lane with the same purpose; use `lane list` first and either reuse the live lane or stop/prune the dead one explicitly.
-- For multi-agent work, declare the narrowest honest lane scope you can. Use `repo` only when the whole repo is the intentional ownership boundary, `worktree` when a lane should claim its working directory subtree, and `paths` for explicit repo-relative write surfaces such as `src/api` or `docs/plans`.
+- Guardrail now fails closed if another live lane with the same lane id already exists either in the same repo lane registry or in the shared host-side lane registry for that Guardrail host root. Startup also uses explicit lock files so two concurrent starts do not race into split-brain ownership. Do not work around that by inventing a second lane with the same purpose; use `lane list` first and either reuse the live lane or stop/prune the dead one explicitly.
+- For multi-agent work, declare the narrowest honest lane ownership you can. Use `repo` only when the whole repo is the intentional ownership boundary, `worktree` when a lane should claim its working directory subtree, `paths` for explicit repo-relative write surfaces such as `src/api` or `docs/plans`, and `--resource <class:name>` for non-path coordination such as `git-branch:main`, `service:postgres`, or `env:staging`.
 - For bundled `claude-exec`, the current standalone recipe env handshake is: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TERM_PROGRAM`, `LANG`, `TMPDIR`, `PWD`, `XDG_CONFIG_HOME`, and `CLAUDE_CONFIG_DIR`. Pass them with repeated `--env-allow` flags when present in the runtime you are validating.
 - For bundled `claude-exec`, use the recipe path to prove the CLI runtime works and to establish the bounded approval/unit. In current shipped recipe mode, `prompt` is session-bound `interactive_message` while `system_prompt` remains `review_each_time`. That means later user messages can change inside the same persistent named session, but a changed `system_prompt` or a new session still re-prompts. If you need unattended reruns with a fixed `system_prompt`, switch to a local template that wraps `src/claude-exec-wrapper.js` directly.
 - Transport/orchestration is a separate boundary. `claude-exec` does not include “launch this in another host runtime” behavior. If the tool must run through a different launcher, terminal surface, remote shell, container, or other host-runtime hop, use a separate transport/orchestration recipe instead of treating that outer hop as part of the exec recipe itself.

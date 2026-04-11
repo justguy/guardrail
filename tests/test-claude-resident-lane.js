@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   constants as fsConstants,
@@ -35,14 +36,23 @@ import {
 } from '../src/claude-resident-lane.js';
 // Exercise the generic lane entrypoint, which now dispatches to Claude/Codex adapters.
 import {
+  listResidentLaneAdapters,
   parseResidentLaneArgs as parseGenericResidentLaneArgs,
   normalizeResidentLaneOptions as normalizeGenericResidentLaneOptions,
   runLaneRequest as runGenericLaneRequest,
 } from '../src/resident-lane.js';
 import { sendResidentLaneMessage } from '../src/claude-resident-lane-client.js';
+import { acquireLock } from '../src/runtime-policy.js';
 
 function tmpLaneDir() {
   return mkdtempSync(join(tmpdir(), 'gr-claude-lane-'));
+}
+
+function withHostState(dir, options = {}) {
+  return {
+    hostStateDir: join(dir, 'host-state'),
+    ...options,
+  };
 }
 
 function mkfifo(path) {
@@ -241,6 +251,85 @@ describe('Claude resident lane', () => {
     assert.ok(calls[0].includes('codex-live-session'));
   });
 
+  it('builds prompt-wrapper lane args when tool=prompt-wrapper', async () => {
+    const dir = tmpLaneDir();
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/wrapper',
+      guardrailRepo: '.',
+      workingDir: '.',
+      tool: 'prompt-wrapper',
+      sessionName: 'wrapper-live-session',
+      sessionId: 'wrapper-live-session-1',
+      wrapperCommand: './scripts/fake-wrapper.js',
+      wrapperArgs: 'mode=review,fast',
+      systemPrompt: 'Stay terse.',
+      inputFiles: 'docs/one.md,docs/two.md',
+    }, dir);
+
+    const calls = [];
+    const runner = async (command, args) => {
+      calls.push({ command, args });
+      return { code: 0, stdout: 'done\n', stderr: '' };
+    };
+
+    await runGenericLaneRequest(options, { id: 'req-1', prompt: 'review this' }, { startedConversation: false }, { runner });
+
+    assert.equal(calls[0].command, resolve(dir, 'scripts/fake-wrapper.js'));
+    assert.ok(calls[0].args.includes('--prompt'));
+    assert.ok(calls[0].args.includes('review this'));
+    assert.ok(calls[0].args.includes('--session-name'));
+    assert.ok(calls[0].args.includes('wrapper-live-session'));
+    assert.ok(calls[0].args.includes('--input-files'));
+    assert.ok(calls[0].args.includes('docs/one.md,docs/two.md'));
+    assert.ok(calls[0].args.includes('--system-prompt'));
+    assert.ok(calls[0].args.includes('Stay terse.'));
+  });
+
+  it('builds local-exec lane args when tool=local-exec', async () => {
+    const dir = tmpLaneDir();
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/local-exec',
+      guardrailRepo: '.',
+      workingDir: '.',
+      tool: 'local-exec',
+      sessionName: 'local-exec-live',
+      sessionId: 'local-exec-live-1',
+      command: 'node',
+      commandArgs: ['scripts/echo-prompt.js', '--mode', 'review'],
+      resources: ['branch:main'],
+      resourceMode: 'block',
+    }, dir);
+
+    const calls = [];
+    const runner = async (spawnOptions, prompt) => {
+      calls.push({ spawnOptions, prompt });
+      return { code: 0, stdout: `ECHO:${prompt}\n`, stderr: '' };
+    };
+
+    const result = await runGenericLaneRequest(
+      options,
+      { id: 'req-1', prompt: 'review this' },
+      { startedConversation: false },
+      { runner },
+    );
+
+    assert.equal(calls[0].spawnOptions.command, 'node');
+    assert.deepEqual(calls[0].spawnOptions.commandArgs, ['scripts/echo-prompt.js', '--mode', 'review']);
+    assert.equal(calls[0].prompt, 'review this');
+    assert.equal(result.stdout, 'ECHO:review this\n');
+  });
+
+  it('lists bundled resident lane adapters beyond Claude/Codex', () => {
+    const adapters = listResidentLaneAdapters();
+    const ids = adapters.map((adapter) => adapter.id).sort();
+
+    assert.ok(ids.includes('claude'));
+    assert.ok(ids.includes('codex'));
+    assert.ok(ids.includes('local-exec'));
+    assert.ok(ids.includes('prompt-wrapper'));
+    assert.ok(adapters.every((adapter) => adapter.source === 'bundled'));
+  });
+
   it('reuses an already-running lane instead of failing', async () => {
     const dir = tmpLaneDir();
     const laneDir = join(dir, '.guardrail', 'lanes', 'math');
@@ -303,7 +392,80 @@ describe('Claude resident lane', () => {
       workingDir: dir,
       laneId: 'math-live',
       sessionName: 'math-live',
+      keyPath: join(dir, 'host-keys', 'repo-a', 'math-live.key'),
+      hostStateDir: join(dir, 'host-keys'),
     }), /Duplicate live resident lane/);
+  });
+
+  it('fails closed when another live lane with the same lane id is claimed from a different repo host registry', async () => {
+    const dir = tmpLaneDir();
+    const hostStateDir = join(dir, 'host-state');
+    const laneId = 'shared-live';
+    const keyPath = join(hostStateDir, 'repo-a', `${laneId}.key`);
+    const remoteLaneDir = join(dir, 'other-repo', '.guardrail', 'lanes', laneId);
+    const registryEntryPath = join(
+      hostStateDir,
+      'resident-lanes',
+      `${createHash('sha256').update(resolve(remoteLaneDir)).digest('hex').slice(0, 24)}.json`,
+    );
+    mkdirSync(join(hostStateDir, 'resident-lanes'), { recursive: true });
+    writeFileSync(registryEntryPath, JSON.stringify({
+      laneId,
+      laneDir: remoteLaneDir,
+      guardrailRepo: join(dir, 'other-repo'),
+      ownerRepoId: 'other-repo-id',
+      pid: process.pid,
+      bootNonce: 'boot-other',
+      resourceMode: 'block',
+      resources: ['service:postgres'],
+      updatedAt: new Date().toISOString(),
+    }), 'utf8');
+
+    await assert.rejects(
+      launchResidentLane({
+        laneDir: join(dir, '.guardrail', 'lanes', 'math-b'),
+        guardrailRepo: dir,
+        workingDir: dir,
+        laneId,
+        sessionName: laneId,
+        keyPath,
+        hostStateDir,
+        resources: ['service:postgres'],
+        resourceMode: 'warn',
+      }),
+      (err) => err?.code === 'LANE_BOOT_FAILED' && /Duplicate live resident lane/.test(err?.message || ''),
+    );
+  });
+
+  it('fails closed when a startup lock already exists for the requested lane', async () => {
+    const dir = tmpLaneDir();
+    const laneId = 'math-live';
+    const hostStateDir = join(dir, 'host-state');
+    const keyPath = join(hostStateDir, 'repo-a', `${laneId}.key`);
+    const targetLaneDir = join(dir, '.guardrail', 'lanes', 'math-b');
+    const startupKey = createHash('sha256')
+      .update(`resident-lane-start:${laneId}`)
+      .digest('hex');
+    const startupStateDir = join(targetLaneDir, '.startup-locks');
+    const lock = acquireLock(startupKey, [], startupStateDir, 30_000);
+    assert.equal(lock.acquired, true);
+
+    try {
+      await assert.rejects(
+        launchResidentLane({
+          laneDir: targetLaneDir,
+          guardrailRepo: dir,
+          workingDir: dir,
+          laneId,
+          sessionName: laneId,
+          keyPath,
+          hostStateDir,
+        }),
+        (err) => err?.code === 'LANE_BOOT_FAILED' && /(already starting this resident lane|Duplicate live resident lane)/.test(err?.message || ''),
+      );
+    } finally {
+      lock.release?.();
+    }
   });
 
   it('blocks lane startup when the requested write scope overlaps a live block-owned lane', async () => {
@@ -355,6 +517,7 @@ describe('Claude resident lane', () => {
 
   it('returns scope conflict warnings in the launch summary when overlapping lanes are warn-only', async () => {
     const dir = tmpLaneDir();
+    const hostStateDir = join(dir, 'host-keys');
     const existingLaneDir = join(dir, '.guardrail', 'lanes', 'math-a');
     mkdirSync(existingLaneDir, { recursive: true });
     const existingPaths = lanePaths(existingLaneDir);
@@ -386,6 +549,7 @@ describe('Claude resident lane', () => {
     const summary = await launchResidentLane({
       laneDir: join(dir, '.guardrail', 'lanes', 'math-b'),
       guardrailRepo: dir,
+      hostStateDir,
       workingDir: dir,
       sessionName: 'math-b',
       scopeType: 'paths',
@@ -415,6 +579,183 @@ describe('Claude resident lane', () => {
     assert.equal(summary.scopeConflicts.length, 1);
     assert.equal(summary.scopeConflicts[0].laneId, 'math-a');
     assert.equal(summary.scopeConflicts[0].enforcement, 'warn');
+  });
+
+  it('blocks lane startup when requested resource claims overlap a block-owned live lane', async () => {
+    const dir = tmpLaneDir();
+    const hostStateDir = join(dir, 'host-keys');
+    const existingLaneDir = join(dir, '.guardrail', 'lanes', 'resource-a');
+    mkdirSync(existingLaneDir, { recursive: true });
+    const existingPaths = lanePaths(existingLaneDir);
+    mkfifo(existingPaths.requestFifo);
+    mkfifo(existingPaths.responseFifo);
+    writeFileSync(existingPaths.identityPath, JSON.stringify({
+      laneId: 'resource-a',
+      laneDir: existingLaneDir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-a',
+      resourceMode: 'block',
+      resources: ['git-branch:main'],
+    }), 'utf8');
+    writeFileSync(existingPaths.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'resource-a',
+      sessionName: 'resource-a',
+      resourceMode: 'block',
+      resources: ['git-branch:main'],
+      requestFifo: existingPaths.requestFifo,
+      responseFifo: existingPaths.responseFifo,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    await assert.rejects(
+      launchResidentLane({
+        laneDir: join(dir, '.guardrail', 'lanes', 'resource-b'),
+        guardrailRepo: dir,
+        hostStateDir,
+        workingDir: dir,
+        sessionName: 'resource-b',
+        resources: ['git-branch:main'],
+        resourceMode: 'warn',
+      }, {
+        spawnProcess: () => {
+          throw new Error('spawn should not be reached for blocked resource conflicts');
+        },
+      }),
+      (err) => err?.code === 'LANE_BOOT_FAILED' && err?.details?.resourceConflicts?.length === 1,
+    );
+  });
+
+  it('filters resident lanes by resource claims and reports resource conflicts', () => {
+    const dir = tmpLaneDir();
+    const lanesDir = join(dir, '.guardrail', 'lanes');
+    const laneADir = join(lanesDir, 'resource-a');
+    const laneBDir = join(lanesDir, 'resource-b');
+    mkdirSync(laneADir, { recursive: true });
+    mkdirSync(laneBDir, { recursive: true });
+    const pathsA = lanePaths(laneADir);
+    const pathsB = lanePaths(laneBDir);
+    mkfifo(pathsA.requestFifo);
+    mkfifo(pathsA.responseFifo);
+    mkfifo(pathsB.requestFifo);
+    mkfifo(pathsB.responseFifo);
+    writeFileSync(pathsA.identityPath, JSON.stringify({
+      laneId: 'resource-a',
+      laneDir: laneADir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-a',
+      resourceMode: 'warn',
+      resources: ['service:postgres'],
+    }), 'utf8');
+    writeFileSync(pathsB.identityPath, JSON.stringify({
+      laneId: 'resource-b',
+      laneDir: laneBDir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-b',
+      resourceMode: 'block',
+      resources: ['service:postgres'],
+    }), 'utf8');
+    writeFileSync(pathsA.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'resource-a',
+      sessionName: 'resource-a',
+      resourceMode: 'warn',
+      resources: ['service:postgres'],
+      requestFifo: pathsA.requestFifo,
+      responseFifo: pathsA.responseFifo,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+    writeFileSync(pathsB.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'resource-b',
+      sessionName: 'resource-b',
+      resourceMode: 'block',
+      resources: ['service:postgres'],
+      requestFifo: pathsB.requestFifo,
+      responseFifo: pathsB.responseFifo,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const listing = listResidentLanes({
+      guardrailRepo: dir,
+      resourceFilter: 'service:postgres',
+      hasConflicts: true,
+    });
+
+    assert.equal(listing.lanes.length, 2);
+    assert.equal(listing.lanes[0].resourceConflicts.length, 1);
+    assert.equal(listing.lanes[0].resourceConflicts[0].laneId, 'resource-b');
+  });
+
+  it('lists host-registry lanes across repos when allRepos is enabled', () => {
+    const dir = tmpLaneDir();
+    const hostStateDir = join(dir, 'host-keys');
+    const localLaneDir = join(dir, '.guardrail', 'lanes', 'resource-local');
+    mkdirSync(localLaneDir, { recursive: true });
+    const localPaths = lanePaths(localLaneDir);
+    mkfifo(localPaths.requestFifo);
+    mkfifo(localPaths.responseFifo);
+    writeFileSync(localPaths.identityPath, JSON.stringify({
+      laneId: 'resource-local',
+      laneDir: localLaneDir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-local',
+      resourceMode: 'warn',
+      resources: ['service:postgres'],
+    }), 'utf8');
+    writeFileSync(localPaths.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'resource-local',
+      sessionName: 'resource-local',
+      resourceMode: 'warn',
+      resources: ['service:postgres'],
+      requestFifo: localPaths.requestFifo,
+      responseFifo: localPaths.responseFifo,
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const externalLaneDir = join(dir, 'other-repo', '.guardrail', 'lanes', 'resource-external');
+    const externalRegistryDir = join(hostStateDir, 'resident-lanes');
+    mkdirSync(externalRegistryDir, { recursive: true });
+    const externalRegistryKey = createHash('sha256')
+      .update(resolve(externalLaneDir))
+      .digest('hex')
+      .slice(0, 24);
+    writeFileSync(join(externalRegistryDir, `${externalRegistryKey}.json`), JSON.stringify({
+      laneId: 'resource-external',
+      laneDir: externalLaneDir,
+      guardrailRepo: join(dir, 'other-repo'),
+      ownerRepoId: 'other-repo-id',
+      tool: 'codex',
+      sessionName: 'resource-external',
+      resourceMode: 'block',
+      resources: ['service:postgres'],
+      pid: process.pid,
+      status: 'ready',
+      updatedAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const listing = listResidentLanes({
+      guardrailRepo: dir,
+      hostStateDir,
+      allRepos: true,
+      resourceFilter: 'service:postgres',
+    });
+    const status = getResidentLaneStatus({
+      guardrailRepo: dir,
+      laneDir: localLaneDir,
+      hostStateDir,
+    });
+
+    assert.equal(listing.lanes.length, 2);
+    assert.ok(listing.lanes.some((lane) => lane.laneId === 'resource-external'));
+    assert.equal(status.resourceConflicts.length, 1);
+    assert.equal(status.resourceConflicts[0].laneId, 'resource-external');
+    assert.ok(status.resourceConflicts[0].guardrailRepo.endsWith('other-repo'));
   });
 
   it('lists resident lanes from the project lane registry', () => {

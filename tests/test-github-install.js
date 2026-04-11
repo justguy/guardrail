@@ -639,6 +639,9 @@ describe('CLI bare recipe name detection', () => {
       '--scope-mode', 'block',
       '--scope-path', 'docs',
       '--scope-path', 'tests',
+      '--resource-mode', 'warn',
+      '--resource', 'service:postgres',
+      '--resource', 'git-branch:main',
       '--profile', 'dev',
       '--system-prompt', 'Answer briefly.',
       '--json',
@@ -649,6 +652,8 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.laneOpts.scopeType, 'paths');
     assert.equal(result.laneOpts.scopeMode, 'block');
     assert.deepEqual(result.laneOpts.scopePaths, ['docs', 'tests']);
+    assert.equal(result.laneOpts.resourceMode, 'warn');
+    assert.deepEqual(result.laneOpts.resources, ['service:postgres', 'git-branch:main']);
     assert.equal(result.laneOpts.profile, 'dev');
     assert.equal(result.laneOpts.systemPrompt, 'Answer briefly.');
     assert.equal(result.json, true);
@@ -685,7 +690,9 @@ describe('CLI bare recipe name detection', () => {
       '--lanes-dir', '.guardrail/lanes',
       '--status', 'failed',
       '--tool-filter', 'codex',
+      '--resource-filter', 'service:postgres',
       '--has-conflicts',
+      '--all-repos',
       '--json',
     ]);
     assert.equal(result.subcommand, 'lane-list');
@@ -693,8 +700,45 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.laneOpts.lanesDir, '.guardrail/lanes');
     assert.equal(result.laneOpts.status, 'failed');
     assert.equal(result.laneOpts.toolFilter, 'codex');
+    assert.equal(result.laneOpts.resourceFilter, 'service:postgres');
     assert.equal(result.laneOpts.hasConflicts, true);
+    assert.equal(result.laneOpts.allRepos, true);
     assert.equal(result.json, true);
+  });
+
+  it('parses prompt-wrapper lane flags', () => {
+    const result = parseArgs([
+      'lane', 'start',
+      '--id', 'wrapper-live',
+      '--tool', 'prompt-wrapper',
+      '--wrapper-command', './scripts/wrapper.js',
+      '--wrapper-arg', 'mode=review',
+      '--wrapper-arg', 'fast',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-start');
+    assert.equal(result.laneOpts.tool, 'prompt-wrapper');
+    assert.equal(result.laneOpts.wrapperCommand, './scripts/wrapper.js');
+    assert.deepEqual(result.laneOpts.wrapperArgs, ['mode=review', 'fast']);
+  });
+
+  it('parses local-exec lane flags', () => {
+    const result = parseArgs([
+      'lane', 'start',
+      '--id', 'local-live',
+      '--tool', 'local-exec',
+      '--command', 'node',
+      '--arg', 'scripts/echo.js',
+      '--arg', '--mode',
+      '--arg', 'review',
+      '--resource', 'branch:main',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-start');
+    assert.equal(result.laneOpts.tool, 'local-exec');
+    assert.equal(result.laneOpts.command, 'node');
+    assert.deepEqual(result.laneOpts.commandArgs, ['scripts/echo.js', '--mode', 'review']);
+    assert.equal(result.laneOpts.resources, 'branch:main');
   });
 
   it('parses lane scope flags', () => {

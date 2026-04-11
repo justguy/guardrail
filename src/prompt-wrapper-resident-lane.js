@@ -29,197 +29,27 @@ import {
   waitForResidentLaneResult,
   waitForResidentLaneBootstrap,
 } from './resident-lane-core.js';
+import { parseResidentLaneArgs as parseBaseArgs } from './claude-resident-lane.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 
 export const residentLaneAdapterMetadata = {
-  id: 'codex',
-  name: 'Codex',
-  description: 'Resident lane adapter for Codex CLI execution.',
+  id: 'prompt-wrapper',
+  name: 'Prompt Wrapper',
+  description: 'Resident lane adapter for local wrapper commands that honor the Guardrail prompt-wrapper flag contract.',
   source: 'bundled',
-  capabilities: ['resident_session', 'interactive_prompt', 'stored_results', 'bounded_logs', 'resource_claims'],
+  capabilities: ['resident_session', 'interactive_prompt', 'stored_results', 'bounded_logs', 'plugin_adapter'],
 };
 
 export function parseResidentLaneArgs(argv) {
-  const options = {
-    laneDir: '',
-    guardrailRepo: '',
-    workingDir: '',
-    model: '',
-    profile: '',
-    sandbox: '',
-    addDirs: '',
-    inputFiles: '',
-    imageFiles: '',
-    color: '',
-    oss: '',
-    localProvider: '',
-    skipGitRepoCheck: '',
-    ephemeral: '',
-    fullAuto: '',
-    laneId: '',
-    keyPath: '',
-    hostStateDir: '',
-    identityNonce: '',
-    bootNonce: '',
-    sessionName: '',
-    sessionId: '',
-    scopeType: '',
-    scopeMode: '',
-    scopePaths: '',
-    resourceMode: '',
-    resources: '',
-    authFd: '',
-    pollIntervalMs: '',
-    idleTimeoutMs: '',
-    launchDaemonHelper: false,
-    daemon: false,
-  };
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const flag = argv[i];
-    const value = argv[i + 1] ?? '';
-    switch (flag) {
-      case '--lane-dir':
-        options.laneDir = value;
-        i += 1;
-        break;
-      case '--guardrail-repo':
-        options.guardrailRepo = value;
-        i += 1;
-        break;
-      case '--working-dir':
-        options.workingDir = value;
-        i += 1;
-        break;
-      case '--model':
-        options.model = value;
-        i += 1;
-        break;
-      case '--profile':
-        options.profile = value;
-        i += 1;
-        break;
-      case '--sandbox':
-        options.sandbox = value;
-        i += 1;
-        break;
-      case '--add-dirs':
-        options.addDirs = value;
-        i += 1;
-        break;
-      case '--input-files':
-        options.inputFiles = value;
-        i += 1;
-        break;
-      case '--image-files':
-        options.imageFiles = value;
-        i += 1;
-        break;
-      case '--color':
-        options.color = value;
-        i += 1;
-        break;
-      case '--oss':
-        options.oss = value;
-        i += 1;
-        break;
-      case '--local-provider':
-        options.localProvider = value;
-        i += 1;
-        break;
-      case '--skip-git-repo-check':
-        options.skipGitRepoCheck = value;
-        i += 1;
-        break;
-      case '--ephemeral':
-        options.ephemeral = value;
-        i += 1;
-        break;
-      case '--full-auto':
-        options.fullAuto = value;
-        i += 1;
-        break;
-      case '--lane-id':
-        options.laneId = value;
-        i += 1;
-        break;
-      case '--key-path':
-        options.keyPath = value;
-        i += 1;
-        break;
-      case '--host-state-dir':
-        options.hostStateDir = value;
-        i += 1;
-        break;
-      case '--identity-nonce':
-        options.identityNonce = value;
-        i += 1;
-        break;
-      case '--boot-nonce':
-        options.bootNonce = value;
-        i += 1;
-        break;
-      case '--session-name':
-        options.sessionName = value;
-        i += 1;
-        break;
-      case '--session-id':
-        options.sessionId = value;
-        i += 1;
-        break;
-      case '--scope-type':
-        options.scopeType = value;
-        i += 1;
-        break;
-      case '--scope-mode':
-        options.scopeMode = value;
-        i += 1;
-        break;
-      case '--scope-path':
-      case '--scope-paths':
-        options.scopePaths = options.scopePaths ? `${options.scopePaths},${value}` : value;
-        i += 1;
-        break;
-      case '--resource-mode':
-        options.resourceMode = value;
-        i += 1;
-        break;
-      case '--resource':
-      case '--resources':
-        options.resources = options.resources ? `${options.resources},${value}` : value;
-        i += 1;
-        break;
-      case '--auth-fd':
-        options.authFd = value;
-        i += 1;
-        break;
-      case '--poll-interval-ms':
-        options.pollIntervalMs = value;
-        i += 1;
-        break;
-      case '--idle-timeout-ms':
-        options.idleTimeoutMs = value;
-        i += 1;
-        break;
-      case '--launch-daemon-helper':
-        options.launchDaemonHelper = true;
-        break;
-      case '--daemon':
-        options.daemon = true;
-        break;
-      default:
-        break;
-    }
-  }
-
-  return options;
+  return parseBaseArgs(argv);
 }
 
 export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()) {
   if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
   if (!rawOptions.sessionName) throw new Error('Provide --session-name.');
+  if (!rawOptions.wrapperCommand) throw new Error('Provide --wrapper-command for --tool prompt-wrapper.');
 
   const guardrailRepo = rawOptions.guardrailRepo
     ? resolve(baseCwd, rawOptions.guardrailRepo)
@@ -236,22 +66,17 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     : (keyPath ? dirname(dirname(keyPath)) : resolve(guardrailRepo, '.guardrail'));
 
   return {
-    adapterId: 'codex',
+    adapterId: 'prompt-wrapper',
     laneDir,
     guardrailRepo,
     workingDir,
-    model: rawOptions.model || '',
-    profile: rawOptions.profile || '',
-    sandbox: rawOptions.sandbox || '',
+    wrapperCommand: resolve(baseCwd, rawOptions.wrapperCommand),
+    wrapperArgs: Array.isArray(rawOptions.wrapperArgs)
+      ? rawOptions.wrapperArgs.flatMap((entry) => splitCsv(entry))
+      : splitCsv(rawOptions.wrapperArgs || ''),
     addDirs: splitCsv(rawOptions.addDirs).map((dir) => resolve(workingDir, dir)),
     inputFiles: splitCsv(rawOptions.inputFiles),
-    imageFiles: splitCsv(rawOptions.imageFiles).map((file) => resolve(workingDir, file)),
-    color: rawOptions.color || '',
-    oss: shellTruthy(rawOptions.oss),
-    localProvider: rawOptions.localProvider || '',
-    skipGitRepoCheck: shellTruthy(rawOptions.skipGitRepoCheck),
-    ephemeral: shellTruthy(rawOptions.ephemeral),
-    fullAuto: shellTruthy(rawOptions.fullAuto),
+    systemPrompt: rawOptions.systemPrompt || '',
     laneId: rawOptions.laneId || '',
     scopeType: scope.scopeType,
     scopeMode: scope.scopeMode,
@@ -264,40 +89,34 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     bootNonce: rawOptions.bootNonce || '',
     sessionName: rawOptions.sessionName,
     sessionId: rawOptions.sessionId || '',
-    noSessionPersistence: false,
+    noSessionPersistence: shellTruthy(rawOptions.noSessionPersistence),
     authFd: parseInteger(rawOptions.authFd, null, 'auth_fd', 3),
     pollIntervalMs: parseInteger(rawOptions.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, 'poll_interval_ms', 50),
     idleTimeoutMs: parseInteger(rawOptions.idleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS, 'idle_timeout_ms', 1000),
     launchDaemonHelper: rawOptions.launchDaemonHelper === true,
     daemon: rawOptions.daemon === true,
+    tool: 'prompt-wrapper',
   };
 }
 
 function buildWrapperArgs(options, request, lifecycle) {
-  const wrapperPath = resolve(options.guardrailRepo, 'src/codex-exec-wrapper.js');
-  const args = [wrapperPath, '--prompt', request.prompt];
-  if (options.inputFiles.length > 0) args.push('--input-files', options.inputFiles.join(','));
-  if (options.model) args.push('--model', options.model);
-  if (options.profile) args.push('--profile', options.profile);
-  if (options.sandbox) args.push('--sandbox', options.sandbox);
-  args.push('--working-dir', options.workingDir);
-  if (options.addDirs.length > 0) args.push('--add-dirs', options.addDirs.join(','));
-  if (options.imageFiles.length > 0) args.push('--image-files', options.imageFiles.join(','));
-  if (options.color) args.push('--color', options.color);
-  if (options.oss) args.push('--oss', 'true');
-  if (options.localProvider) args.push('--local-provider', options.localProvider);
-  if (options.skipGitRepoCheck) args.push('--skip-git-repo-check', 'true');
-  if (options.ephemeral) args.push('--ephemeral', 'true');
-  if (options.fullAuto) args.push('--full-auto', 'true');
-  args.push('--session-name', options.sessionName);
-  args.push('--lifecycle', lifecycle);
+  const args = [
+    ...options.wrapperArgs,
+    '--prompt', request.prompt,
+    '--working-dir', options.workingDir,
+    '--session-name', options.sessionName,
+    '--lifecycle', lifecycle,
+  ];
   if (options.sessionId) args.push('--session-id', options.sessionId);
+  if (options.inputFiles.length > 0) args.push('--input-files', options.inputFiles.join(','));
+  if (options.addDirs.length > 0) args.push('--add-dirs', options.addDirs.join(','));
+  if (options.systemPrompt) args.push('--system-prompt', options.systemPrompt);
   return args;
 }
 
-async function spawnCodexWrapper(args, cwd) {
+async function spawnWrapperCommand(command, args, cwd) {
   return await new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(process.execPath, args, {
+    const child = spawn(command, args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
@@ -313,7 +132,7 @@ async function spawnCodexWrapper(args, cwd) {
     child.on('error', rejectPromise);
     child.on('close', (code, signal) => {
       if (signal) {
-        resolvePromise({ code: 1, stdout, stderr: `${stderr}\ncodex wrapper exited on signal ${signal}`.trim() });
+        resolvePromise({ code: 1, stdout, stderr: `${stderr}\nprompt wrapper exited on signal ${signal}`.trim() });
         return;
       }
       resolvePromise({ code: code ?? 1, stdout, stderr });
@@ -323,8 +142,8 @@ async function spawnCodexWrapper(args, cwd) {
 
 const selfPath = fileURLToPath(import.meta.url);
 
-const CODEX_LANE_ADAPTER = {
-  adapterId: 'codex',
+const PROMPT_WRAPPER_ADAPTER = {
+  adapterId: 'prompt-wrapper',
   buildHelperArgs(options, helperAuthFd) {
     const args = [
       selfPath,
@@ -332,6 +151,12 @@ const CODEX_LANE_ADAPTER = {
       '--lane-dir', options.laneDir,
       '--guardrail-repo', options.guardrailRepo,
       '--working-dir', options.workingDir,
+      '--tool', 'prompt-wrapper',
+      '--wrapper-command', options.wrapperCommand,
+      '--wrapper-args', options.wrapperArgs.join(','),
+      '--system-prompt', options.systemPrompt || '',
+      '--add-dirs', options.addDirs.join(','),
+      '--input-files', options.inputFiles.join(','),
       '--lane-id', options.laneId || '',
       '--scope-type', options.scopeType || 'none',
       '--scope-mode', options.scopeMode || 'warn',
@@ -342,26 +167,13 @@ const CODEX_LANE_ADAPTER = {
       '--host-state-dir', options.hostStateDir || '',
       '--session-name', options.sessionName,
       '--session-id', options.sessionId || '',
+      '--no-session-persistence', String(options.noSessionPersistence),
       '--poll-interval-ms', String(options.pollIntervalMs),
       '--idle-timeout-ms', String(options.idleTimeoutMs),
-      '--model', options.model,
-      '--profile', options.profile,
-      '--sandbox', options.sandbox,
-      '--add-dirs', options.addDirs.join(','),
-      '--input-files', options.inputFiles.join(','),
-      '--image-files', options.imageFiles.join(','),
-      '--color', options.color,
-      '--oss', String(options.oss),
-      '--local-provider', options.localProvider,
-      '--skip-git-repo-check', String(options.skipGitRepoCheck),
-      '--ephemeral', String(options.ephemeral),
-      '--full-auto', String(options.fullAuto),
       '--identity-nonce', options.identityNonce,
       '--boot-nonce', options.bootNonce,
     ];
-    if (helperAuthFd !== null) {
-      args.push('--auth-fd', String(helperAuthFd));
-    }
+    if (helperAuthFd !== null) args.push('--auth-fd', String(helperAuthFd));
     return args;
   },
   buildDaemonArgs(options, daemonAuthFd) {
@@ -371,6 +183,12 @@ const CODEX_LANE_ADAPTER = {
       '--lane-dir', options.laneDir,
       '--guardrail-repo', options.guardrailRepo,
       '--working-dir', options.workingDir,
+      '--tool', 'prompt-wrapper',
+      '--wrapper-command', options.wrapperCommand,
+      '--wrapper-args', options.wrapperArgs.join(','),
+      '--system-prompt', options.systemPrompt || '',
+      '--add-dirs', options.addDirs.join(','),
+      '--input-files', options.inputFiles.join(','),
       '--lane-id', options.laneId || '',
       '--scope-type', options.scopeType || 'none',
       '--scope-mode', options.scopeMode || 'warn',
@@ -381,33 +199,20 @@ const CODEX_LANE_ADAPTER = {
       '--host-state-dir', options.hostStateDir || '',
       '--session-name', options.sessionName,
       '--session-id', options.sessionId || '',
+      '--no-session-persistence', String(options.noSessionPersistence),
       '--poll-interval-ms', String(options.pollIntervalMs),
       '--idle-timeout-ms', String(options.idleTimeoutMs),
-      '--model', options.model,
-      '--profile', options.profile,
-      '--sandbox', options.sandbox,
-      '--add-dirs', options.addDirs.join(','),
-      '--input-files', options.inputFiles.join(','),
-      '--image-files', options.imageFiles.join(','),
-      '--color', options.color,
-      '--oss', String(options.oss),
-      '--local-provider', options.localProvider,
-      '--skip-git-repo-check', String(options.skipGitRepoCheck),
-      '--ephemeral', String(options.ephemeral),
-      '--full-auto', String(options.fullAuto),
       '--identity-nonce', options.identityNonce || '',
       '--boot-nonce', options.bootNonce || '',
     ];
-    if (daemonAuthFd !== null) {
-      args.push('--auth-fd', String(daemonAuthFd));
-    }
+    if (daemonAuthFd !== null) args.push('--auth-fd', String(daemonAuthFd));
     return args;
   },
   async runRequest(options, request, state, deps = {}) {
-    const runner = deps.runner || spawnCodexWrapper;
+    const runner = deps.runner || spawnWrapperCommand;
     const lifecycle = state.startedConversation ? 'continue' : 'start';
     const startedAt = new Date().toISOString();
-    const result = await runner(buildWrapperArgs(options, request, lifecycle), options.guardrailRepo);
+    const result = await runner(options.wrapperCommand, buildWrapperArgs(options, request, lifecycle), options.guardrailRepo);
     return {
       requestId: request.id,
       prompt: request.prompt,
@@ -423,17 +228,17 @@ const CODEX_LANE_ADAPTER = {
 };
 
 export async function runLaneRequest(options, request, state, deps = {}) {
-  return runResidentLaneRequest(CODEX_LANE_ADAPTER, options, request, state, deps);
+  return runResidentLaneRequest(PROMPT_WRAPPER_ADAPTER, options, request, state, deps);
 }
 
 export async function launchResidentLane(rawOptions, deps = {}) {
   const options = normalizeResidentLaneOptions(rawOptions);
-  return launchResidentLaneWithAdapter(options, CODEX_LANE_ADAPTER, deps);
+  return launchResidentLaneWithAdapter(options, PROMPT_WRAPPER_ADAPTER, deps);
 }
 
 export function launchResidentLaneDaemonHelper(rawOptions) {
   const options = normalizeResidentLaneOptions(rawOptions);
-  return launchResidentLaneDaemonHelperWithAdapter(options, CODEX_LANE_ADAPTER);
+  return launchResidentLaneDaemonHelperWithAdapter(options, PROMPT_WRAPPER_ADAPTER);
 }
 
 async function main() {
@@ -446,7 +251,7 @@ async function main() {
       return;
     }
     if (options.daemon) {
-      await runResidentLaneDaemonWithAdapter(options, CODEX_LANE_ADAPTER);
+      await runResidentLaneDaemonWithAdapter(options, PROMPT_WRAPPER_ADAPTER);
       return;
     }
 
@@ -486,6 +291,6 @@ export {
   stopResidentLane,
   trackLaneRequestId,
   validateLaneRequest,
-  waitForResidentLaneResult,
   waitForResidentLaneBootstrap,
+  waitForResidentLaneResult,
 };

@@ -1,5 +1,7 @@
 import * as claudeLane from './claude-resident-lane.js';
 import * as codexLane from './codex-resident-lane.js';
+import * as localExecLane from './local-exec-resident-lane.js';
+import * as promptWrapperLane from './prompt-wrapper-resident-lane.js';
 export {
   cleanupResidentLane,
   createLaneBootError,
@@ -23,6 +25,8 @@ export {
 const ADAPTERS = {
   claude: claudeLane,
   codex: codexLane,
+  'local-exec': localExecLane,
+  'prompt-wrapper': promptWrapperLane,
 };
 
 function selectedTool(rawOptions = {}) {
@@ -90,6 +94,42 @@ export function parseResidentLaneArgs(argv) {
         break;
       case '--full-auto':
         parsed.fullAuto = value;
+        i += 1;
+        break;
+      case '--resource-mode':
+        parsed.resourceMode = value;
+        i += 1;
+        break;
+      case '--resource':
+      case '--resources':
+        if (!parsed.resources) {
+          parsed.resources = [];
+        }
+        parsed.resources.push(value);
+        i += 1;
+        break;
+      case '--wrapper-command':
+        parsed.wrapperCommand = value;
+        i += 1;
+        break;
+      case '--command':
+        parsed.command = value;
+        i += 1;
+        break;
+      case '--arg':
+      case '--args':
+        if (!parsed.commandArgs) {
+          parsed.commandArgs = [];
+        }
+        parsed.commandArgs.push(value);
+        i += 1;
+        break;
+      case '--wrapper-arg':
+      case '--wrapper-args':
+        if (!parsed.wrapperArgs) {
+          parsed.wrapperArgs = [];
+        }
+        parsed.wrapperArgs.push(value);
         i += 1;
         break;
       default:
