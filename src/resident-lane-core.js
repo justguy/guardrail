@@ -1080,6 +1080,8 @@ export function getResidentLaneHistory(rawOptions = {}) {
 function laneTimelineEntryMatches(entry, rawOptions = {}) {
   if (rawOptions.event && entry.event !== rawOptions.event) return false;
   if (rawOptions.laneId && entry.lane_id !== rawOptions.laneId) return false;
+  if (rawOptions.filterLaneId && entry.lane_id !== rawOptions.filterLaneId) return false;
+  if (rawOptions.requestId && entry.request_id !== rawOptions.requestId) return false;
   if (rawOptions.filterSessionName && entry.session_name !== rawOptions.filterSessionName) return false;
   if (rawOptions.toolFilter) {
     const wantedTools = new Set(Array.isArray(rawOptions.toolFilter) ? rawOptions.toolFilter : splitCsv(rawOptions.toolFilter));
@@ -1097,6 +1099,10 @@ function laneTimelineEntryMatches(entry, rawOptions = {}) {
     if (entryRepo !== requestedRepo) return false;
   }
   return true;
+}
+
+export function residentLanePortfolioAuditPath(rawOptions = {}) {
+  return join(resolve(rawOptions.hostStateDir || defaultHostStateDir()), 'resident-lane-portfolio.jsonl');
 }
 
 function readLaneTimelineAuditEntries(guardrailRepo, rawOptions = {}) {
@@ -1161,6 +1167,10 @@ function readLaneTimelineTombstones(guardrailRepo, rawOptions = {}) {
     }
   }
   return { tombstoneDir: dir, entries };
+}
+
+export function residentLanePortfolioAuditPath(rawOptions = {}) {
+  return join(resolve(rawOptions.hostStateDir || defaultHostStateDir()), 'resident-lane-portfolio.jsonl');
 }
 
 function readLaneTimelinePortfolioAuditEntries(rawOptions = {}) {
@@ -1307,6 +1317,10 @@ export function getResidentLaneTimeline(rawOptions = {}) {
     snapshot,
     entries,
   };
+}
+
+export function getResidentLanePortfolioTimeline(rawOptions = {}) {
+  return getResidentLaneTimeline(rawOptions);
 }
 
 function annotateScopeConflicts(entries) {
