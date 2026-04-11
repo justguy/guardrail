@@ -635,6 +635,53 @@ describe('MCP stdio bounded tool call', () => {
     assert.equal(result.batch.calls[0].result.content[0].text, 'one');
     assert.equal(result.batch.calls[1].result.content[0].text, 'two');
   });
+
+  it('fails closed when batch requests unknown tools under required capability discovery', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeMcpServer(dir, 'success');
+    const profile = {
+      version: '1.0.0',
+      tool: 'test-mcp-batch',
+      description: 'generic mcp profile under test',
+      schema_target: 'adapter-result/v1',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: process.execPath,
+        args: [serverPath],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+      intercept: {
+        command: '$.command',
+        args: '$.args',
+        cwd: '$.cwd',
+      },
+      response: {
+        format: 'json',
+        blocked: { status: 'blocked', reason: '$.guardrail.reason' },
+      },
+      exit_codes: { success: 0, blocked: 12, failed: 1 },
+      defaults: { non_interactive: true, json_output: true },
+    };
+    const profilePath = join(dir, 'test-mcp-batch.json');
+    writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+
+    const result = await callAdapterMcpToolBatch({
+      profilePath,
+      calls: [
+        { tool: 'echo', params: { text: 'one' } },
+        { tool: 'missing-tool', params: { text: 'two' } },
+      ],
+      supervisorFn: runProbeHelperSupervisor,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.adapterResult.guardrail.code, 'VALIDATION_FAILED');
+    assert.ok(result.adapterResult.guardrail.reason.includes('missing-tool'));
+    assert.ok(result.adapterResult.guardrail.reason.includes('echo'));
+  });
 });
 
 // --- 5. Adapter shim helpers -------------------------------------------------

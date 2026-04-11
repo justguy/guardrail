@@ -657,6 +657,38 @@ export async function callAdapterMcpToolBatch(opts = {}) {
     }
   }
 
+  const discoveryMode = profile.mcp_transport?.capability_discovery || 'required';
+  if (discoveryMode === 'required') {
+    const discovery = await probeAdapterMcpStdio({
+      tool,
+      profilePath,
+      cwd: directCwd,
+      supervisorFn,
+      envAllow,
+      authCheckFn,
+      timeoutMs,
+    });
+    if (!discovery.ok) {
+      return {
+        ok: false,
+        adapterResult: discovery.adapterResult,
+        exitCode: discovery.exitCode,
+      };
+    }
+    const knownTools = Array.isArray(discovery.probe?.server?.toolNames)
+      ? discovery.probe.server.toolNames
+      : [];
+    const requestedTools = [...new Set(calls.map((call) => call.tool))];
+    const unknownTools = requestedTools.filter((toolName) => !knownTools.includes(toolName));
+    if (unknownTools.length > 0) {
+      const error = wrapFailed(
+        ADAPTER_REASON_CODES.VALIDATION_FAILED,
+        `Adapter MCP batch requested unknown tools: ${unknownTools.join(', ')}. Declared transport exposed: ${knownTools.join(', ') || '<none>'}.`,
+      );
+      return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+    }
+  }
+
   const preflightResult = await runAdapterPreflight(profile, {
     envAllow,
     cwd: directCwd || process.cwd(),
