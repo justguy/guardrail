@@ -169,6 +169,58 @@ describe('README Feature: Workflow Mode', () => {
     assert.equal(r.exitCode, 0, `Lint should pass for valid external recipe_ref workflow: ${r.stderr}`);
   });
 
+  it('workflow lint accepts recipe_ref workflows from repo-configured default_recipe_roots without explicit flags', () => {
+    const dir = tmpDir();
+    const sharedRecipesDir = join(dir, 'shared-recipes');
+    mkdirSync(sharedRecipesDir, { recursive: true });
+    mkdirSync(join(dir, '.guardrail'), { recursive: true });
+
+    writeFileSync(join(sharedRecipesDir, 'recipe-one.recipe.json'), JSON.stringify({
+      id: 'recipe-one',
+      name: 'Recipe One',
+      description: 'Repo-configured workflow recipe',
+      version: '1.0.0',
+      author: 'test',
+      category: 'custom',
+      channel: 'community',
+      approval_required: true,
+      risk_level: 'low',
+      inputs: {},
+      steps: [{ id: 'main', description: 'echo one', run: { command: 'echo', args: ['one'], mode: 'structured' } }],
+      guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+    }, null, 2));
+
+    writeFileSync(join(dir, '.guardrail', 'config.json'), JSON.stringify({
+      default_recipe_roots: ['./shared-recipes'],
+    }, null, 2));
+
+    const def = {
+      version: 1,
+      kind: 'workflow_definition',
+      name: 'repo-config-recipe-search-wf',
+      projectRoot: '.',
+      entryStep: 'step_a',
+      maxIterations: 3,
+      services: [],
+      rollback_policy: 'none',
+      rollback_none_reason: 'single bounded recipe step for lint coverage',
+      steps: [{
+        id: 'step_a',
+        type: 'recipe_ref',
+        recipe: 'recipe-one',
+        inputs: {},
+        on: { success: 'done', failure: 'abort' },
+      }],
+    };
+    writeFileSync(join(dir, 'wf.json'), JSON.stringify(def, null, 2));
+
+    const r = run(
+      `${CLI} workflow lint --definition ${join(dir, 'wf.json')}`,
+      { cwd: dir },
+    );
+    assert.equal(r.exitCode, 0, `Lint should pass for repo-configured recipe roots: ${r.stderr}`);
+  });
+
   it('workflow lint rejects invalid definitions', () => {
     const dir = tmpDir();
     writeFileSync(join(dir, 'bad.json'), '{"not": "a workflow"}');
@@ -862,6 +914,92 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(laneSendEntry.trace_id, 'lane:resident');
   });
 
+  it('guardrail lane chat waits for the result and prints one guarded chat turn', async () => {
+    const dir = tmpDir();
+    const guardrailRepo = join(dir, 'repo');
+    const laneDir = join(dir, 'lane');
+    mkdirSync(join(guardrailRepo, '.guardrail'), { recursive: true });
+    mkdirSync(laneDir, { recursive: true });
+    const requestFifo = join(laneDir, 'requests.fifo');
+    const responseFifo = join(laneDir, 'responses.fifo');
+    assert.equal(spawnSync('mkfifo', [requestFifo]).status, 0);
+    assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'chat-live',
+      sessionName: 'chat-live',
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const laneServer = (async () => {
+      const requestFd = openSync(requestFifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+      let responseFd = null;
+      const chunk = Buffer.alloc(4096);
+      let buffer = '';
+      const startedAt = Date.now();
+      try {
+        for (;;) {
+          if ((Date.now() - startedAt) > 5000) {
+            throw new Error('Timed out waiting for lane request');
+          }
+          try {
+            const bytesRead = readSync(requestFd, chunk, 0, chunk.length, null);
+            if (bytesRead > 0) {
+              buffer += chunk.toString('utf8', 0, bytesRead);
+              const newlineIndex = buffer.indexOf('\n');
+              if (newlineIndex >= 0) {
+                const request = JSON.parse(buffer.slice(0, newlineIndex));
+                responseFd = openSync(responseFifo, fsConstants.O_WRONLY);
+                writeSync(responseFd, `${JSON.stringify({ requestId: request.id, ok: true, stdout: 'hello back\n' })}\n`, undefined, 'utf8');
+                return;
+              }
+            }
+          } catch (err) {
+            if (err?.code !== 'EAGAIN') throw err;
+          }
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+        }
+      } finally {
+        closeSync(requestFd);
+        if (responseFd !== null) closeSync(responseFd);
+      }
+    })();
+
+    const laneChat = new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn('node', [
+        join(process.cwd(), 'src', 'cli.js'),
+        'lane', 'chat',
+        '--guardrail-repo', guardrailRepo,
+        '--lane-dir', laneDir,
+        '--prompt', 'hello',
+      ], {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', rejectPromise);
+      child.on('close', (code) => {
+        resolvePromise({ exitCode: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
+      });
+    });
+
+    const [result] = await Promise.all([laneChat, laneServer]);
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.ok(result.stdout.startsWith('hello back'));
+    const entries = queryAuditLog(join(guardrailRepo, '.guardrail', 'audit.jsonl'), {});
+    const laneChatEntry = entries.find((entry) => entry.event === 'lane_chat');
+    assert.ok(laneChatEntry, 'expected lane_chat audit entry');
+    assert.equal(laneChatEntry.status, 'success');
+  });
+
   it('guardrail lane send returns lane_expired when the host key is missing', () => {
     const dir = tmpDir();
     const laneDir = join(dir, 'lane');
@@ -1326,6 +1464,50 @@ describe('README Feature: Resident Lane Mode', () => {
     const cleanupEntry = entries.find((entry) => entry.event === 'lane_cleanup');
     assert.ok(cleanupEntry, 'expected lane_cleanup audit entry');
     assert.equal(cleanupEntry.status, 'success');
+  });
+
+  it('guardrail lane batch previews and cleans multiple failed lanes', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const lanesDir = join(repoDir, '.guardrail', 'lanes');
+    mkdirSync(join(repoDir, '.guardrail'), { recursive: true });
+    for (const laneId of ['math-failed-a', 'math-failed-b']) {
+      const laneDir = join(lanesDir, laneId);
+      mkdirSync(laneDir, { recursive: true });
+      const keyPath = join(dir, `${laneId}.key`);
+      writeFileSync(keyPath, 'secret\n', 'utf8');
+      writeFileSync(join(laneDir, 'identity.json'), JSON.stringify({
+        laneId,
+        laneDir,
+        guardrailRepo: repoDir,
+        keyPath,
+        identityNonce: `nonce-${laneId}`,
+      }), 'utf8');
+      writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+        pid: 999999,
+        status: 'failed',
+        laneId,
+        sessionName: laneId,
+        keyPath,
+        failureReason: 'boot failed',
+        failureStage: 'post_start',
+        lastActivityAt: new Date().toISOString(),
+      }), 'utf8');
+    }
+
+    const preview = run(`${CLI} lane batch --guardrail-repo ${repoDir} --action cleanup --status failed --all --dry-run --json`);
+    assert.equal(preview.exitCode, 0, preview.stderr);
+    const previewParsed = JSON.parse(preview.stdout);
+    assert.equal(previewParsed.action, 'cleanup');
+    assert.equal(previewParsed.count, 2);
+
+    const actual = run(`${CLI} lane batch --guardrail-repo ${repoDir} --action cleanup --status failed --all --json`);
+    assert.equal(actual.exitCode, 0, actual.stderr);
+    const parsed = JSON.parse(actual.stdout);
+    assert.equal(parsed.results.length, 2);
+    assert.ok(parsed.results.every((entry) => entry.status === 'success'));
+    const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
+    assert.ok(entries.some((entry) => entry.event === 'lane_batch'), 'expected lane_batch audit entry');
   });
 });
 
@@ -1839,6 +2021,14 @@ describe('README Feature: Recipe Execution + Versioning', () => {
         cmd: `${CLI} run --recipe git-push --input repo_path=. --input remote=origin --input branch=feature/demo --dry-run`,
         expect: '--branch feature/demo',
       },
+      {
+        cmd: `${CLI} run --recipe git-commit-amend --input repo_path=. --input guardrail_repo=. --input message_file=README.md --input expected_head=abcdef123456789 --dry-run`,
+        expect: '--expected-head',
+      },
+      {
+        cmd: `${CLI} run --recipe git-force-push-safe --input repo_path=. --input remote=origin --input branch=feature/demo --input expected_head=abcdef123456789 --input expected_remote_oid=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --dry-run`,
+        expect: '--expected-remote-oid',
+      },
     ];
     for (const check of checks) {
       const r = runRecipeDocCommand(check.cmd);
@@ -1853,6 +2043,10 @@ describe('README Feature: Recipe Execution + Versioning', () => {
       {
         cmd: `${CLI} run --recipe openclaw-debug-ci --dry-run`,
         expect: 'debug-ci',
+      },
+      {
+        cmd: `${CLI} run --recipe openclaw-deploy --input environment=preview --input service_manifest=package.json --input release_file=package.json --dry-run`,
+        expect: 'deploy',
       },
     ];
     for (const check of checks) {
@@ -1876,6 +2070,8 @@ describe('README Feature: Recipe Execution + Versioning', () => {
       `${CLI} run --recipe openclaw-fix-tests --dry-run`,
       `${CLI} run --recipe openclaw-debug-ci --dry-run`,
       `${CLI} run --recipe openclaw-wrapper --input flow_id=fix-tests --input scope=write --dry-run`,
+      `${CLI} run --recipe git-commit-amend --input repo_path=. --input guardrail_repo=. --input message_file=README.md --input expected_head=aaaaaaaaaaaaaaa --dry-run`,
+      `${CLI} run --recipe git-force-push-safe --input repo_path=. --input remote=origin --input branch=feature/demo --input expected_head=aaaaaaaaaaaaaaa --input expected_remote_oid=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --dry-run`,
     ];
     for (const cmd of runs) {
       const r = runRecipeDocCommand(cmd);

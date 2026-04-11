@@ -2,11 +2,20 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { getRepoStatusSummary } from './repo-status.js';
 
-export const TOPIC_BRANCH_RE = /^(feature|fix|bugfix|chore|docs|test|ci)\/[A-Za-z0-9._/-]{1,100}$/;
+export const TOPIC_BRANCH_RE = /^(feature|bugfix|chore|docs|refactor|test|ci)\/[A-Za-z0-9._/-]{1,96}$/;
 export const PROTECTED_BRANCH_RE = /^(main|master|production|prod|staging|release\/.+)$/;
+export const OID_RE = /^[0-9a-fA-F]{7,40}$/;
 
 export function isProtectedBranch(branch) {
   return typeof branch === 'string' && PROTECTED_BRANCH_RE.test(branch);
+}
+
+export function normalizeRepoPath(rawRepoPath = '.') {
+  return resolve(rawRepoPath);
+}
+
+export function isTopicBranch(branch) {
+  return typeof branch === 'string' && TOPIC_BRANCH_RE.test(branch);
 }
 
 export function validateSafePush({ repoPath = '.', remote = 'origin', branch, status }) {
@@ -14,8 +23,8 @@ export function validateSafePush({ repoPath = '.', remote = 'origin', branch, st
   if (remote !== 'origin') {
     errors.push('Only the "origin" remote is allowed.');
   }
-  if (typeof branch !== 'string' || !TOPIC_BRANCH_RE.test(branch)) {
-    errors.push('branch must be a topic branch such as feature/*, fix/*, bugfix/*, chore/*, docs/*, test/*, or ci/*');
+  if (typeof branch !== 'string' || !isTopicBranch(branch)) {
+    errors.push('branch must be a topic branch such as feature/*, bugfix/*, chore/*, docs/*, refactor/*, test/*, or ci/*');
   }
   if (isProtectedBranch(branch)) {
     errors.push(`Refusing to push protected branch "${branch}".`);
@@ -42,6 +51,25 @@ export function validateSafePush({ repoPath = '.', remote = 'origin', branch, st
   return errors;
 }
 
+export function assertRemoteExists(repoPath, remote) {
+  const result = spawnSync('git', ['-C', repoPath, 'remote', 'get-url', remote], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || `Remote "${remote}" is not configured.`).trim());
+  }
+}
+
+export function readGitRef(repoPath, ref) {
+  const result = spawnSync('git', ['-C', repoPath, 'rev-parse', ref], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || `Unable to resolve ${ref}`).trim());
+  }
+  const value = String(result.stdout).trim();
+  if (!value) {
+    throw new Error(`Unable to resolve ${ref}`);
+  }
+  return value;
+}
+
 function parseArgs(argv) {
   const parsed = { repoPath: '.', remote: 'origin', branch: null };
   for (let i = 0; i < argv.length; i += 1) {
@@ -59,20 +87,13 @@ function parseArgs(argv) {
   return parsed;
 }
 
-function assertRemoteExists(repoPath, remote) {
-  const result = spawnSync('git', ['-C', repoPath, 'remote', 'get-url', remote], { encoding: 'utf8' });
-  if (result.status !== 0) {
-    throw new Error((result.stderr || result.stdout || `Remote "${remote}" is not configured.`).trim());
-  }
-}
-
 function main(argv) {
   const parsed = parseArgs(argv);
   if (!parsed.branch) {
     throw new Error('--branch is required');
   }
 
-  const repoPath = resolve(parsed.repoPath);
+  const repoPath = normalizeRepoPath(parsed.repoPath);
   const status = getRepoStatusSummary(repoPath);
   const errors = validateSafePush({
     repoPath,

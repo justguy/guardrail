@@ -27,7 +27,7 @@
     "branch": {
       "type": "string",
       "description": "Feature-style destination branch name",
-      "pattern": "^(feature|bugfix|chore|docs|refactor|test)/[A-Za-z0-9._/-]{1,96}$"
+      "pattern": "^(feature|bugfix|chore|docs|refactor|test|ci)/[A-Za-z0-9._/-]{1,96}$"
     }
   },
   "steps": [
