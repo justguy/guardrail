@@ -96,6 +96,8 @@ Invoke Claude through Guardrail with:
 - the packet’s expected report artifact path
 - the packet’s focused tests
 - explicit instruction not to start the next packet
+- an edit-capable permission mode for autonomous write-bearing packets (`acceptEdits`, not `default`)
+- explicit instruction to create the declared report artifact immediately, write a short `STARTED` status plus intended proof steps, and append concise progress checkpoints there while the packet is running
 
 The Claude run must be packet-bounded, not “finish the whole roadmap.”
 
@@ -106,6 +108,7 @@ The packet is not complete unless the declared file exists, for example:
 - `docs/plans/REPORT_enterprise_P0a_universal_authorization_seam.md`
 
 No report file means no completion, even if stdout looked good.
+No delayed report creation either: for long-running packets, the report file is also the live progress heartbeat.
 
 ### 4. Review and Fix
 
@@ -162,6 +165,12 @@ Required monitoring behaviors:
 - treat `missing report artifact` as a hard failure
 - treat `focused tests did not pass` as a hard failure
 - treat `Claude completed but touched the wrong scope` as a hard failure
+- treat `stale report heartbeat` as a warning, not a terminal failure, if other bounded signals still show forward motion
+- only treat a long-running packet as stalled when all bounded liveness signals are silent across the stall window:
+  - no Guardrail progress events
+  - no update to the declared report artifact
+  - no bounded file changes in the packet's declared target files
+  - no process-level forward motion
 - stop on packet drift instead of continuing and hoping the next packet fixes it
 
 ## Known Risks This Trial Is Meant To Surface

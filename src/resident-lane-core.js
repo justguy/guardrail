@@ -20,8 +20,8 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { acquireLock } from './runtime-policy.js';
 import { queryAuditLog, verifyAuditChain } from './audit.js';
+import { authorize, ACTIONS } from './authorization.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -461,15 +461,6 @@ function removeLaneClaim(laneId, keyPath = '', match = null) {
     if (match.laneDir && resolve(current.laneDir || '') !== resolve(match.laneDir)) return;
   }
   removeIfExists(claimPath);
-}
-
-function acquireLaneStartupLock(lockKey, stateDir, failureMessage) {
-  const lock = acquireLock(lockKey, [], stateDir, STARTUP_LOCK_TTL_MS);
-  if (lock.acquired) return lock;
-  throw createLaneBootError(failureMessage, {
-    failureStage: 'bootstrap',
-    lockDetail: lock.detail || null,
-  });
 }
 
 function laneClaimIsLive(claim) {
@@ -2143,26 +2134,36 @@ export async function launchResidentLaneWithAdapter(options, adapter, deps = {})
     .digest('hex');
   const localStartupStateDir = join(optionsWithIdentity.laneDir, '.startup-locks');
   mkdirSync(localStartupStateDir, { recursive: true });
-  const localStartupLock = acquireLock(startupLockKey, [], localStartupStateDir, STARTUP_LOCK_TTL_MS);
-  if (!localStartupLock.acquired) {
-    throw createLaneBootError('Another Guardrail process is already starting this resident lane.', {
-      failureStage: 'bootstrap',
-      startupLockDetail: localStartupLock.detail || null,
-    });
-  }
   const startupStateDir = laneStartupStateDir(optionsWithIdentity);
   mkdirSync(startupStateDir, { recursive: true });
   const globalStartupLockKey = createHash('sha256')
     .update(`resident-lane-global-start:${stableRepoOwnerId(optionsWithIdentity.guardrailRepo)}:${optionsWithIdentity.laneId || laneDirFingerprint(optionsWithIdentity.laneDir)}`)
     .digest('hex');
-  const startupLock = acquireLock(globalStartupLockKey, [], startupStateDir, STARTUP_LOCK_TTL_MS);
-  if (!startupLock.acquired) {
-    localStartupLock.release?.();
-    throw createLaneBootError('Another Guardrail process is already starting this resident lane from another checkout or repo surface.', {
+  const startupAuth = await authorize(ACTIONS.LANE_START, {
+    startupLocks: [
+      {
+        key: startupLockKey,
+        stateDir: localStartupStateDir,
+        ttlMs: STARTUP_LOCK_TTL_MS,
+        checkName: 'lane_local_startup_lock',
+        failureMessage: 'Another Guardrail process is already starting this resident lane.',
+      },
+      {
+        key: globalStartupLockKey,
+        stateDir: startupStateDir,
+        ttlMs: STARTUP_LOCK_TTL_MS,
+        checkName: 'lane_global_startup_lock',
+        failureMessage: 'Another Guardrail process is already starting this resident lane from another checkout or repo surface.',
+      },
+    ],
+  });
+  if (!startupAuth.allowed) {
+    throw createLaneBootError(startupAuth.reason, {
       failureStage: 'bootstrap',
-      startupLockDetail: startupLock.detail || null,
+      startupLockDetail: startupAuth.trace?.checks?.find((check) => check.result === 'deny')?.detail?.detail || null,
     });
   }
+  const startupLock = { release: startupAuth.release };
 
   try {
     const comparableLanes = collectComparableLaneEntries({
@@ -2413,7 +2414,6 @@ export async function launchResidentLaneWithAdapter(options, adapter, deps = {})
     }
     return launchSummary;
   } finally {
-    localStartupLock.release?.();
     startupLock.release?.();
   }
 }

@@ -1,4 +1,5 @@
 import { join, resolve } from 'node:path';
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 
 import { resolveRecipeById, resolveInputs, parseRecipeSpecifier } from './recipe-runner.js';
 import {
@@ -19,6 +20,10 @@ import {
   emitProgress,
   emitExecutionEnd,
   mapResultStatusToProgressStatus,
+  emitAiProgress,
+  parseAiProgressLine,
+  AI_HEARTBEAT_POLICY,
+  AI_SOFT_STATES,
 } from './progress-events.js';
 import {
   createLogger,
@@ -31,13 +36,13 @@ import {
 } from './logger.js';
 import { promptApproval, STATUS_EXIT_CODES } from './supervisor.js';
 import { persistStateSafe } from './shared.js';
-import { checkTimePolicy, acquireLock } from './runtime-policy.js';
 import { createAuditLog } from './audit.js';
 import {
   prepareSessionEnforcement,
   persistSessionContractAfterSuccess,
 } from './agent-session-enforce.js';
 import { checkEnvMappings, checkAuthPrerequisites, deriveAuthEnvRequirements } from './adapter-auth.js';
+import { authorize, ACTIONS } from './authorization.js';
 
 function buildResult(runId, status, opts = {}) {
   return {
@@ -107,6 +112,117 @@ function maxRisk(a, b) {
 
 const HOST_BOUNDARY_RECIPE_IDS = new Set(['claude-exec', 'codex-exec', 'cmux-claude-exec']);
 const HOST_BOUNDARY_WARNING = 'Guardrail does not sandbox host execution; this wrapper relies on the tool/runtime permission model';
+
+// D0y: Recipe IDs that support the AI progress channel.
+const AI_PROGRESS_RECIPE_IDS = new Set(['claude-exec', 'cmux-claude-exec']);
+
+function isAiProgressRecipe(recipe) {
+  return AI_PROGRESS_RECIPE_IDS.has(recipe?.id) &&
+    recipe?.progress_channel?.enabled === true;
+}
+
+function initAiProgressFiles(stateDir, initialState = null) {
+  const progressFile = join(stateDir, 'ai-progress.ndjson');
+  const progressStateFile = join(stateDir, 'ai-progress-state.json');
+  try {
+    if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true });
+    // Create (or truncate) the progress file so it exists before Claude starts.
+    writeFileSync(progressFile, '');
+    // Write initial progress state so the CLI inspection surface has something
+    // to show even before the first AI checkpoint arrives.
+    if (initialState) {
+      writeFileSync(progressStateFile, JSON.stringify(initialState, null, 2) + '\n');
+    }
+  } catch {
+    // Non-fatal: progress file creation must not abort the run.
+  }
+  return { progressFile, progressStateFile };
+}
+
+function readAiProgressState(progressStateFile) {
+  if (!progressStateFile || !existsSync(progressStateFile)) return null;
+  try {
+    return JSON.parse(readFileSync(progressStateFile, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function readAiProgressEvents(progressFile) {
+  if (!progressFile || !existsSync(progressFile)) return [];
+  try {
+    return readFileSync(progressFile, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Build an onStderr relay callback for executeRecipe that parses
+ * [guardrail-ai-progress] lines from the wrapper and emits them through the
+ * progress sink as ai_checkpoint events. Also detects soft states and stores
+ * any continuation-relevant session metadata.
+ */
+function buildAiProgressRelay({ progressSink, runId, stateDir, progressStateFile }) {
+  let lineBuffer = '';
+  let lastSoftState = null;
+  // D0y: track time of the most recent AI progress event for stall detection.
+  let lastEventTime = Date.now();
+
+  return {
+    onStderr(chunk) {
+      lineBuffer += chunk;
+      const parts = lineBuffer.split('\n');
+      lineBuffer = parts.pop() ?? '';
+
+      for (const line of parts) {
+        const evt = parseAiProgressLine(line);
+        if (!evt) continue;
+
+        // Refresh the heartbeat timestamp on every successfully parsed event.
+        lastEventTime = Date.now();
+
+        emitAiProgress(progressSink, runId, evt.event ?? 'ai_checkpoint', {
+          ...evt,
+          tool: evt.tool ?? 'claude',
+        });
+
+        // Track soft states so the supervisor can surface continuation guidance.
+        const state = evt.status ?? null;
+        if (state && AI_SOFT_STATES.has(state)) {
+          lastSoftState = state;
+          // Persist updated state file with continuation hint.
+          if (progressStateFile) {
+            const current = readAiProgressState(progressStateFile) || {};
+            const updated = {
+              ...current,
+              status: state,
+              lastEvent: evt.event,
+              lastMessage: evt.message ?? null,
+              lastTimestamp: evt.timestamp ?? new Date().toISOString(),
+              continuationCommand: buildContinuationCommand(stateDir, evt),
+            };
+            try {
+              writeFileSync(progressStateFile, JSON.stringify(updated, null, 2) + '\n');
+            } catch { /* non-fatal */ }
+          }
+        }
+      }
+    },
+    getLastSoftState() { return lastSoftState; },
+    /** Returns the epoch-ms timestamp of the last successfully parsed AI progress event. */
+    getLastEventTime() { return lastEventTime; },
+  };
+}
+
+function buildContinuationCommand(stateDir, _evt) {
+  if (!stateDir) return null;
+  return `guardrail recipe continue --state-dir ${stateDir} --prompt "<your response>"`;
+}
 
 function hasHostBoundaryWarning(recipe) {
   return HOST_BOUNDARY_RECIPE_IDS.has(recipe?.id);
@@ -668,22 +784,6 @@ export async function runRecipeSupervisor(options) {
       cwd: resolvedCwd,
       authCheckFn,
     });
-    if (!preflight.ok) {
-      logger.error('recipe_auth_preflight_failed', {
-        recipeId: recipe.id,
-        code: preflight.code,
-        reason: preflight.reason,
-      });
-      if (!jsonOutput) {
-        printResult({ success: false, exitCode: 1, message: preflight.reason });
-      }
-      return emitFinalResult('policy_violation', { ...resultOpts, reason: preflight.reason });
-    }
-
-    const envResult = preflight.envIntersection;
-    for (const warning of envResult.warnings) {
-      logger.warn('recipe_env_warning', { recipeId: recipe.id, warning });
-    }
 
     let sessionEnforcement = { enforced: false };
     try {
@@ -710,26 +810,25 @@ export async function runRecipeSupervisor(options) {
       return emitFinalResult('policy_violation', { ...resultOpts, reason });
     }
 
-    if (sessionEnforcement.enforced && !sessionEnforcement.evaluation.ok) {
-      const evaluation = sessionEnforcement.evaluation;
-      const reason = `Agent session contract blocked: ${evaluation.code} — ${evaluation.reason}`;
-      logger.warn('session_contract_blocked', {
+    const authGate = await authorize(ACTIONS.RECIPE_AUTH, { preflight, sessionEnforcement });
+    if (!authGate.allowed) {
+      logger.error('recipe_auth_denied', {
         recipeId: recipe.id,
-        code: evaluation.code,
-        reason: evaluation.reason,
-        diffs: evaluation.diffs ?? [],
+        code:     authGate.code,
+        reason:   authGate.reason,
       });
-      state.terminalReason = reason;
+      state.terminalReason = authGate.reason;
       persistStateSafe(stateDir, state);
-      emitRecipeProgress(progressSink, runId, 'approval_pending', { reason, message: reason });
+      emitRecipeProgress(progressSink, runId, 'approval_pending', { reason: authGate.reason, message: authGate.reason });
       if (!jsonOutput) {
-        printResult({
-          success: false,
-          exitCode: STATUS_EXIT_CODES.policy_violation,
-          message: reason,
-        });
+        printResult({ success: false, exitCode: STATUS_EXIT_CODES.policy_violation, message: authGate.reason });
       }
-      return emitFinalResult('policy_violation', { ...resultOpts, reason });
+      return emitFinalResult('policy_violation', { ...resultOpts, reason: authGate.reason });
+    }
+
+    const envResult = authGate.envIntersection;
+    for (const warning of envResult.warnings) {
+      logger.warn('recipe_env_warning', { recipeId: recipe.id, warning });
     }
 
     try {
@@ -946,32 +1045,31 @@ export async function runRecipeSupervisor(options) {
 
     const auditLog = createAuditLog(resolve(stateDir, 'audit.jsonl'));
 
-    if (runtimeLimits) {
-      const timeCheck = checkTimePolicy(runtimeLimits, recipeHash, stateDir);
-      if (!timeCheck.allowed) {
-        const reason = timeCheck.errors.map(e => e.detail).join('; ');
-        auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: recipeHash, reason });
-        state.terminalReason = reason;
-        persistStateSafe(stateDir, state);
-        if (!jsonOutput) {
-          printResult({ success: false, exitCode: STATUS_EXIT_CODES.time_policy_violated, message: `Time policy violated: ${reason}` });
-        }
-        return emitFinalResult('time_policy_violated', { ...resultOpts, reason });
+    const recipeRuntimeAuth = await authorize(ACTIONS.RECIPE_RUN, {
+      runtimeLimits,
+      manifestHash: recipeHash,
+      stateDir,
+    });
+    if (!recipeRuntimeAuth.allowed) {
+      logger.error('recipe_runtime_authorization_denied', {
+        code:   recipeRuntimeAuth.code,
+        reason: recipeRuntimeAuth.reason,
+      });
+      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: recipeHash, reason: recipeRuntimeAuth.reason });
+      state.terminalReason = recipeRuntimeAuth.reason;
+      persistStateSafe(stateDir, state);
+      if (!jsonOutput) {
+        const status = recipeRuntimeAuth.code === 'time_policy_violated'
+          ? 'time_policy_violated'
+          : 'concurrent_blocked';
+        printResult({ success: false, exitCode: STATUS_EXIT_CODES[status], message: recipeRuntimeAuth.reason });
       }
+      const status = recipeRuntimeAuth.code === 'time_policy_violated'
+        ? 'time_policy_violated'
+        : 'concurrent_blocked';
+      return emitFinalResult(status, { ...resultOpts, reason: recipeRuntimeAuth.reason });
     }
-
-    const lockResult = acquireLock(recipeHash, [], stateDir);
-      if (!lockResult.acquired) {
-        const reason = lockResult.detail;
-        auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: recipeHash, reason });
-        state.terminalReason = reason;
-        persistStateSafe(stateDir, state);
-        if (!jsonOutput) {
-          printResult({ success: false, exitCode: STATUS_EXIT_CODES.concurrent_blocked, message: `Concurrent execution blocked: ${reason}` });
-        }
-        return emitFinalResult('concurrent_blocked', { ...resultOpts, reason });
-      }
-    lockRelease = lockResult.release;
+    lockRelease = recipeRuntimeAuth.release;
 
     emitRecipeProgress(progressSink, runId, 'execution_start', {
       message: `Recipe execution started for ${recipe.id}`,
@@ -1012,17 +1110,114 @@ export async function runRecipeSupervisor(options) {
       attempt: 1,
     });
 
-    const execution = await executorFn(recipe, resolvedInputs, {
-      allowUnverified,
-      envAllow: envResult.intersection,
-      composedSteps: composedBindings.byStepId,
-      cwd: resolvedCwd,
-      stateDir,
-      approved: true,
-      traceId: runId,
-      auditLog,
-      manifestHash: recipeHash,
-    });
+    // D0y: Set up the AI progress channel for AI-exec recipes.
+    let aiProgressFile = null;
+    let aiProgressStateFile = null;
+    let aiProgressRelay = null;
+    const executorEnvExtra = {};
+
+    if (isAiProgressRecipe(recipe)) {
+      // Write an initial progress-state record so CLI inspection has something
+      // to show even before the first checkpoint arrives from Claude.
+      const initialProgressState = {
+        runId,
+        tool: 'claude',
+        status: 'running',
+        lastPhase: 'supervisor_init',
+        sessionName: resolvedInputs.session_name ?? null,
+        workingDir: resolvedInputs.working_dir ?? null,
+        progressArtifact: null, // filled in below after path is known
+        reportArtifact: null,
+        timestamp: new Date().toISOString(),
+      };
+      const progressPaths = initAiProgressFiles(stateDir, initialProgressState);
+      aiProgressFile = progressPaths.progressFile;
+      aiProgressStateFile = progressPaths.progressStateFile;
+
+      // Back-fill artifact paths into the state file now that we know them.
+      try {
+        const existing = JSON.parse(readFileSync(aiProgressStateFile, 'utf8'));
+        existing.progressArtifact = aiProgressFile;
+        writeFileSync(aiProgressStateFile, JSON.stringify(existing, null, 2) + '\n');
+      } catch { /* non-fatal */ }
+
+      // Inject env vars so the wrapper picks them up at spawn time.
+      executorEnvExtra.GUARDRAIL_AI_PROGRESS_FILE = aiProgressFile;
+      executorEnvExtra.GUARDRAIL_AI_PROGRESS_STATE_FILE = aiProgressStateFile;
+      executorEnvExtra.GUARDRAIL_AI_HEARTBEAT_SECONDS = String(
+        AI_HEARTBEAT_POLICY.stallWarnSeconds,
+      );
+
+      // Build the stderr relay so AI checkpoint lines feed the progress sink.
+      aiProgressRelay = buildAiProgressRelay({
+        progressSink,
+        runId,
+        stateDir,
+        progressStateFile: aiProgressStateFile,
+      });
+
+      emitAiProgress(progressSink, runId, 'ai_checkpoint', {
+        phase: 'supervisor_init',
+        message: `Progress channel initialized for ${recipe.id}`,
+        severity: 'info',
+        progressArtifact: aiProgressFile,
+        tool: 'claude',
+      });
+    }
+
+    // Build the env policy addendum — the executor will merge these into the
+    // subprocess env when preserve_runtime_env is true (which claude-exec uses).
+    const envExtraForExecutor = Object.keys(executorEnvExtra).length > 0
+      ? executorEnvExtra
+      : null;
+
+    // D0y stall detection: run alongside the executor to warn when no AI
+    // checkpoint arrives within the policy thresholds. The interval fires every
+    // 10 s and emits ai_stalled at stall_warn then hard_stall severity levels.
+    let aiStallMonitor = null;
+    if (aiProgressRelay) {
+      let stalledWarned = false;
+      let hardStalledWarned = false;
+      aiStallMonitor = setInterval(() => {
+        const elapsed = Date.now() - aiProgressRelay.getLastEventTime();
+        if (!hardStalledWarned && elapsed >= AI_HEARTBEAT_POLICY.hardStallSeconds * 1000) {
+          hardStalledWarned = true;
+          emitAiProgress(progressSink, runId, 'ai_stalled', {
+            phase: 'hard_stall',
+            message: `No AI progress for ${Math.round(elapsed / 1000)}s — hard stall threshold breached`,
+            severity: 'error',
+            tool: 'claude',
+          });
+        } else if (!stalledWarned && elapsed >= AI_HEARTBEAT_POLICY.stallWarnSeconds * 1000) {
+          stalledWarned = true;
+          emitAiProgress(progressSink, runId, 'ai_stalled', {
+            phase: 'stall_warn',
+            message: `No AI progress for ${Math.round(elapsed / 1000)}s — stall warning`,
+            severity: 'warn',
+            tool: 'claude',
+          });
+        }
+      }, 10000);
+    }
+
+    let execution;
+    try {
+      execution = await executorFn(recipe, resolvedInputs, {
+        allowUnverified,
+        envAllow: envResult.intersection,
+        composedSteps: composedBindings.byStepId,
+        cwd: resolvedCwd,
+        stateDir,
+        approved: true,
+        traceId: runId,
+        auditLog,
+        manifestHash: recipeHash,
+        onStderr: aiProgressRelay ? aiProgressRelay.onStderr : null,
+        envExtra: envExtraForExecutor,
+      });
+    } finally {
+      if (aiStallMonitor) clearInterval(aiStallMonitor);
+    }
 
     state.stepsExecuted = execution.stepsExecuted ?? 0;
     resultOpts.stepsExecuted = execution.stepsExecuted ?? 0;

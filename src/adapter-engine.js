@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { extractValue, resolveTemplate } from './adapter-extract.js';
 import { validateProfile, loadProfile, resolveProfile } from './adapter-profile.js';
 import { runSupervisor } from './supervisor.js';
-import { checkEnvMappings, checkAuthPrerequisites } from './adapter-auth.js';
+import { authorize, ACTIONS, AUTH_CODES } from './authorization.js';
 import {
   ADAPTER_REASON_CODES,
   STATUS_TO_CODE,
@@ -847,33 +847,21 @@ function loadAndValidateAdapterProfile(tool, profilePath) {
 }
 
 async function runAdapterPreflight(profile, options) {
-  const envCheck = checkEnvMappings(profile.requires_env || [], options.envAllow || [], {
-    authRequirements: profile.requires_auth || [],
-    currentEnv: process.env,
+  const authResult = await authorize(ACTIONS.ADAPTER_RUN, {
+    profile,
+    envAllow:    options.envAllow || [],
+    cwd:         options.cwd || process.cwd(),
+    authCheckFn: options.authCheckFn,
   });
-  if (!envCheck.ok) {
-    return {
-      error: wrapBlocked(
-        ADAPTER_REASON_CODES.MISSING_AUTH_MAPPING,
-        `${envCheck.code}: ${envCheck.message}`,
-      ),
-    };
+  if (!authResult.allowed) {
+    const adapterCode = authResult.code === AUTH_CODES.MISSING_AUTH_MAPPING
+      ? ADAPTER_REASON_CODES.MISSING_AUTH_MAPPING
+      : ADAPTER_REASON_CODES.MISSING_AUTH_PREREQUISITE;
+    const blockedReason = authResult.reason?.includes(`${authResult.code}:`)
+      ? authResult.reason
+      : `${authResult.code}: ${authResult.reason}`;
+    return { error: wrapBlocked(adapterCode, blockedReason) };
   }
-
-  const authCheck = await checkAuthPrerequisites(profile.requires_auth || [], {
-    cwd: options.cwd || process.cwd(),
-    checkRunner: options.authCheckFn,
-  });
-  if (!authCheck.ok) {
-    const detail = authCheck.detail ? ` Detail: ${authCheck.detail}` : '';
-    return {
-      error: wrapBlocked(
-        ADAPTER_REASON_CODES.MISSING_AUTH_PREREQUISITE,
-        `${authCheck.code}: ${authCheck.message}${detail}`,
-      ),
-    };
-  }
-
   return { error: null };
 }
 

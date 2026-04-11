@@ -41,13 +41,13 @@ import {
   applyDelta,
   buildEscalationPackage,
 } from './negotiation.js';
-import { checkTimePolicy, acquireLock } from './runtime-policy.js';
 import { createAuditLog } from './audit.js';
 import { resolveInputs, resolveRecipeById } from './recipe-runner.js';
 import { hashRecipe } from './recipe.js';
 import { executeRecipe } from './recipe-executor.js';
 import { preflightRecipeAuthRuntime } from './recipe-supervisor.js';
 import { deriveAuthEnvRequirements } from './adapter-auth.js';
+import { authorize, ACTIONS } from './authorization.js';
 import { verifyRecipeInputContentHashes } from './prompt-inputs.js';
 import { classifyTrust } from './recipe-channel.js';
 import {
@@ -720,16 +720,17 @@ async function executeRecipeRefStep(stepDef, stepId, ctx, runtimeState) {
     cwd: workflow.projectRoot,
     authCheckFn,
   });
-  if (!recipeRuntime.ok) {
-    logger.warn('recipe_ref_auth_preflight_failed', {
+  const stepAuthGate = await authorize(ACTIONS.WORKFLOW_RECIPE_STEP, { preflight: recipeRuntime });
+  if (!stepAuthGate.allowed) {
+    logger.warn('recipe_ref_auth_denied', {
       stepId,
-      code: recipeRuntime.code,
-      reason: recipeRuntime.reason,
+      code:   stepAuthGate.code,
+      reason: stepAuthGate.reason,
     });
     return {
-      outcome: 'failure',
-      finalStatus: 'policy_violation',
-      terminalReason: `Recipe auth preflight failed for step "${stepId}": ${recipeRuntime.reason}`,
+      outcome:       'failure',
+      finalStatus:   'policy_violation',
+      terminalReason: `Recipe auth denied for step "${stepId}": ${stepAuthGate.reason}`,
     };
   }
 
@@ -1207,41 +1208,32 @@ export async function runWorkflowSupervisor(options) {
     const runtimeLimits = options.runtimeLimits ?? null;
     const auditLog = createAuditLog(resolve(stateDir, 'audit.jsonl'));
 
-    if (runtimeLimits) {
-      const timeCheck = checkTimePolicy(runtimeLimits, workflowHash, stateDir);
-      if (!timeCheck.allowed) {
-        const detail = timeCheck.errors.map(e => e.detail).join('; ');
-        logger.error('time_policy_violated', { errors: timeCheck.errors });
-        auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: workflowHash, reason: detail });
-        resultOpts.terminalReason = `Time policy violated: ${detail}`;
-        state.terminalReason = resultOpts.terminalReason;
-        persistStateSafe(stateDir, state);
-        const result = buildResult(runId, 'time_policy_violated', resultOpts);
-        emitExecutionEnd(progressSink, runId, result.status, {
-          workflowName: workflow.name,
-          message: resultOpts.terminalReason,
-          stepsExecuted: resultOpts.stepsExecuted,
-        });
-        return result;
-      }
-    }
-
-    const lockResult = acquireLock(workflowHash, [], stateDir);
-    if (!lockResult.acquired) {
-      logger.error('concurrent_blocked', { detail: lockResult.detail });
-      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: workflowHash, reason: lockResult.detail });
-      resultOpts.terminalReason = `Concurrent execution blocked: ${lockResult.detail}`;
-      state.terminalReason = resultOpts.terminalReason;
+    const workflowRuntimeAuth = await authorize(ACTIONS.WORKFLOW_RUN, {
+      runtimeLimits,
+      manifestHash: workflowHash,
+      stateDir,
+    });
+    if (!workflowRuntimeAuth.allowed) {
+      logger.error('workflow_runtime_authorization_denied', {
+        code:   workflowRuntimeAuth.code,
+        reason: workflowRuntimeAuth.reason,
+      });
+      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: workflowHash, reason: workflowRuntimeAuth.reason });
+      resultOpts.terminalReason = workflowRuntimeAuth.reason;
+      state.terminalReason = workflowRuntimeAuth.reason;
       persistStateSafe(stateDir, state);
-      const result = buildResult(runId, 'concurrent_blocked', resultOpts);
+      const wfStatus = workflowRuntimeAuth.code === 'time_policy_violated'
+        ? 'time_policy_violated'
+        : 'concurrent_blocked';
+      const result = buildResult(runId, wfStatus, resultOpts);
       emitExecutionEnd(progressSink, runId, result.status, {
-        workflowName: workflow.name,
-        message: resultOpts.terminalReason,
+        workflowName:  workflow.name,
+        message:       workflowRuntimeAuth.reason,
         stepsExecuted: resultOpts.stepsExecuted,
       });
       return result;
     }
-    lockRelease = lockResult.release;
+    lockRelease = workflowRuntimeAuth.release;
 
     auditLog.append({ event: 'execution_start', trace_id: runId, manifest_hash: workflowHash });
 

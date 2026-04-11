@@ -1,7 +1,7 @@
 {
   "id": "claude-exec",
   "name": "Claude Exec",
-  "description": "Run claude --print through a Guardrail-managed wrapper with inline prompt text, input_files prompt context, working-directory control, and structured flag wiring. This recipe declares the shell/runtime environment it needs; standalone recipe execution must allow those vars explicitly with repeated --env-allow flags, and that env contract is part of approval drift. Because secure-store-backed Claude auth can also depend on opaque host-runtime state beyond the declared config vars, this recipe now preserves the full current runtime env during the actual bounded probe/invoke path while still binding the declared env subset into approval drift. The same bounded auth/runtime contract also applies when this recipe is executed through workflow `recipe_ref` steps. It also declares a bounded runtime auth preflight (`claude_exec_probe`), so Guardrail now fails before launch with `missing_auth_prerequisite` when the selected runtime cannot execute a real Claude print probe. Claude CLI authentication must already exist in the same runtime that launches Guardrail. Start by comparing the resolved claude binary plus auth-location environment (for example HOME, XDG_CONFIG_HOME, and CLAUDE_CONFIG_DIR), but do not assume env alignment is always sufficient: some CLI login state is backed by OS-managed secure stores or other process-identity-gated runtime state. A green `claude auth status` alone is not enough if `claude --print` still fails under the Guardrail env contract. If the same `Not logged in` error also appears through a composed host-runtime recipe, stop treating it as Guardrail drift and conclude that the target host runtime itself is missing usable Claude exec auth. If login must be redone for Guardrail reuse, perform `claude auth login --claudeai` (or `--console`) from the exact same shell/runtime that will later launch Guardrail, then rerun the same approved Guardrail command.",
+  "description": "Run claude --print through a Guardrail-managed wrapper with inline prompt text, input_files prompt context, working-directory control, and structured flag wiring. This recipe declares the shell/runtime environment it needs; standalone recipe execution must allow those vars explicitly with repeated --env-allow flags, and that env contract is part of approval drift. Because secure-store-backed Claude auth can also depend on opaque host-runtime state beyond the declared config vars, this recipe now preserves the full current runtime env during the actual bounded probe/invoke path while still binding the declared env subset into approval drift. The same bounded auth/runtime contract also applies when this recipe is executed through workflow `recipe_ref` steps. It also declares a bounded runtime auth preflight (`claude_exec_probe`), so Guardrail now fails before launch with `missing_auth_prerequisite` when the selected runtime cannot execute a real Claude print probe. Claude CLI authentication must already exist in the same runtime that launches Guardrail. Start by comparing the resolved claude binary plus auth-location environment (for example HOME, XDG_CONFIG_HOME, and CLAUDE_CONFIG_DIR), but do not assume env alignment is always sufficient: some CLI login state is backed by OS-managed secure stores or other process-identity-gated runtime state. A green `claude auth status` alone is not enough if `claude --print` still fails under the Guardrail env contract. If the same `Not logged in` error also appears through a composed host-runtime recipe, stop treating it as Guardrail drift and conclude that the target host runtime itself is missing usable Claude exec auth. If login must be redone for Guardrail reuse, perform `claude auth login --claudeai` (or `--console`) from the exact same shell/runtime that will later launch Guardrail, then rerun the same approved Guardrail command. For long-running bounded implementation packets, do not rely on delayed final stdout as the only visible signal: instruct Claude to create the declared report artifact immediately, append short progress checkpoints there as it works, and use an edit-capable permission mode when the packet is expected to modify files.",
   "version": "1.0.0",
   "author": {
     "name": "Guardrail Team",
@@ -172,7 +172,8 @@
           "--lifecycle", "{{inputs.lifecycle}}",
           "--session-id", "{{inputs.session_id}}"
         ],
-        "mode": "structured"
+        "mode": "structured",
+        "timeoutMs": 900000
       },
       "idempotent": true,
       "validator": {
@@ -180,6 +181,30 @@
       }
     }
   ],
+  "progress_channel": {
+    "enabled": true,
+    "model": "cooperative",
+    "heartbeat_policy": {
+      "first_checkpoint_warn_seconds": 30,
+      "stall_warn_seconds": 90,
+      "hard_stall_seconds": 180
+    },
+    "progress_file": "ai-progress.ndjson",
+    "state_file": "ai-progress-state.json",
+    "event_types": [
+      "ai_checkpoint",
+      "ai_artifact_written",
+      "ai_question",
+      "ai_review_requested",
+      "ai_drift_warning",
+      "ai_waiting_for_input",
+      "ai_waiting_for_review",
+      "ai_stalled",
+      "ai_resumed"
+    ],
+    "soft_states": ["waiting_for_review", "waiting_for_input", "drift_warning", "stalled"],
+    "note": "Progress is model-cooperative. The wrapper injects a system appendix instructing Claude to write NDJSON checkpoints to the progress file. The supervisor tails that file and relays events through --json-stream. Missing first checkpoint within 30s emits a warning; no checkpoint for 90s emits stalled; 180s triggers hard escalation."
+  },
   "guardrails": {
     "constraints": [
       "This recipe declares requires_env; standalone recipe execution must allow the same vars with repeated --env-allow flags, and the approved manifest binds to that env intersection even though the bounded Claude probe/invoke path now preserves the wider current runtime env for auth parity",
@@ -193,9 +218,15 @@
       "If another shell or tool can run Claude successfully, compare `which -a claude` and `claude auth status` there versus the Guardrail runtime before changing approval state. Start with PATH, HOME, XDG_CONFIG_HOME, or CLAUDE_CONFIG_DIR, but do not assume env alignment alone will solve secure-store-backed CLI auth",
       "General Claude auth repair sequence for this recipe: `which -a claude`, `claude auth status`, prefer rerunning Guardrail from a shell where that status already succeeds, and if login must be redone for Guardrail reuse run `claude auth login --claudeai` (or `--console`) from the exact same shell/runtime that will later launch Guardrail",
       "The inline prompt uses interactive_message semantics: later user messages may change without reapproval only for the same persistent named session (`continue` or `attach` with `no_session_persistence=false`). New sessions or session-identity changes still require approval",
+      "For autonomous edit-bearing runs, prefer an edit-capable Claude permission mode such as `acceptEdits` instead of `default`, because a non-interactive `claude --print` invocation can otherwise idle on tool-approval behavior that Guardrail cannot surface cleanly",
+      "For long-running implementation packets, require the declared report artifact to be created immediately and used as the progress heartbeat. Do not rely on delayed final stdout alone for operator feedback",
+      "Guardrail now binds a bounded 900000ms / 15m invoke timeout for this recipe instead of the generic 60000ms worker fallback, because packet-sized Claude CLI runs can legitimately take longer than one minute",
       "For a human-reviewed multi-doc loop, approve the full doc set up front in input_files, keep system_prompt fixed, and then advance slice by slice through later prompts in the same persistent session or resident lane",
       "system_prompt remains review_each_time even under workflow recipe_ref chaining. If you need a fixed local system prompt with unattended reuse, use a local template that wraps the Claude wrapper directly instead of chaining claude-exec as a recipe_ref",
-      "No shell mode steps — a single structured node wrapper handles prompt assembly and invocation"
+      "No shell mode steps — a single structured node wrapper handles prompt assembly and invocation",
+      "When running with a Guardrail progress channel (GUARDRAIL_AI_PROGRESS_FILE set or --guardrail-progress-file passed), the wrapper injects a system appendix instructing Claude to write NDJSON checkpoint lines. This is model-cooperative: missing checkpoints surface as stall warnings, not silent failures",
+      "The progress file and state file are Guardrail artifacts, not user artifacts. Do not confuse them with the declared report artifact which remains the canonical completion signal",
+      "Soft states (waiting_for_review, waiting_for_input, drift_warning, stalled) are non-terminal. Only hard scope violations, nonzero exit, or stall-threshold breach collapse to failed"
     ],
     "invariants": [
       "mode: structured",

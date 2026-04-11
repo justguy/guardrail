@@ -13,8 +13,8 @@ import {
   mapResultStatusToProgressStatus,
 } from './progress-events.js';
 import { persistStateSafe, executeSubprocess } from './shared.js';
-import { checkTimePolicy, acquireLock } from './runtime-policy.js';
 import { createAuditLog } from './audit.js';
+import { authorize, ACTIONS } from './authorization.js';
 
 // ---------------------------------------------------------------------------
 // Exit code mapping
@@ -605,50 +605,38 @@ export async function runSupervisor(options) {
     }
 
     // ------------------------------------------------------------------
-    // Step 9b: Runtime policy — time limits and concurrency lock
+    // Step 9b: Runtime policy — unified authorization gate
     // ------------------------------------------------------------------
     const runtimeLimits = options.runtimeLimits ?? null;
     const auditLog = createAuditLog(join(stateDir, 'audit.jsonl'));
 
-    if (runtimeLimits) {
-      const timeCheck = checkTimePolicy(runtimeLimits, contractHash, stateDir);
-      if (!timeCheck.allowed) {
-        const detail = timeCheck.errors.map(e => e.detail).join('; ');
-        logger.error('time_policy_violated', { errors: timeCheck.errors });
-        auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: contractHash, reason: detail });
-        const reason = `Time policy violated: ${detail}`;
-        finalize(reason);
-        const result = finalizeResult('time_policy_violated', {
-          reason,
-          riskLevel: resultOpts.riskLevel,
-          riskReasons: resultOpts.riskReasons,
-        });
-        persistState(stateDir, state, result);
-        if (!jsonOutput) {
-          printResult({ success: false, exitCode: result.exitCode, message: reason });
-        }
-        return result;
-      }
-    }
-
-    const lockResult = acquireLock(contractHash, [], stateDir);
-    if (!lockResult.acquired) {
-      logger.error('concurrent_blocked', { detail: lockResult.detail });
-      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: contractHash, reason: lockResult.detail });
-      finalize(`Concurrent execution blocked: ${lockResult.detail}`);
-      const reason = `Concurrent execution blocked: ${lockResult.detail}`;
-      const result = finalizeResult('concurrent_blocked', {
-        reason,
-        riskLevel: resultOpts.riskLevel,
+    const runtimeAuthResult = await authorize(ACTIONS.COMMAND_RUN, {
+      runtimeLimits,
+      manifestHash: contractHash,
+      stateDir,
+    });
+    if (!runtimeAuthResult.allowed) {
+      logger.error('runtime_authorization_denied', {
+        code:   runtimeAuthResult.code,
+        reason: runtimeAuthResult.reason,
+      });
+      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: contractHash, reason: runtimeAuthResult.reason });
+      finalize(runtimeAuthResult.reason);
+      const status = runtimeAuthResult.code === 'time_policy_violated'
+        ? 'time_policy_violated'
+        : 'concurrent_blocked';
+      const result = finalizeResult(status, {
+        reason:      runtimeAuthResult.reason,
+        riskLevel:   resultOpts.riskLevel,
         riskReasons: resultOpts.riskReasons,
       });
       persistState(stateDir, state, result);
       if (!jsonOutput) {
-        printResult({ success: false, exitCode: result.exitCode, message: reason });
+        printResult({ success: false, exitCode: result.exitCode, message: runtimeAuthResult.reason });
       }
       return result;
     }
-    lockRelease = lockResult.release;
+    lockRelease = runtimeAuthResult.release;
 
     auditLog.append({ event: 'execution_start', trace_id: runId, manifest_hash: contractHash });
     emitCommandProgress(progressSink, runId, 'execution_start', {

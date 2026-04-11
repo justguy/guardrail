@@ -3,6 +3,7 @@
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { dirname, resolve } from 'node:path';
 import { runSupervisor, STATUS_EXIT_CODES } from './supervisor.js';
 import { hasShellMetacharacters } from './contract.js';
@@ -110,6 +111,87 @@ function buildLaneRecommendedCommand(status = {}) {
       return `guardrail lane cleanup ${ref}`;
     default:
       return null;
+  }
+}
+
+function readAiProgressSnapshot(stateDir) {
+  const resolvedStateDir = resolve(stateDir);
+  const stateFile = resolve(resolvedStateDir, 'ai-progress-state.json');
+  const progressFile = resolve(resolvedStateDir, 'ai-progress.ndjson');
+
+  let state = null;
+  if (existsSync(stateFile)) {
+    try {
+      state = JSON.parse(readFileSync(stateFile, 'utf8'));
+    } catch {
+      state = null;
+    }
+  }
+
+  let events = [];
+  if (existsSync(progressFile)) {
+    events = readFileSync(progressFile, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  }
+
+  return {
+    stateDir: resolvedStateDir,
+    state,
+    events,
+  };
+}
+
+function resolveRecipeProgressStateDir(rawStateDir, runId) {
+  if (rawStateDir) return resolve(rawStateDir);
+  if (!runId) return '';
+
+  const candidate = resolve(process.cwd(), '.guardrail');
+  const snapshot = readAiProgressSnapshot(candidate);
+  if (snapshot.state?.runId === runId) return candidate;
+  return '';
+}
+
+function isTerminalAiProgressState(status) {
+  return status === 'completed' || status === 'failed';
+}
+
+function printRecipeProgressText(snapshot, startIndex = 0, options = {}) {
+  const { state, events } = snapshot;
+  const { includeHeader = true } = options;
+
+  if (includeHeader && state) {
+    console.log(`Status:  ${state.status ?? 'unknown'}`);
+    console.log(`Run ID:  ${state.runId ?? 'unknown'}`);
+    if (state.lastPhase) console.log(`Phase:   ${state.lastPhase}`);
+    if (state.sessionName) console.log(`Session: ${state.sessionName}`);
+    if (state.lastMessage) console.log(`Last:    ${state.lastMessage}`);
+    if (state.continuationCommand) {
+      console.log('');
+      console.log(`To continue: ${state.continuationCommand}`);
+    }
+  }
+
+  const nextEvents = events.slice(startIndex);
+  if ((includeHeader && events.length > 0) || nextEvents.length > 0) {
+    if (includeHeader) {
+      console.log('');
+      console.log(`Checkpoints (${events.length}):`);
+    }
+    for (const evt of nextEvents) {
+      const ts = evt.timestamp ? String(evt.timestamp).slice(0, 19) : '';
+      const phase = evt.phase ? ` phase=${evt.phase}` : '';
+      const msg = evt.message ? ` ${evt.message}` : '';
+      console.log(`  [${ts}] ${evt.event ?? 'unknown'}${phase}${msg}`);
+    }
   }
 }
 
@@ -999,7 +1081,7 @@ export function parseArgs(argv) {
   // --- recipe subcommand ----------------------------------------------------
 
   if (sub === 'recipe') {
-    if (i >= argv.length || !['validate', 'inspect', 'install', 'versions', 'publish', 'registry', 'compose'].includes(argv[i])) {
+    if (i >= argv.length || !['validate', 'inspect', 'install', 'versions', 'publish', 'registry', 'compose', 'progress', 'continue'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -1070,6 +1152,30 @@ export function parseArgs(argv) {
         if (argv[i] === '--json') { result.json = true; i++; continue; }
         return { error: 'usage' };
       }
+      return result;
+    }
+
+    // D0y: recipe progress and recipe continue
+    if (action === 'progress') {
+      while (i < argv.length) {
+        if (argv[i] === '--state-dir' && i + 1 < argv.length) { result.stateDir = argv[++i]; i++; continue; }
+        if (argv[i] === '--run-id' && i + 1 < argv.length) { result.runId = argv[++i]; i++; continue; }
+        if (argv[i] === '--json') { result.json = true; i++; continue; }
+        if (argv[i] === '--follow') { result.follow = true; i++; continue; }
+        return { error: 'usage' };
+      }
+      return result;
+    }
+
+    if (action === 'continue') {
+      while (i < argv.length) {
+        if (argv[i] === '--state-dir' && i + 1 < argv.length) { result.stateDir = argv[++i]; i++; continue; }
+        if (argv[i] === '--prompt' && i + 1 < argv.length) { result.prompt = argv[++i]; i++; continue; }
+        if (argv[i] === '--json') { result.json = true; i++; continue; }
+        return { error: 'usage' };
+      }
+      if (!result.stateDir) return { error: 'usage' };
+      if (!result.prompt) return { error: 'usage' };
       return result;
     }
 
@@ -2999,6 +3105,130 @@ async function main() {
       console.error(err.message);
       process.exit(1);
     }
+  }
+
+  // --- recipe progress (D0y) -----------------------------------------------
+
+  if (parsed.subcommand === 'recipe-progress') {
+    const stateDir = resolveRecipeProgressStateDir(parsed.stateDir, parsed.runId);
+    if (!stateDir) {
+      console.error('Error: recipe progress requires --state-dir <dir> or a matching --run-id <id>');
+      process.exit(1);
+    }
+    let snapshot = readAiProgressSnapshot(stateDir);
+
+    if (parsed.follow) {
+      let lastStateSignature = JSON.stringify(snapshot.state ?? null);
+      let lastEventCount = snapshot.events.length;
+
+      if (parsed.json) {
+        console.log(JSON.stringify({
+          stateDir,
+          state: snapshot.state,
+          events: snapshot.events,
+        }));
+      } else if (!snapshot.state && snapshot.events.length === 0) {
+        console.log(`Waiting for AI progress data in ${stateDir}...`);
+      } else {
+        printRecipeProgressText(snapshot);
+      }
+
+      while (true) {
+        if (isTerminalAiProgressState(snapshot.state?.status)) break;
+        await delay(1000);
+        const nextSnapshot = readAiProgressSnapshot(stateDir);
+        const nextStateSignature = JSON.stringify(nextSnapshot.state ?? null);
+        const nextEventCount = nextSnapshot.events.length;
+        const stateChanged = nextStateSignature !== lastStateSignature;
+        const newEvents = nextEventCount > lastEventCount
+          ? nextSnapshot.events.slice(lastEventCount)
+          : [];
+
+        if (parsed.json) {
+          if (stateChanged || newEvents.length > 0) {
+            console.log(JSON.stringify({
+              stateDir,
+              state: nextSnapshot.state,
+              events: newEvents,
+            }));
+          }
+        } else {
+          if (stateChanged && nextSnapshot.state) {
+            console.log('');
+            console.log(`Status:  ${nextSnapshot.state.status ?? 'unknown'}`);
+            if (nextSnapshot.state.lastPhase) console.log(`Phase:   ${nextSnapshot.state.lastPhase}`);
+            if (nextSnapshot.state.lastMessage) console.log(`Last:    ${nextSnapshot.state.lastMessage}`);
+            if (nextSnapshot.state.continuationCommand) {
+              console.log(`To continue: ${nextSnapshot.state.continuationCommand}`);
+            }
+          }
+          if (newEvents.length > 0) {
+            printRecipeProgressText(
+              { state: nextSnapshot.state, events: nextSnapshot.events },
+              lastEventCount,
+              { includeHeader: false },
+            );
+          }
+        }
+
+        snapshot = nextSnapshot;
+        lastStateSignature = nextStateSignature;
+        lastEventCount = nextEventCount;
+      }
+    } else if (parsed.json) {
+      console.log(JSON.stringify({ stateDir, state: snapshot.state, events: snapshot.events }, null, 2));
+    } else {
+      if (!snapshot.state && snapshot.events.length === 0) {
+        console.log(`No AI progress data found in ${stateDir}`);
+        process.exit(0);
+      }
+      printRecipeProgressText(snapshot);
+    }
+    process.exit(0);
+  }
+
+  // --- recipe continue (D0y) -----------------------------------------------
+
+  if (parsed.subcommand === 'recipe-continue') {
+    const stateDir = parsed.stateDir || '';
+    const prompt = parsed.prompt || '';
+
+    const { join: pathJoin } = await import('node:path');
+    const stateFile = pathJoin(stateDir, 'ai-progress-state.json');
+
+    let state = null;
+    if (existsSync(stateFile)) {
+      try { state = JSON.parse(readFileSync(stateFile, 'utf8')); } catch { /* ignore */ }
+    }
+
+    if (!state) {
+      console.error(`Error: no progress state found in ${stateDir}`);
+      process.exit(1);
+    }
+
+    const eligibleStates = new Set(['waiting_for_review', 'waiting_for_input', 'drift_warning', 'stalled', 'running']);
+    if (!eligibleStates.has(state.status)) {
+      console.error(`Error: run is in state "${state.status}" which is not continuation-eligible`);
+      process.exit(1);
+    }
+
+    // Resume the same bounded session using persisted identity.
+    const { runClaudeExec } = await import('./claude-exec-wrapper.js');
+    try {
+      await runClaudeExec({
+        prompt,
+        sessionName: state.sessionName ?? '',
+        sessionId: state.sessionId ?? '',
+        lifecycle: 'continue',
+        workingDir: state.workingDir ?? '',
+        guardrailProgressFile: state.progressArtifact ?? '',
+        guardrailProgressStateFile: stateFile,
+      });
+    } catch (err) {
+      console.error(`Error: continuation failed: ${err.message}`);
+      process.exit(1);
+    }
+    process.exit(0);
   }
 
   // --- audit verify --------------------------------------------------------

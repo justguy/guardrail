@@ -1,7 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, realpathSync, mkdirSync, existsSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync, realpathSync, mkdirSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { loadRecipe, createRecipeManifest, compareRecipeManifests, hashRecipe } from '../src/recipe.js';
@@ -10,7 +12,17 @@ import {
   buildClaudeArgs,
   buildClaudeFailureMessage,
   emitSessionMetadata,
+  buildProgressSystemAppendix,
+  runClaudeExec,
 } from '../src/claude-exec-wrapper.js';
+import {
+  parseAiProgressLine,
+  emitAiProgress,
+  AI_HEARTBEAT_POLICY,
+  AI_SOFT_STATES,
+  AI_EVENT_TO_STATE,
+  AI_CHECKPOINT_EVENTS,
+} from '../src/progress-events.js';
 import {
   collectRecipeInputContentHashes,
   verifyRecipeInputContentHashes,
@@ -33,6 +45,7 @@ import {
 // Must mirror recipe-supervisor.HOST_BOUNDARY_WARNING. If that constant
 // changes, this test drifts and both should be updated in the same commit.
 const HOST_BOUNDARY_WARNING = 'Guardrail does not sandbox host execution; this wrapper relies on the tool/runtime permission model';
+const CLI_PATH = resolve(process.cwd(), 'src/cli.js');
 
 function tmpDir() {
   return realpathSync(mkdtempSync(join(tmpdir(), 'gr-claude-recipe-')));
@@ -136,6 +149,19 @@ function stubExecutor() {
   };
 }
 
+function prependPath(dir) {
+  return `${dir}${delimiter}${process.env.PATH ?? ''}`;
+}
+
+function writeClaudeStub(dir, body) {
+  const binDir = join(dir, 'bin');
+  mkdirSync(binDir, { recursive: true });
+  const stubPath = join(binDir, 'claude');
+  writeFileSync(stubPath, body, 'utf8');
+  chmodSync(stubPath, 0o755);
+  return { binDir, stubPath };
+}
+
 // Pre-seed a recipe manifest matching what the supervisor will compute for
 // the stub recipe so non-interactive runs bypass interactive approval.
 function seedStubManifest(dir, recipesDir, recipe, resolvedInputs) {
@@ -187,6 +213,10 @@ describe('Claude recipe', () => {
     );
     assert.ok(
       recipe.guardrails?.constraints?.some((line) => line.includes('--env-allow') && line.includes('requires_env')),
+    );
+    assert.equal(recipe.steps[0].run.timeoutMs, 900000);
+    assert.ok(
+      recipe.guardrails?.constraints?.some((line) => line.includes('900000ms / 15m invoke timeout')),
     );
     assert.match(recipe.inputs.system_prompt.description, /Workflow recipe_ref usage does not bypass this reapproval rule/);
     assert.ok(
@@ -861,5 +891,472 @@ describe('Claude recipe: session enforcement via recipe supervisor', () => {
 
     assert.notEqual(result.status, 'success');
     assert.equal(executor.called, 0, 'executor must not run when persistence is disabled');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D0y: Guarded AI Exec Progress Channel tests
+// ---------------------------------------------------------------------------
+
+describe('D0y: progress-events schema', () => {
+  it('AI_HEARTBEAT_POLICY declares all three thresholds', () => {
+    assert.ok(typeof AI_HEARTBEAT_POLICY.firstCheckpointWarnSeconds === 'number');
+    assert.ok(typeof AI_HEARTBEAT_POLICY.stallWarnSeconds === 'number');
+    assert.ok(typeof AI_HEARTBEAT_POLICY.hardStallSeconds === 'number');
+    assert.ok(AI_HEARTBEAT_POLICY.stallWarnSeconds > AI_HEARTBEAT_POLICY.firstCheckpointWarnSeconds);
+    assert.ok(AI_HEARTBEAT_POLICY.hardStallSeconds > AI_HEARTBEAT_POLICY.stallWarnSeconds);
+  });
+
+  it('AI_SOFT_STATES contains exactly the four non-terminal states', () => {
+    assert.ok(AI_SOFT_STATES.has('waiting_for_review'));
+    assert.ok(AI_SOFT_STATES.has('waiting_for_input'));
+    assert.ok(AI_SOFT_STATES.has('drift_warning'));
+    assert.ok(AI_SOFT_STATES.has('stalled'));
+    assert.equal(AI_SOFT_STATES.size, 4);
+  });
+
+  it('AI_CHECKPOINT_EVENTS includes all required event names', () => {
+    const required = [
+      'ai_checkpoint', 'ai_artifact_written', 'ai_question',
+      'ai_review_requested', 'ai_drift_warning',
+      'ai_waiting_for_input', 'ai_waiting_for_review',
+      'ai_stalled', 'ai_resumed',
+    ];
+    for (const name of required) {
+      assert.ok(AI_CHECKPOINT_EVENTS.includes(name), `missing event: ${name}`);
+    }
+  });
+
+  it('AI_EVENT_TO_STATE maps review/question events to soft states', () => {
+    assert.equal(AI_EVENT_TO_STATE['ai_question'], 'waiting_for_input');
+    assert.equal(AI_EVENT_TO_STATE['ai_review_requested'], 'waiting_for_review');
+    assert.equal(AI_EVENT_TO_STATE['ai_drift_warning'], 'drift_warning');
+    assert.equal(AI_EVENT_TO_STATE['ai_stalled'], 'stalled');
+    assert.equal(AI_EVENT_TO_STATE['ai_checkpoint'], 'running');
+    assert.equal(AI_EVENT_TO_STATE['ai_resumed'], 'running');
+  });
+});
+
+describe('D0y: parseAiProgressLine', () => {
+  it('parses a well-formed [guardrail-ai-progress] line', () => {
+    const payload = { event: 'ai_checkpoint', phase: 'started', message: 'hello', timestamp: '2026-01-01T00:00:00Z' };
+    const line = `[guardrail-ai-progress] ${JSON.stringify(payload)}`;
+    const result = parseAiProgressLine(line);
+    assert.deepEqual(result, payload);
+  });
+
+  it('returns null for lines without the prefix', () => {
+    assert.equal(parseAiProgressLine('{"event":"ai_checkpoint"}'), null);
+    assert.equal(parseAiProgressLine('some random log line'), null);
+  });
+
+  it('returns null for null / non-string input', () => {
+    assert.equal(parseAiProgressLine(null), null);
+    assert.equal(parseAiProgressLine(undefined), null);
+    assert.equal(parseAiProgressLine(42), null);
+  });
+
+  it('returns null for malformed JSON after prefix', () => {
+    assert.equal(parseAiProgressLine('[guardrail-ai-progress] {not json}'), null);
+  });
+});
+
+describe('D0y: emitAiProgress', () => {
+  it('calls progressSink with expected AI event fields', () => {
+    const events = [];
+    emitAiProgress((evt) => events.push(evt), 'run-1', 'ai_checkpoint', {
+      phase: 'init',
+      message: 'starting',
+      severity: 'info',
+      tool: 'claude',
+    });
+    assert.equal(events.length, 1);
+    const evt = events[0];
+    assert.equal(evt.event, 'ai_checkpoint');
+    assert.equal(evt.mode, 'ai_exec');
+    assert.equal(evt.runId, 'run-1');
+    assert.equal(evt.status, 'running');
+    assert.equal(evt.tool, 'claude');
+    assert.equal(evt.phase, 'init');
+    assert.equal(evt.message, 'starting');
+    assert.ok(typeof evt.timestamp === 'string');
+  });
+
+  it('maps review event to waiting_for_review status', () => {
+    const events = [];
+    emitAiProgress((evt) => events.push(evt), 'run-2', 'ai_review_requested', {
+      message: 'please review',
+    });
+    assert.equal(events[0].status, 'waiting_for_review');
+  });
+
+  it('maps question event to waiting_for_input status', () => {
+    const events = [];
+    emitAiProgress((evt) => events.push(evt), 'run-3', 'ai_question', {
+      message: 'what should I do?',
+    });
+    assert.equal(events[0].status, 'waiting_for_input');
+  });
+
+  it('is a no-op when progressSink is not a function', () => {
+    // Must not throw
+    emitAiProgress(null, 'run-4', 'ai_checkpoint', {});
+    emitAiProgress(undefined, 'run-4', 'ai_checkpoint', {});
+    emitAiProgress('not-a-fn', 'run-4', 'ai_checkpoint', {});
+  });
+});
+
+describe('D0y: buildProgressSystemAppendix', () => {
+  it('includes the progress file path', () => {
+    const appendix = buildProgressSystemAppendix({
+      progressFile: '/tmp/progress.ndjson',
+      reportArtifact: '/tmp/report.md',
+      heartbeatSeconds: 60,
+    });
+    assert.ok(appendix.includes('/tmp/progress.ndjson'));
+    assert.ok(appendix.includes('/tmp/report.md'));
+    assert.ok(appendix.includes('Guardrail Progress Contract'));
+  });
+
+  it('lists all valid event types', () => {
+    const appendix = buildProgressSystemAppendix({
+      progressFile: '/tmp/p.ndjson',
+      reportArtifact: '',
+      heartbeatSeconds: 30,
+    });
+    assert.ok(appendix.includes('ai_checkpoint'));
+    assert.ok(appendix.includes('ai_question'));
+    assert.ok(appendix.includes('ai_review_requested'));
+    assert.ok(appendix.includes('ai_drift_warning'));
+  });
+
+  it('falls back gracefully when no options are provided', () => {
+    const appendix = buildProgressSystemAppendix({});
+    assert.ok(appendix.includes('Guardrail Progress Contract'));
+    assert.ok(appendix.includes('(none declared)'));
+  });
+});
+
+describe('D0y: parseWrapperArgs D0y flags', () => {
+  it('parses --guardrail-progress-file', () => {
+    const opts = parseWrapperArgs(['--guardrail-progress-file', '/tmp/p.ndjson']);
+    assert.equal(opts.guardrailProgressFile, '/tmp/p.ndjson');
+  });
+
+  it('parses --guardrail-progress-state-file', () => {
+    const opts = parseWrapperArgs(['--guardrail-progress-state-file', '/tmp/state.json']);
+    assert.equal(opts.guardrailProgressStateFile, '/tmp/state.json');
+  });
+
+  it('parses --guardrail-report-artifact', () => {
+    const opts = parseWrapperArgs(['--guardrail-report-artifact', '/tmp/report.md']);
+    assert.equal(opts.guardrailReportArtifact, '/tmp/report.md');
+  });
+
+  it('parses --guardrail-heartbeat-seconds', () => {
+    const opts = parseWrapperArgs(['--guardrail-heartbeat-seconds', '45']);
+    assert.equal(opts.guardrailHeartbeatSeconds, '45');
+  });
+
+  it('D0y flags are absent from buildClaudeArgs output (never forwarded to Claude CLI)', () => {
+    const args = buildClaudeArgs({
+      model: 'claude-3-5-sonnet',
+      guardrailProgressFile: '/tmp/p.ndjson',
+      guardrailProgressStateFile: '/tmp/state.json',
+      guardrailReportArtifact: '/tmp/report.md',
+      guardrailHeartbeatSeconds: '60',
+      promptPayload: 'hello',
+    });
+    for (const arg of args) {
+      assert.ok(!String(arg).startsWith('--guardrail-'), `D0y flag leaked into Claude CLI args: ${arg}`);
+    }
+  });
+});
+
+describe('D0y: supervisor progress channel wiring', () => {
+  it('supervisor injects progress env vars and emits supervisor_init checkpoint when progress_channel.enabled', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+
+    const recipe = makeClaudeStubRecipe({
+      progress_channel: { enabled: true },
+    });
+    writeStubRecipeFile(recipesDir, recipe);
+    seedStubManifest(dir, recipesDir, recipe, {
+      working_dir: '.',
+      session_name: 'progress-test',
+      lifecycle: 'start',
+      no_session_persistence: true,
+      prompt: 'test prompt',
+    });
+
+    const capturedEnv = {};
+    const progressEvents = [];
+    const executor = {
+      called: 0,
+      fn: async (_recipe, _inputs, opts) => {
+        executor.called += 1;
+        if (opts.envExtra) Object.assign(capturedEnv, opts.envExtra);
+        return { status: 'success', stepsExecuted: 1, reason: null };
+      },
+    };
+
+    await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: {
+        working_dir: '.',
+        session_name: 'progress-test',
+        lifecycle: 'start',
+        no_session_persistence: true,
+        prompt: 'test prompt',
+      },
+      cwd: dir,
+      searchDirs: exactSearchDirs(dir, [recipesDir]),
+      nonInteractive: true,
+      jsonOutput: true,
+      executorFn: executor.fn,
+      progressSink: (evt) => progressEvents.push(evt),
+    });
+
+    assert.equal(executor.called, 1);
+    assert.ok(capturedEnv.GUARDRAIL_AI_PROGRESS_FILE, 'progress file env var missing');
+    assert.ok(capturedEnv.GUARDRAIL_AI_PROGRESS_STATE_FILE, 'progress state file env var missing');
+
+    const stateFile = join(dir, '.guardrail', 'ai-progress-state.json');
+    assert.ok(existsSync(stateFile), 'ai-progress-state.json not created');
+
+    const initEvt = progressEvents.find((e) => e.event === 'ai_checkpoint' && e.phase === 'supervisor_init');
+    assert.ok(initEvt, 'supervisor_init checkpoint not emitted to progress sink');
+  });
+
+  it('does not activate progress channel for recipes without progress_channel.enabled', async () => {
+    const dir = tmpDir();
+    const recipesDir = join(dir, 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+
+    const recipe = makeClaudeStubRecipe({ id: 'no-channel-recipe' });
+    writeStubRecipeFile(recipesDir, recipe);
+    seedStubManifest(dir, recipesDir, recipe, {
+      working_dir: '.',
+      session_name: 'no-progress',
+      prompt: 'noop',
+    });
+
+    const progressEvents = [];
+    const executor = stubExecutor();
+    await runRecipeSupervisor({
+      specifier: recipe.id,
+      inputs: { working_dir: '.', session_name: 'no-progress', prompt: 'noop' },
+      cwd: dir,
+      searchDirs: exactSearchDirs(dir, [recipesDir]),
+      nonInteractive: true,
+      jsonOutput: true,
+      executorFn: executor.fn,
+      progressSink: (evt) => progressEvents.push(evt),
+    });
+
+    const aiEvents = progressEvents.filter((e) => String(e.event ?? '').startsWith('ai_'));
+    assert.equal(aiEvents.length, 0, 'unexpected AI events emitted for non-progress recipe');
+  });
+});
+
+describe('D0y: wrapper preserves soft states for continuation', () => {
+  it('keeps waiting_for_input instead of overwriting it to completed on successful exit', async () => {
+    const dir = tmpDir();
+    const progressFile = join(dir, 'ai-progress.ndjson');
+    const stateFile = join(dir, 'ai-progress-state.json');
+    const argsFile = join(dir, 'claude-args.json');
+
+    const stub = `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const appendIndex = args.indexOf('--append-system-prompt');
+const appendix = appendIndex >= 0 ? args[appendIndex + 1] || '' : '';
+const match = appendix.match(/Progress file path: (.+)/);
+const progressFile = match ? match[1].trim() : '';
+if (progressFile) {
+  const evt = {
+    event: 'ai_question',
+    status: 'waiting_for_input',
+    phase: 'review_gate',
+    message: 'Need operator confirmation',
+    timestamp: new Date().toISOString(),
+  };
+  fs.appendFileSync(progressFile, JSON.stringify(evt) + '\\n');
+}
+fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(args));
+process.stdout.write('stub-ok\\n');
+`;
+    const { binDir } = writeClaudeStub(dir, stub);
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = prependPath(binDir);
+    try {
+      await runClaudeExec({
+        prompt: 'continue',
+        systemPrompt: 'base system',
+        sessionName: 'd0y-soft-state',
+        workingDir: dir,
+        guardrailProgressFile: progressFile,
+        guardrailProgressStateFile: stateFile,
+        guardrailReportArtifact: join(dir, 'report.md'),
+      });
+    } finally {
+      process.env.PATH = originalPath;
+    }
+
+    const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+    assert.equal(state.status, 'waiting_for_input');
+    assert.equal(state.lastPhase, 'awaiting_operator');
+
+    const argv = JSON.parse(readFileSync(argsFile, 'utf8'));
+    assert.ok(argv.includes('--print'));
+    assert.ok(argv.includes('--name'));
+  });
+});
+
+describe('D0y: CLI progress and continuation surfaces', () => {
+  it('recipe progress prints a bounded snapshot from the progress files', () => {
+    const dir = tmpDir();
+    const stateDir = join(dir, '.guardrail');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'ai-progress-state.json'), JSON.stringify({
+      runId: 'run-progress',
+      status: 'running',
+      lastPhase: 'implementing',
+      lastMessage: 'Applying patch',
+      sessionName: 'progress-session',
+    }, null, 2));
+    writeFileSync(join(stateDir, 'ai-progress.ndjson'), [
+      JSON.stringify({
+        event: 'ai_checkpoint',
+        phase: 'started',
+        message: 'Started',
+        timestamp: '2026-04-11T10:00:00.000Z',
+      }),
+    ].join('\n') + '\n');
+
+    const result = spawnSync('node', [CLI_PATH, 'recipe', 'progress', '--state-dir', stateDir], {
+      cwd: resolve(process.cwd()),
+      encoding: 'utf8',
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Status:\s+running/);
+    assert.match(result.stdout, /Checkpoints \(1\):/);
+    assert.match(result.stdout, /Started/);
+  });
+
+  it('recipe progress --follow emits updates and exits on terminal state', async () => {
+    const dir = tmpDir();
+    const stateDir = join(dir, '.guardrail');
+    mkdirSync(stateDir, { recursive: true });
+    const stateFile = join(stateDir, 'ai-progress-state.json');
+    const progressFile = join(stateDir, 'ai-progress.ndjson');
+
+    writeFileSync(stateFile, JSON.stringify({
+      runId: 'run-follow',
+      status: 'running',
+      lastPhase: 'started',
+      lastMessage: 'Booting',
+    }, null, 2));
+    writeFileSync(progressFile, JSON.stringify({
+      event: 'ai_checkpoint',
+      phase: 'started',
+      message: 'Booting',
+      timestamp: '2026-04-11T10:00:00.000Z',
+    }) + '\n');
+
+    const child = spawn('node', [CLI_PATH, 'recipe', 'progress', '--state-dir', stateDir, '--follow'], {
+      cwd: resolve(process.cwd()),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1200));
+    writeFileSync(progressFile, [
+      JSON.stringify({
+        event: 'ai_checkpoint',
+        phase: 'started',
+        message: 'Booting',
+        timestamp: '2026-04-11T10:00:00.000Z',
+      }),
+      JSON.stringify({
+        event: 'ai_checkpoint',
+        phase: 'review',
+        message: 'Halfway there',
+        timestamp: '2026-04-11T10:00:01.000Z',
+      }),
+    ].join('\n') + '\n');
+    writeFileSync(stateFile, JSON.stringify({
+      runId: 'run-follow',
+      status: 'completed',
+      lastPhase: 'completed',
+      lastMessage: 'Done',
+    }, null, 2));
+
+    const exitCode = await new Promise((resolvePromise, rejectPromise) => {
+      child.on('error', rejectPromise);
+      child.on('close', resolvePromise);
+    });
+
+    assert.equal(exitCode, 0, stderr);
+    assert.match(stdout, /Status:\s+running/);
+    assert.match(stdout, /Halfway there/);
+    assert.match(stdout, /Status:\s+completed/);
+  });
+
+  it('recipe continue resumes an eligible run through the same Guardrail wrapper path', () => {
+    const dir = tmpDir();
+    const stateDir = join(dir, '.guardrail');
+    mkdirSync(stateDir, { recursive: true });
+    const progressFile = join(stateDir, 'ai-progress.ndjson');
+    const stateFile = join(stateDir, 'ai-progress-state.json');
+    const argsFile = join(dir, 'continue-args.json');
+
+    writeFileSync(stateFile, JSON.stringify({
+      runId: 'run-continue',
+      status: 'waiting_for_input',
+      sessionName: 'continue-session',
+      sessionId: 'sess-123',
+      workingDir: dir,
+      progressArtifact: progressFile,
+    }, null, 2));
+    writeFileSync(progressFile, '');
+
+    const stub = `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));
+process.stdout.write('continued\\n');
+`;
+    const { binDir } = writeClaudeStub(dir, stub);
+
+    const result = spawnSync('node', [
+      CLI_PATH,
+      'recipe',
+      'continue',
+      '--state-dir', stateDir,
+      '--prompt', 'ship it',
+    ], {
+      cwd: resolve(process.cwd()),
+      env: { ...process.env, PATH: prependPath(binDir) },
+      encoding: 'utf8',
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /continued/);
+
+    const argv = JSON.parse(readFileSync(argsFile, 'utf8'));
+    assert.ok(argv.includes('--print'));
+    assert.ok(argv.includes('--name'));
+    assert.ok(argv.includes('continue-session'));
+
+    const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+    assert.equal(state.status, 'completed');
   });
 });

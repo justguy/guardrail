@@ -658,6 +658,8 @@ The bundled `codex-exec` and `claude-exec` recipes are Guardrail-managed wrapper
 - working-directory control plus additional tool-access directories
 - model/provider/profile/effort/tool/budget flags supported by the underlying CLI
 - bounded agent session contracts via `lifecycle` (`start` / `continue` / `attach`), `session_name`, and `session_id`
+- a recipe-owned bounded invoke timeout for longer AI CLI runs (`claude-exec` now uses 900000ms / 15m instead of the generic 60000ms worker fallback)
+- a Guardrail-owned AI progress channel for long one-shot Claude runs via `.guardrail/ai-progress.ndjson`, `.guardrail/ai-progress-state.json`, `guardrail recipe progress --state-dir .guardrail [--follow]`, and `guardrail recipe continue --state-dir .guardrail --prompt "..."`
 
 Agent session contracts:
 
@@ -672,6 +674,14 @@ Important prompt-handling rules:
 - Guardrail stores SHA-256 content hashes for `input_files` in the approved recipe manifest and rechecks them immediately before execution.
 - Inline `prompt` and `system_prompt` values are `review_each_time` inputs: they require fresh approval every run, even if the text is unchanged.
 - For repeatable unattended automation, prefer stable prompt material in `input_files` instead of inline prompt text.
+- For long-running bounded implementation packets, tell Claude to create the declared report artifact immediately and append short progress checkpoints there instead of relying on final stdout alone for operator feedback.
+- For live monitoring of one-shot Claude packets, use `guardrail recipe progress --state-dir .guardrail --follow` before falling back to raw host inspection. This surfaces the Guardrail-owned AI progress file/state summary plus soft states such as `waiting_for_review`, `waiting_for_input`, `drift_warning`, and `stalled`.
+- If the run lands in a continuation-eligible soft state, use `guardrail recipe continue --state-dir .guardrail --prompt "<response>"` to resume the same bounded session identity.
+- For autonomous edit-bearing Claude runs, prefer `mode=acceptEdits` over `mode=default`; `default` can leave a non-interactive `claude --print` run idling on hidden tool-approval behavior.
+
+Important caveat for the progress channel:
+
+- The progress file is Guardrail-owned and queryable in real time, but the content of the checkpoints is still model-cooperative. Guardrail can detect silence/stalls and surface soft states, but it cannot force Claude to write high-quality progress messages if the wrapper contract is ignored.
 
 Naming convention for AI wrapper recipes:
 
@@ -750,7 +760,7 @@ Recipe inputs are validated by schema, but approval reuse is still exact-value b
 
 > Think of it as the App Store for safe execution.
 
-The enterprise roadmap is split into two honest layers. The adoption layer covers identity/admin lifecycle, reliability/operations, deployment control, FinOps, and operational integrations. The architecture layer explicitly tracks four design pillars: Sovereign Data & Defense, Multi-Tenant Architecture & Scale, AI-Specific Governance, and the Commercial Surface. The current codebase already contains the local control-plane seams for those areas — approval chains, org policy, RBAC logic, audit/compliance export, runtime tripwires, deployment modes, self-hosted registry flows, notifications, adapter abstractions, and model/runtime policy hooks — even where the hosted enterprise infrastructure is still not wired. The roadmap now also classifies those items into P0/P1/P2 so it is clear which seams must be designed in now, which backends are required before real enterprise rollout, and which items are later maturity work; existing enterprise partials are explicitly folded into those tracked items instead of being left as free-floating gaps. The P0 layer is also broken into ordered autonomous execution slices so another guarded agent can work one item at a time, prove it, update docs, and continue. Detailed packet files for those P0 slices now live under `docs/plans/PLAN_enterprise_P0*.md`. The authoritative status and backlog for that work lives in [docs/technical-status.md](docs/technical-status.md).
+The enterprise roadmap is split into two honest layers. The adoption layer covers identity/admin lifecycle, reliability/operations, deployment control, FinOps, and operational integrations. The architecture layer explicitly tracks four design pillars: Sovereign Data & Defense, Multi-Tenant Architecture & Scale, AI-Specific Governance, and the Commercial Surface. The current codebase already contains the local control-plane seams for those areas — approval chains, org policy, RBAC logic, audit/compliance export, runtime tripwires, deployment modes, self-hosted registry flows, notifications, adapter abstractions, and model/runtime policy hooks — even where the hosted enterprise infrastructure is still not wired. Guardrail now also ships the first executed P0 seam: a universal `authorize(action, facts)` boundary in `src/authorization.js` that command, recipe, workflow, template, adapter, and resident-lane startup paths call before execution. The roadmap classifies the remaining enterprise work into P0/P1/P2 so it is clear which seams must be designed in now, which backends are required before real enterprise rollout, and which items are later maturity work; existing enterprise partials are explicitly folded into those tracked items instead of being left as free-floating gaps. The P0 layer is also broken into ordered autonomous execution slices so another guarded agent can work one item at a time, prove it, update docs, and continue. Detailed packet files for those P0 slices now live under `docs/plans/PLAN_enterprise_P0*.md`. The authoritative status and backlog for that work lives in [docs/technical-status.md](docs/technical-status.md).
 
 ---
 

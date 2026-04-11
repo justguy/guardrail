@@ -146,31 +146,31 @@ export function dryRun(recipe, resolvedInputs, opts = {}) {
   };
 }
 
-function buildRecipeEnvPolicy(recipe, envAllow = [], cwd = null) {
+function buildRecipeEnvPolicy(recipe, envAllow = [], cwd = null, envExtra = null) {
   const requiredEnv = [
     ...(recipe.requires_env || []),
     ...deriveAuthEnvRequirements(recipe.requires_auth || []),
   ];
+  const extraInject = envExtra && typeof envExtra === 'object' ? envExtra : {};
+  const injectBase = cwd ? { PWD: cwd } : {};
+  const inject = { ...injectBase, ...extraInject };
+
   if (requiredEnv.length === 0 && (!Array.isArray(envAllow) || envAllow.length === 0)) {
+    if (Object.keys(extraInject).length > 0) {
+      return { inherit: true, inject };
+    }
     return undefined;
   }
 
   if (recipe.preserve_runtime_env === true) {
-    return {
-      inherit: true,
-      inject: cwd ? { PWD: cwd } : {},
-    };
+    return { inherit: true, inject };
   }
 
   const allow = [...new Set(['PATH', ...(envAllow || [])])];
-  return {
-    inherit: false,
-    allow,
-    inject: cwd ? { PWD: cwd } : {},
-  };
+  return { inherit: false, allow, inject };
 }
 
-function buildStructuredRecipeStepContract(recipe, step, resolvedInputs, cwd, envAllow = []) {
+function buildStructuredRecipeStepContract(recipe, step, resolvedInputs, cwd, envAllow = [], envExtra = null) {
   const args = interpolateRecipeArgs(step.run?.args || [], resolvedInputs);
   const command = step.run?.command || '';
 
@@ -179,7 +179,7 @@ function buildStructuredRecipeStepContract(recipe, step, resolvedInputs, cwd, en
     args,
     cwd,
     mode: 'structured',
-    envPolicy: buildRecipeEnvPolicy(recipe, envAllow, cwd),
+    envPolicy: buildRecipeEnvPolicy(recipe, envAllow, cwd, envExtra),
     authPreflight: {
       requirements: recipe.requires_auth || [],
     },
@@ -348,7 +348,7 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
       ? buildComposedTransportContract(recipe, step, resolvedInputs, preparedComposition, cwd)
       : null;
     const contract = composedContracts?.transportContract
-      ?? buildStructuredRecipeStepContract(recipe, step, resolvedInputs, cwd, opts.envAllow);
+      ?? buildStructuredRecipeStepContract(recipe, step, resolvedInputs, cwd, opts.envAllow, opts.envExtra ?? null);
     const command = contract.command;
     const args = contract.args || [];
 
@@ -416,7 +416,11 @@ export async function executeRecipe(recipe, resolvedInputs, opts = {}) {
     // Execute step
     let workerResult;
     try {
-      workerResult = await launchWorker(contract, { timeoutMs: step.run?.timeoutMs || 60000, validatorMode: 'exit_code' });
+      workerResult = await launchWorker(contract, {
+        timeoutMs: step.run?.timeoutMs || 60000,
+        validatorMode: 'exit_code',
+        onStderr: opts.onStderr ?? null,
+      });
     } catch (err) {
       await maybeRunRollback(step);
       results.push({ step: step.id, success: false, error: err.message });

@@ -19,6 +19,7 @@ Standardize metadata helpers and schema fields for:
 - `retention_class`
 - payload hash
 - sensitivity/classification labels
+- source provenance fields that distinguish project-local roots from shared global roots for templates and recipes
 
 Wire these into local audit/export/event paths now where doing so is honest without pretending hosted persistence already exists.
 
@@ -40,6 +41,7 @@ Wire these into local audit/export/event paths now where doing so is honest with
 ## Proof Of Done
 
 - the metadata fields have one documented canonical shape
+- shared global roots and project-local roots have one documented canonical provenance shape
 - audit/export tests prove they round-trip
 - payload hash behavior stays deterministic where required
 - docs explain these as day-1 hosted record fields, not as a fake hosted backend

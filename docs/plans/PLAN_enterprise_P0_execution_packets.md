@@ -46,6 +46,7 @@ Every packet must leave behind:
 - updated roadmap text in `docs/technical-status.md`
 - any necessary operator/user-facing note in `README.md`
 - a report file under `docs/plans/REPORT_enterprise_P0*.md`
+- for long-running Claude-driven packets, the report file must be created early and used as the operator-visible progress heartbeat instead of relying on delayed final stdout
 
 ## Shared Review Questions
 

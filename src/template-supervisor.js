@@ -30,8 +30,8 @@ import { validateResult } from './validator.js';
 import { createContract, verifyFileHash } from './contract.js';
 import { promptApproval, STATUS_EXIT_CODES } from './supervisor.js';
 import { persistStateSafe, buildEnvFromPolicy } from './shared.js';
-import { checkTimePolicy, acquireLock } from './runtime-policy.js';
 import { createAuditLog } from './audit.js';
+import { authorize, ACTIONS } from './authorization.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -537,35 +537,33 @@ export async function runTemplateSupervisor(options) {
       }
     }
 
-    // ---- Runtime policy: time limits and concurrency lock -------------------
+    // ---- Runtime policy: unified authorization gate -------------------------
     const runtimeLimits = options.runtimeLimits ?? null;
     const auditLog = createAuditLog(resolve(stateDir, 'audit.jsonl'));
 
-    if (runtimeLimits) {
-      const timeCheck = checkTimePolicy(runtimeLimits, templateHash, stateDir);
-      if (!timeCheck.allowed) {
-        const detail = timeCheck.errors.map(e => e.detail).join('; ');
-        logger.error('time_policy_violated', { errors: timeCheck.errors });
-        auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: templateHash, reason: detail });
-        const reason = `Time policy violated: ${detail}`;
-        if (!jsonOutput) {
-          printResult({ success: false, exitCode: STATUS_EXIT_CODES.time_policy_violated, message: reason });
-        }
-        return emitFinalResult('time_policy_violated', { ...resultOpts, reason });
-      }
-    }
-
-    const lockResult = acquireLock(templateHash, [], stateDir);
-    if (!lockResult.acquired) {
-      logger.error('concurrent_blocked', { detail: lockResult.detail });
-      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: templateHash, reason: lockResult.detail });
-      const reason = `Concurrent execution blocked: ${lockResult.detail}`;
+    const templateRuntimeAuth = await authorize(ACTIONS.TEMPLATE_RUN, {
+      runtimeLimits,
+      manifestHash: templateHash,
+      stateDir,
+    });
+    if (!templateRuntimeAuth.allowed) {
+      logger.error('template_runtime_authorization_denied', {
+        code:   templateRuntimeAuth.code,
+        reason: templateRuntimeAuth.reason,
+      });
+      auditLog.append({ event: 'blocked', trace_id: runId, manifest_hash: templateHash, reason: templateRuntimeAuth.reason });
       if (!jsonOutput) {
-        printResult({ success: false, exitCode: STATUS_EXIT_CODES.concurrent_blocked, message: reason });
+        const tStatus = templateRuntimeAuth.code === 'time_policy_violated'
+          ? 'time_policy_violated'
+          : 'concurrent_blocked';
+        printResult({ success: false, exitCode: STATUS_EXIT_CODES[tStatus], message: templateRuntimeAuth.reason });
       }
-      return emitFinalResult('concurrent_blocked', { ...resultOpts, reason });
+      const tStatus = templateRuntimeAuth.code === 'time_policy_violated'
+        ? 'time_policy_violated'
+        : 'concurrent_blocked';
+      return emitFinalResult(tStatus, { ...resultOpts, reason: templateRuntimeAuth.reason });
     }
-    lockRelease = lockResult.release;
+    lockRelease = templateRuntimeAuth.release;
 
     auditLog.append({ event: 'execution_start', trace_id: runId, manifest_hash: templateHash });
     emitTemplateProgress(progressSink, runId, 'execution_start', {
