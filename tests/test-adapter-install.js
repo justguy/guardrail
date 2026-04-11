@@ -529,14 +529,43 @@ describe('installAdapterProfile — source routing', () => {
     await assert.rejects(
       () => installAdapterProfile('aider', { profileDir: join(work, 'store') }),
       (err) => {
-        assert.ok(
-          err.message.includes('is not a local path, URL, or github:// source'),
-          `expected bare-name fallthrough message, got: ${err.message}`
-        );
-        assert.ok(err.message.includes('github://'));
+        assert.ok(err.message.includes('Bare-name adapter install requires a signed index.'));
         return true;
       }
     );
+  });
+
+  it('resolves a bare tool name through a verified signed index when index inputs are provided', async () => {
+    const { index, publicKeyPem } = makeSignedAdapterIndex({
+      aider: {
+        owner: 'guardrail-dev',
+        repo: 'adapter-profiles',
+        path: 'aider.json',
+        sha: 'a'.repeat(40),
+        version: '1.0.0',
+        content_hash: 'b'.repeat(64),
+      },
+    });
+    const indexPath = join(work, 'adapter-profiles.index.json');
+    const keyPath = join(work, 'adapter-profiles.index.pub.pem');
+    writeFileSync(indexPath, JSON.stringify(index, null, 2));
+    writeFileSync(keyPath, publicKeyPem);
+
+    let seenUrl = null;
+    const result = await installAdapterProfile('aider', {
+      profileDir: join(work, 'store'),
+      configPath: makeConfig(work, ['github://guardrail-dev/adapter-profiles/']),
+      indexPath,
+      indexKeyPath: keyPath,
+      fetchJson: async (url) => {
+        seenUrl = url;
+        return makeProfile({ tool: 'aider' });
+      },
+    });
+
+    assert.equal(result.installed, true);
+    assert.equal(result.tool, 'aider');
+    assert.ok(seenUrl && seenUrl.includes('/adapter-profiles/'));
   });
 });
 

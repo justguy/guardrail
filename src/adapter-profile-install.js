@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { validateProfile, hashProfile } from './adapter-profile.js';
 import { loadRawJson } from './recipe.js';
 import { parseGitHubUrl, checkTrustedSource, loadConfig } from './recipe-install.js';
+import { resolveAdapterProfileFromSignedIndex } from './adapter-profile-index.js';
 
 // ---------------------------------------------------------------------------
 // Shared validation helper — produces a stable error prefix that downstream
@@ -181,12 +182,11 @@ export async function installAdapterProfile(source, opts = {}) {
     return installFromUrl(source, opts);
   }
   if (/^[a-z][a-z0-9-]*$/.test(source) && !existsSync(source)) {
-    throw new Error(
-      `"${source}" is not a local path, URL, or github:// source.\n` +
-      'To install from the public registry, use the full GitHub URL:\n' +
-      `  guardrail adapter profile install github://guardrail-dev/adapter-profiles/${source}.json@<sha>\n` +
-      'Browse available profiles at: https://github.com/guardrail-dev/adapter-profiles'
-    );
+    const resolved = resolveAdapterProfileFromSignedIndex(source, {
+      indexPath: opts.indexPath,
+      indexKeyPath: opts.indexKeyPath,
+    });
+    return installFromGitHub(resolved.source, opts);
   }
   return installFromPath(source, opts);
 }

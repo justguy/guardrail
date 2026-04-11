@@ -184,7 +184,7 @@ Commands:
   adapter mcp call --tool <name>        Perform one bounded MCP tools/call over stdio
   adapter mcp batch --tool <name>       Perform a bounded ordered MCP tools/call batch over stdio
   adapter shim --tool <n> --commands <c>  Create PATH shims for adapter interception
-  adapter profile install <source>      Install an adapter profile
+  adapter profile install <source>      Install an adapter profile (path/url/github:// or bare name with --index/--index-key)
   adapter profile index verify <path> --index-key <pubkey.pem>  Verify a signed adapter profile index file
   adapter profile list                  List adapter profiles
   adapter profile show <tool>           Show adapter profile details

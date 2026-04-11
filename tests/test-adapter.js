@@ -691,6 +691,20 @@ describe('parseAdapterArgs', async () => {
     assert.equal(r.source, './file.json');
   });
 
+  it('parses adapter profile install bare-name with signed index flags', () => {
+    const r = parseAdapterArgs([
+      'profile', 'install', 'cline',
+      '--index', './adapter-profiles.index.json',
+      '--index-key', './adapter-profiles.index.pub.pem',
+      '--force',
+    ]);
+    assert.equal(r.subcommand, 'adapter-profile-install');
+    assert.equal(r.source, 'cline');
+    assert.equal(r.indexPath, './adapter-profiles.index.json');
+    assert.equal(r.indexKeyPath, './adapter-profiles.index.pub.pem');
+    assert.equal(r.force, true);
+  });
+
   it('parses adapter profile list', () => {
     const r = parseAdapterArgs(['profile', 'list']);
     assert.equal(r.subcommand, 'adapter-profile-list');
@@ -1101,7 +1115,7 @@ describe('adapter-profile-install', async () => {
   it('bare-name install is rejected', async () => {
     await assert.rejects(
       () => installAdapterProfile('openclaw'),
-      /not a local path/
+      /signed index/
     );
   });
 });

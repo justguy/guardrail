@@ -520,6 +520,7 @@ Useful adapter subcommands:
 - `guardrail adapter mcp batch --tool <name> --calls-json <json>`
 - `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`
 - `guardrail adapter profile install github://owner/repo/path.json@<sha>`
+- `guardrail adapter profile install <tool-name> --index <path> --index-key <pubkey.pem>`
 - `guardrail adapter profile list`
 - `guardrail adapter profile show <tool>`
 
@@ -533,7 +534,7 @@ Bounded auth preflight behavior:
 - The same bounded `requires_env` / `requires_auth` preflight now applies to standalone recipe mode and workflow `recipe_ref` execution too. For composed host-runtime recipes, env mapping is checked before launch and the child tool-auth preflight runs again inside the selected host runtime before the downstream CLI starts.
 - MCP protocol profiles are intentionally blocked for `adapter run` in v0.2. Use `adapter probe` or `adapter mcp tools` for bounded discovery and `adapter mcp call` / `adapter mcp batch` for explicit `tools/call` execution; do not reinterpret arbitrary shell commands as MCP requests.
 - When an MCP profile declares required capability discovery, Guardrail now validates `--mcp-tool <name>` against the discovered MCP tool set before it launches the bounded `tools/call`. Treat an unknown-tool validation failure as a caller error, not as proof that the transport itself is broken.
-- Bare-name adapter-profile install is still intentionally blocked. The only shipped A1 groundwork is signed-index verification through `adapter profile index verify <path> --index-key <pubkey.pem>`, which is for local/team validation of index publishing rather than public-name discovery.
+- Bare-name adapter-profile install is now supported only when you also provide a signed index plus public key: `adapter profile install <tool> --index <path> --index-key <pubkey.pem>`. Treat that as a local/team distribution flow, not ambient public discovery. Without those index inputs, bare-name install still fails closed.
 
 Host runtime decision rule:
 

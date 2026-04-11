@@ -513,11 +513,12 @@ guardrail adapter profile index verify ./adapter-profiles.index.json --index-key
 
 Bare-name install is deferred until a signed index exists, exactly like recipe distribution.
 
-Current A1 groundwork:
+Current A1 state:
 
 - Guardrail can now validate a signed adapter-profile index file locally with `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`
 - index entries are constrained to SHA-pinned `github://...@<40-char-sha>` sources plus declared `protocol`, `version`, and `content_hash`
-- this is local/team verification groundwork only; public bare-name install remains intentionally blocked until trusted-index verification exists
+- Guardrail can now resolve `adapter profile install <tool-name>` through that verified local signed index when the caller explicitly supplies both `--index <path>` and `--index-key <pubkey.pem>`
+- this is still a local/team verification flow only; ambient public bare-name discovery remains intentionally blocked until trusted-index verification exists for a public distribution channel
 
 ### Trust Model
 

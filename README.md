@@ -775,6 +775,7 @@ guardrail adapter probe --tool cline
 guardrail adapter mcp tools --tool cline
 guardrail adapter mcp call --tool cline --mcp-tool echo --params-json '{"text":"hi"}'
 guardrail adapter mcp batch --tool cline --calls-json '[{"tool":"echo","params":{"text":"hi"}},{"tool":"echo","params":{"text":"bye"}}]'
+guardrail adapter profile install aider --index ./adapter-profiles.index.json --index-key ./adapter-profiles.index.pub.pem
 guardrail adapter run --tool cline -- echo "still blocked in v0.2"
 guardrail adapter profile index verify ./adapter-profiles.index.json --index-key ./adapter-profiles.index.pub.pem
 guardrail adapter profile install github://guardrail-dev/adapter-profiles/openclaw.json@<sha>
@@ -797,8 +798,9 @@ Adapter caveats:
 - `adapter mcp tools` is the agent-facing inventory view for that same bounded discovery path. Use it when you need the actual MCP tool names or input-schema-bearing metadata Guardrail observed before choosing a tool.
 - `adapter mcp call` is the first bounded MCP execution slice. It still requires explicit MCP tool selection plus JSON params, and it does not reinterpret arbitrary shell commands as MCP calls. Guardrail now validates the requested MCP tool against the discovered tool set when the profile declares required capability discovery.
 - `adapter mcp batch` is the next bounded execution slice. It still requires an explicit JSON array of `{ tool, params }` objects and still runs under one bounded stdio session; it does not reinterpret arbitrary shell commands as ambient MCP execution.
-- Signed adapter-profile index groundwork is now shipped via `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`. It validates the index schema and signature so teams can test index publishing locally, but bare-name install is still intentionally blocked until Guardrail has real trusted-index verification for public distribution.
+- Signed adapter-profile index verification is now shipped via `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`, and Guardrail can now also resolve `adapter profile install <tool-name>` through that verified local index when you pass both `--index` and `--index-key`. This is still a local/team distribution flow, not ambient public discovery.
 - `adapter run` for MCP profiles is still blocked at CLI level in v0.2. If you need bounded MCP execution now, use `adapter mcp call` or `adapter mcp batch`; if you need general IDE-style protocol execution, use the env-shim path until broader MCP runtime semantics ship.
+- Bare-name adapter-profile install still fails closed by default. It only succeeds when you explicitly provide a signed local index and matching public key with `--index` and `--index-key`.
 - `--env-allow` is bounded and explicit. It only controls what environment keys are handed to the adapter process for that run.
 - `claude-exec` and `codex-exec` are approval-bounded wrappers, not outer sandboxes. If you run them outside your host sandbox/container boundary, the underlying AI CLI runs with host privileges subject to its own permission model. Guardrail now calls this out as a yellow-to-red risk reason in approval UX.
 

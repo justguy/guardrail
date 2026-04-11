@@ -104,7 +104,7 @@ function parseMcpBatchArgs(argv, startIndex, result) {
  *   adapter mcp call --tool <name> --mcp-tool <tool> [--params-json <json>] [--env-allow <VAR>] [--timeout-ms <ms>]
  *   adapter mcp batch --tool <name> --calls-json <json> [--env-allow <VAR>] [--timeout-ms <ms>]
  *   adapter shim --tool <name> --commands <cmd1,cmd2> [--list] [--remove <cmd>] [--install-path [--write]]
- *   adapter profile install <path|url|github://>
+ *   adapter profile install <path|url|github://|bare-name> [--index <path>] [--index-key <pubkey.pem>]
  *   adapter profile index verify <path> [--index-key <pubkey.pem>]
  *   adapter profile list
  *   adapter profile show <tool>
@@ -210,11 +210,15 @@ export function parseAdapterArgs(argv) {
         subcommand: 'adapter-profile-install',
         source: argv[2],
         force: false,
+        indexPath: null,
+        indexKeyPath: null,
       }, {
         '--force': (parsed, _argv, index) => {
           parsed.force = true;
           return { nextIndex: index + 1 };
         },
+        '--index': valueFlag('indexPath'),
+        '--index-key': valueFlag('indexKeyPath'),
       });
     }
 
@@ -376,7 +380,7 @@ export async function runAdapterCli(adapterArgv, options = {}) {
     console.error('  adapter shim --list');
     console.error('  adapter shim --remove <command>');
     console.error('  adapter shim --install-path [--write]');
-    console.error('  adapter profile install <path|url|github://>');
+    console.error('  adapter profile install <path|url|github://|bare-name> [--index path] [--index-key pubkey.pem]');
     console.error('  adapter profile index verify <path> --index-key <pubkey.pem>');
     console.error('  adapter profile list');
     console.error('  adapter profile show <tool>');
@@ -669,7 +673,11 @@ export async function runAdapterCli(adapterArgv, options = {}) {
   if (parsed.subcommand === 'adapter-profile-install') {
     const { installAdapterProfile } = await import('./adapter-profile-install.js');
     try {
-      const result = await installAdapterProfile(parsed.source, { force: parsed.force });
+      const result = await installAdapterProfile(parsed.source, {
+        force: parsed.force,
+        indexPath: parsed.indexPath,
+        indexKeyPath: parsed.indexKeyPath,
+      });
       console.log(`Installed adapter profile "${result.tool}" v${result.version}`);
       console.log(`  Path: ${result.path}`);
       console.log(`  Hash: ${result.hash}`);
