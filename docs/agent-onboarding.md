@@ -330,7 +330,7 @@ AI execution recipes:
 - `lane result` is the bounded recovery/read step for those cases. Use it to fetch the stored output for the latest or named request after a long-running turn completes.
 - `lane inspect` is the bounded triage step when you want one command that shows status, latest result, and a log tail together.
 - `lane history` is the bounded audit timeline step when you want the recent `lane_start` / `lane_send` / `lane_result` / `lane_wait` / `lane_cleanup` / `lane_stop` trail for one lane without opening the raw audit file.
-- `lane portfolio` is the bounded swarm timeline step when you need one surface for startup, prune, cleanup, and other lane lifecycle events across the repo audit log or the mirrored host-level lane audit (`--all-repos`) instead of pivoting lane by lane.
+- `lane portfolio` is the bounded swarm timeline step when you need one surface for startup, prune, cleanup, and other lane lifecycle events across the repo audit log or the mirrored host-level lane audit (`--all-repos`) instead of pivoting lane by lane. It also gives you the currently visible live-lane snapshot plus event/tool/status summaries, so use it before asking for raw host-wide swarm state.
 - `lane logs` is the bounded diagnosis step when status/result are not enough. Use it before raw host-pane inspection so you can read the local lane log tail without paying another transport approval.
 - `lane wait` is the bounded wait/recovery step for those cases. Use it when you want Guardrail to keep polling for completion instead of dropping to raw host inspection or an ad hoc retry loop.
 - `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
