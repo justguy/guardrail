@@ -1,6 +1,6 @@
 # Guardrail — Human-Domain Routing Gates and Risk Scoring
 
-Status: Tracked roadmap plan (`H0a`) for routing-gate hardening and benchmark-runner wiring  
+Status: Tracked roadmap plan (`H0a`) for routing-gate hardening and benchmark-runner wiring. Guardrail now ships reusable helper groundwork in `src/llm-json.js` and `src/human-domain-routing.js`; benchmark-runner integration is still open.  
 Audience: Maintainers wiring LLM-based domain triage, premise-rejection gates, and human-risk scoring into evaluation pipelines  
 Goal: Make routing-gate decisions fail closed, avoid sensitive-content leakage, and document the safe order of operations before rerunning the human/workplace benchmark subset
 

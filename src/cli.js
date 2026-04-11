@@ -57,6 +57,49 @@ function formatLaneScope(status = {}) {
   return `${scopeType}/${status.scopeMode || 'warn'}${details}`;
 }
 
+function buildLaneRefArg(status = {}) {
+  if (status.laneId) return `--id ${status.laneId}`;
+  if (status.laneDir) return `--lane-dir ${status.laneDir}`;
+  return '';
+}
+
+function buildLaneRecommendedCommand(status = {}) {
+  const ref = buildLaneRefArg(status);
+  const toolSuffix = status.tool && status.tool !== 'claude' ? ` --tool ${status.tool}` : '';
+  switch (status.recommendedAction) {
+    case 'start':
+      return ref ? `guardrail lane start ${ref}${toolSuffix}` : 'guardrail lane start --id <lane-id>';
+    case 'send':
+      return ref ? `guardrail lane send ${ref} --prompt "<message>"` : 'guardrail lane send --id <lane-id> --prompt "<message>"';
+    case 'result':
+      if (status.currentRequestId) return `guardrail lane wait ${ref} --request-id ${status.currentRequestId}`;
+      if (status.lastRequestId) return `guardrail lane result ${ref} --request-id ${status.lastRequestId}`;
+      return `guardrail lane result ${ref}`;
+    case 'cleanup':
+      return `guardrail lane stop ${ref}`;
+    default:
+      return null;
+  }
+}
+
+function buildLaneInspectBundle(laneOpts, status, getResidentLaneResult, getResidentLaneLogs) {
+  const requestId = status.currentRequestId || status.lastCompletedRequestId || status.lastRequestId || null;
+  return {
+    status: {
+      ...status,
+      recommendedCommand: buildLaneRecommendedCommand(status),
+    },
+    latestResult: getResidentLaneResult({
+      ...laneOpts,
+      requestId: laneOpts.requestId || requestId || undefined,
+    }),
+    logs: getResidentLaneLogs({
+      ...laneOpts,
+      tail: laneOpts.tail || 40,
+    }),
+  };
+}
+
 function ensureLaneKeyFile(keyPath) {
   mkdirSync(dirname(keyPath), { recursive: true });
   const secret = randomBytes(32).toString('hex');
@@ -158,6 +201,7 @@ Commands:
   lane result [flags]                   Read the latest or named resident lane result
   lane wait [flags]                     Wait for a resident lane request to complete
   lane status [flags]                   Show resident lane status and recovery hints
+  lane inspect [flags]                  Show status, latest result, and bounded logs together
   lane logs [flags]                     Read the bounded resident lane log tail
   lane stop [flags]                     Stop a resident interactive lane
   lane list [flags]                     List resident lanes in this Guardrail repo
@@ -235,6 +279,7 @@ Examples:
   guardrail lane result --id claude-live
   guardrail lane wait --id claude-live --request-id req-123
   guardrail lane result --id claude-live --request-id req-123
+  guardrail lane inspect --id claude-live --tail 60
   guardrail lane logs --id claude-live --tail 60
   guardrail lane stop --id claude-live
   guardrail lane list --json
@@ -307,8 +352,15 @@ export function parseArgs(argv) {
         i++;
         continue;
       }
-      const key = mappings[arg];
-      if (!key) return { error: 'usage' };
+      const mapping = mappings[arg];
+      if (!mapping) return { error: 'usage' };
+      const key = typeof mapping === 'string' ? mapping : mapping.key;
+      const isBoolean = typeof mapping === 'object' && mapping.boolean === true;
+      if (isBoolean) {
+        target[key] = true;
+        i++;
+        continue;
+      }
       i++;
       if (i >= argv.length) return { error: 'usage' };
       const value = argv[i++];
@@ -687,7 +739,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'result', 'wait', 'status', 'logs', 'stop', 'list', 'prune', 'adapters'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'result', 'wait', 'status', 'inspect', 'logs', 'stop', 'list', 'prune', 'adapters'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -724,19 +776,20 @@ export function parseArgs(argv) {
       '--scope-mode': 'scopeMode',
       '--scope-path': 'scopePaths',
       '--scope-paths': 'scopePaths',
-      '--no-session-persistence': 'noSessionPersistence',
+      '--no-session-persistence': { key: 'noSessionPersistence', boolean: true },
       '--auth-fd': 'authFd',
       '--poll-interval-ms': 'pollIntervalMs',
       '--idle-timeout-ms': 'idleTimeoutMs',
       '--request-id': 'requestId',
       '--prompt': 'prompt',
+      '--wait': { key: 'wait', boolean: true },
       '--timeout-ms': 'timeoutMs',
       '--tail': 'tail',
       '--scope-type': 'scopeType',
       '--scope-mode': 'scopeMode',
       '--scope-path': 'scopePaths',
       '--lanes-dir': 'lanesDir',
-      '--include-failed': 'includeFailed',
+      '--include-failed': { key: 'includeFailed', boolean: true },
     });
     return error || result;
   }
@@ -1206,7 +1259,7 @@ async function main() {
   // --- lane start/send -----------------------------------------------------
 
   if (parsed.subcommand === 'lane-start') {
-    const { launchResidentLane } = await import('./resident-lane.js');
+    const { assertValidResidentLaneTool, launchResidentLane } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     if (!laneOpts.laneId && !laneOpts.laneDir) {
       console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane start');
@@ -1214,6 +1267,12 @@ async function main() {
     }
     if (!laneOpts.sessionName) {
       console.error('Error: --session-name <name> or --id <lane-id> is required for lane start');
+      process.exit(1);
+    }
+    try {
+      assertValidResidentLaneTool(laneOpts);
+    } catch (err) {
+      console.error(err.message);
       process.exit(1);
     }
     if (laneOpts.keyPath && existsSync(laneOpts.keyPath) && !isLikelyLaneAlive(laneOpts.laneDir)) {
@@ -1295,7 +1354,12 @@ async function main() {
 
   if (parsed.subcommand === 'lane-send') {
     const { sendResidentLaneMessage } = await import('./resident-lane-client.js');
-    const { getResidentLaneResult, getResidentLaneStatus } = await import('./resident-lane.js');
+    const {
+      assertValidResidentLaneTool,
+      getResidentLaneResult,
+      getResidentLaneStatus,
+      waitForResidentLaneResult,
+    } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     if (!laneOpts.laneId && !laneOpts.laneDir) {
       console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane send');
@@ -1303,6 +1367,12 @@ async function main() {
     }
     if (!laneOpts.prompt) {
       console.error('Error: --prompt <text> is required for lane send');
+      process.exit(1);
+    }
+    try {
+      assertValidResidentLaneTool(laneOpts);
+    } catch (err) {
+      console.error(err.message);
       process.exit(1);
     }
     const preflightStatus = getResidentLaneStatus(laneOpts);
@@ -1361,7 +1431,7 @@ async function main() {
           response = {
             status: 'pending',
             reason: 'request_still_running',
-            message: 'Resident lane request is still running. Use `guardrail lane status` or `guardrail lane result` instead of restarting it.',
+            message: 'Resident lane request is still running. Use `guardrail lane wait` or `guardrail lane inspect` instead of restarting it.',
             requestId,
             currentRequestId: status.currentRequestId,
             currentRequestStartedAt: status.currentRequestStartedAt,
@@ -1380,26 +1450,46 @@ async function main() {
       if (keyFd !== null) closeSync(keyFd);
     }
 
+    if (response?.status === 'pending' && (laneOpts.wait === true || laneOpts.wait === 'true')) {
+      response = await waitForResidentLaneResult({
+        ...laneOpts,
+        requestId,
+      });
+    }
+
     await appendLaneAuditEntry(laneOpts, 'lane_send', {
       request_id: requestId,
-      status: response.status === 'pending' ? 'pending' : (response.ok ? 'success' : 'error'),
+      status: response.status === 'pending'
+        ? 'pending'
+        : ((response.ok || response.status === 'completed') ? 'success' : 'error'),
       reason: response.reason || response.error || null,
       exit_code: response.exitCode ?? null,
     });
 
     if (parsed.json) {
       console.log(JSON.stringify(response, null, 2));
-    } else if (response.ok) {
-      process.stdout.write(response.stdout || '');
+    } else if (response.ok || response.status === 'completed') {
+      const stdout = response.stdout ?? response.result?.stdout ?? '';
+      process.stdout.write(stdout);
+      const completedRequestId = response.requestId ?? response.result?.requestId ?? requestId;
+      const completedResultPath = response.resultPath ?? null;
+      if (completedRequestId) console.log(`Request id: ${completedRequestId}`);
+      if (completedResultPath) console.log(`Result path: ${completedResultPath}`);
     } else if (response.status === 'pending') {
       console.log(response.message);
       if (response.requestId) console.log(`Request id: ${response.requestId}`);
       if (response.resultPath) console.log(`Result path: ${response.resultPath}`);
+      console.log(`Next command: ${buildLaneRecommendedCommand({
+        ...laneOpts,
+        recommendedAction: 'result',
+        currentRequestId: response.requestId,
+        lastRequestId: response.requestId,
+      })}`);
     } else {
       console.error(response.error || response.stderr || 'Resident lane request failed');
     }
 
-    process.exit(response.ok || response.status === 'pending' ? 0 : (response.exitCode || 1));
+    process.exit(response.ok || response.status === 'pending' || response.status === 'completed' ? 0 : (response.exitCode || 1));
   }
 
   if (parsed.subcommand === 'lane-result') {
@@ -1419,6 +1509,8 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     } else if (result.status === 'completed') {
       process.stdout.write(result.result?.stdout || '');
+      if (result.requestId) console.log(`Request id: ${result.requestId}`);
+      if (result.resultPath) console.log(`Result path: ${result.resultPath}`);
     } else {
       console.log(result.message);
       if (result.requestId) console.log(`Request id: ${result.requestId}`);
@@ -1444,6 +1536,8 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     } else if (result.status === 'completed') {
       process.stdout.write(result.result?.stdout || '');
+      if (result.requestId) console.log(`Request id: ${result.requestId}`);
+      if (result.resultPath) console.log(`Result path: ${result.resultPath}`);
     } else {
       console.log(result.message);
       if (result.requestId) console.log(`Request id: ${result.requestId}`);
@@ -1486,18 +1580,25 @@ async function main() {
     const { listResidentLanes } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
     const listing = listResidentLanes(laneOpts);
+    const enrichedListing = {
+      ...listing,
+      lanes: listing.lanes.map((lane) => ({
+        ...lane,
+        recommendedCommand: buildLaneRecommendedCommand(lane),
+      })),
+    };
     if (parsed.json) {
-      console.log(JSON.stringify(listing, null, 2));
+      console.log(JSON.stringify(enrichedListing, null, 2));
     } else {
-      console.log(`Lane registry: ${listing.registryDir}`);
-      console.log(`  Total:   ${listing.counts.total || 0}`);
-      for (const [status, count] of Object.entries(listing.counts)) {
+      console.log(`Lane registry: ${enrichedListing.registryDir}`);
+      console.log(`  Total:   ${enrichedListing.counts.total || 0}`);
+      for (const [status, count] of Object.entries(enrichedListing.counts)) {
         if (status === 'total') continue;
         console.log(`  ${status}:`.padEnd(11) + ` ${count}`);
       }
-      if (listing.lanes.length > 0) {
+      if (enrichedListing.lanes.length > 0) {
         console.log('');
-        for (const lane of listing.lanes) {
+        for (const lane of enrichedListing.lanes) {
           const name = lane.laneId || lane.sessionName || lane.laneDir;
           console.log(`${name}: ${lane.status}${lane.alive ? ' (alive)' : ''}`);
           console.log(`  Tool:          ${lane.tool ?? lane.adapterId ?? 'claude'}`);
@@ -1507,6 +1608,7 @@ async function main() {
           console.log(`  Request:       ${lane.currentRequestId ?? lane.lastRequestId ?? 'n/a'}`);
           console.log(`  Last result:   ${lane.lastResultPath ?? 'n/a'}`);
           console.log(`  Action:        ${lane.recommendedAction}`);
+          console.log(`  Next command:  ${lane.recommendedCommand ?? 'n/a'}`);
           if (Array.isArray(lane.scopeConflicts) && lane.scopeConflicts.length > 0) {
             console.log(`  Conflicts:     ${lane.scopeConflicts.length}`);
           }
@@ -1525,6 +1627,40 @@ async function main() {
       console.log('Resident lane adapters:');
       for (const adapter of adapters) {
         console.log(`  ${adapter.id} - ${adapter.description}`);
+        if (Array.isArray(adapter.capabilities) && adapter.capabilities.length > 0) {
+          console.log(`    Capabilities: ${adapter.capabilities.join(', ')}`);
+        }
+      }
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-inspect') {
+    const { getResidentLaneLogs, getResidentLaneResult, getResidentLaneStatus } = await import('./resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane inspect');
+      process.exit(1);
+    }
+    const status = getResidentLaneStatus(laneOpts);
+    const bundle = buildLaneInspectBundle(laneOpts, status, getResidentLaneResult, getResidentLaneLogs);
+    if (parsed.json) {
+      console.log(JSON.stringify(bundle, null, 2));
+    } else {
+      console.log(`Lane status: ${bundle.status.status}`);
+      console.log(`  Tool:               ${bundle.status.tool ?? bundle.status.adapterId ?? 'claude'}`);
+      console.log(`  Scope:              ${formatLaneScope(bundle.status)}`);
+      console.log(`  Request:            ${bundle.status.currentRequestId ?? bundle.status.lastRequestId ?? 'n/a'}`);
+      console.log(`  Last result:        ${bundle.status.lastResultPath ?? 'n/a'}`);
+      console.log(`  Action:             ${bundle.status.recommendedAction}`);
+      console.log(`  Next command:       ${bundle.status.recommendedCommand ?? 'n/a'}`);
+      if (bundle.latestResult?.status) {
+        console.log(`  Result status:      ${bundle.latestResult.status}`);
+      }
+      if (bundle.logs?.text) {
+        console.log('');
+        console.log(`Lane log tail (${bundle.logs.tailLines} lines):`);
+        process.stdout.write(`${bundle.logs.text}${bundle.logs.text.endsWith('\n') ? '' : '\n'}`);
       }
     }
     process.exit(0);
@@ -1586,35 +1722,40 @@ async function main() {
       process.exit(1);
     }
     const status = getResidentLaneStatus(laneOpts);
+    const enrichedStatus = {
+      ...status,
+      recommendedCommand: buildLaneRecommendedCommand(status),
+    };
     if (parsed.json) {
-      console.log(JSON.stringify(status, null, 2));
+      console.log(JSON.stringify(enrichedStatus, null, 2));
     } else {
-      console.log(`Lane status: ${status.status}`);
-      console.log(`  Tool:               ${status.tool ?? status.adapterId ?? 'claude'}`);
-      console.log(`  Scope:              ${formatLaneScope(status)}`);
+      console.log(`Lane status: ${enrichedStatus.status}`);
+      console.log(`  Tool:               ${enrichedStatus.tool ?? enrichedStatus.adapterId ?? 'claude'}`);
+      console.log(`  Scope:              ${formatLaneScope(enrichedStatus)}`);
       if (laneOpts.laneId) console.log(`  Lane id:            ${laneOpts.laneId}`);
-      console.log(`  Lane dir:           ${status.laneDir}`);
-      if (status.sessionName) console.log(`  Session name:       ${status.sessionName}`);
-      if (status.sessionId) console.log(`  Session id:         ${status.sessionId}`);
-      console.log(`  Alive:              ${status.alive ? 'yes' : 'no'}`);
-      console.log(`  PID:                ${status.pid ?? 'n/a'}`);
-      console.log(`  Last request id:    ${status.lastRequestId ?? 'n/a'}`);
-      console.log(`  Current request id: ${status.currentRequestId ?? 'n/a'}`);
-      console.log(`  Request started at: ${status.currentRequestStartedAt ?? 'n/a'}`);
-      console.log(`  Last completed id:  ${status.lastCompletedRequestId ?? 'n/a'}`);
-      console.log(`  Last completed at:  ${status.lastCompletedAt ?? 'n/a'}`);
-      console.log(`  Last result path:   ${status.lastResultPath ?? 'n/a'}`);
-      console.log(`  Failure reason:     ${status.failureReason ?? 'n/a'}`);
-      console.log(`  Failure stage:      ${status.failureStage ?? 'n/a'}`);
-      console.log(`  Log path:           ${status.logPath ?? 'n/a'}`);
-      console.log(`  Last activity at:   ${status.lastActivityAt ?? 'n/a'}`);
-      console.log(`  Key present:        ${status.keyPresent ? 'yes' : 'no'}`);
-      console.log(`  Request FIFO:       ${status.requestFifoPresent ? 'present' : 'missing'}`);
-      console.log(`  Response FIFO:      ${status.responseFifoPresent ? 'present' : 'missing'}`);
-      console.log(`  Recommended action: ${status.recommendedAction}`);
-      if (Array.isArray(status.scopeConflicts) && status.scopeConflicts.length > 0) {
+      console.log(`  Lane dir:           ${enrichedStatus.laneDir}`);
+      if (enrichedStatus.sessionName) console.log(`  Session name:       ${enrichedStatus.sessionName}`);
+      if (enrichedStatus.sessionId) console.log(`  Session id:         ${enrichedStatus.sessionId}`);
+      console.log(`  Alive:              ${enrichedStatus.alive ? 'yes' : 'no'}`);
+      console.log(`  PID:                ${enrichedStatus.pid ?? 'n/a'}`);
+      console.log(`  Last request id:    ${enrichedStatus.lastRequestId ?? 'n/a'}`);
+      console.log(`  Current request id: ${enrichedStatus.currentRequestId ?? 'n/a'}`);
+      console.log(`  Request started at: ${enrichedStatus.currentRequestStartedAt ?? 'n/a'}`);
+      console.log(`  Last completed id:  ${enrichedStatus.lastCompletedRequestId ?? 'n/a'}`);
+      console.log(`  Last completed at:  ${enrichedStatus.lastCompletedAt ?? 'n/a'}`);
+      console.log(`  Last result path:   ${enrichedStatus.lastResultPath ?? 'n/a'}`);
+      console.log(`  Failure reason:     ${enrichedStatus.failureReason ?? 'n/a'}`);
+      console.log(`  Failure stage:      ${enrichedStatus.failureStage ?? 'n/a'}`);
+      console.log(`  Log path:           ${enrichedStatus.logPath ?? 'n/a'}`);
+      console.log(`  Last activity at:   ${enrichedStatus.lastActivityAt ?? 'n/a'}`);
+      console.log(`  Key present:        ${enrichedStatus.keyPresent ? 'yes' : 'no'}`);
+      console.log(`  Request FIFO:       ${enrichedStatus.requestFifoPresent ? 'present' : 'missing'}`);
+      console.log(`  Response FIFO:      ${enrichedStatus.responseFifoPresent ? 'present' : 'missing'}`);
+      console.log(`  Recommended action: ${enrichedStatus.recommendedAction}`);
+      console.log(`  Next command:       ${enrichedStatus.recommendedCommand ?? 'n/a'}`);
+      if (Array.isArray(enrichedStatus.scopeConflicts) && enrichedStatus.scopeConflicts.length > 0) {
         console.log('  Scope conflicts:');
-        for (const conflict of status.scopeConflicts) {
+        for (const conflict of enrichedStatus.scopeConflicts) {
           console.log(`    ${conflict.laneId || conflict.laneDir} (${conflict.enforcement})`);
         }
       }

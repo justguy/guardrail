@@ -11,11 +11,13 @@ const ADAPTER_METADATA = {
     id: 'claude',
     name: 'Claude',
     description: 'Resident lane adapter for Claude CLI execution.',
+    capabilities: ['resident_session', 'interactive_prompt', 'stored_results', 'bounded_logs'],
   },
   codex: {
     id: 'codex',
     name: 'Codex',
     description: 'Resident lane adapter for Codex CLI execution.',
+    capabilities: ['resident_session', 'interactive_prompt', 'stored_results', 'bounded_logs'],
   },
 };
 
@@ -23,8 +25,17 @@ function selectedTool(rawOptions = {}) {
   return rawOptions.tool || rawOptions.adapterId || 'claude';
 }
 
+export function assertValidResidentLaneTool(rawOptions = {}) {
+  const tool = selectedTool(rawOptions);
+  if (!ADAPTERS[tool]) {
+    const supported = Object.keys(ADAPTERS).sort().join(', ');
+    throw new Error(`Unknown resident lane tool "${tool}". Supported tools: ${supported}`);
+  }
+  return tool;
+}
+
 function selectedAdapter(rawOptions = {}) {
-  return ADAPTERS[selectedTool(rawOptions)] || ADAPTERS.claude;
+  return ADAPTERS[assertValidResidentLaneTool(rawOptions)];
 }
 
 export function listResidentLaneAdapters() {

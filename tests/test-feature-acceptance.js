@@ -696,7 +696,8 @@ describe('README Feature: Resident Lane Mode', () => {
 
     const [result] = await Promise.all([laneSend, laneServer]);
     assert.equal(result.exitCode, 0, `lane send should succeed: ${result.stderr}`);
-    assert.equal(result.stdout, '6');
+    assert.ok(result.stdout.startsWith('6'));
+    assert.ok(result.stdout.includes('Request id: req-'));
     const entries = queryAuditLog(join(guardrailRepo, '.guardrail', 'audit.jsonl'), {});
     const laneSendEntry = entries.find((entry) => entry.event === 'lane_send');
     assert.ok(laneSendEntry, 'expected lane_send audit entry');
@@ -757,6 +758,39 @@ describe('README Feature: Resident Lane Mode', () => {
     }
   });
 
+  it('guardrail lane send points text-mode recovery at lane wait', () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    mkdirSync(join(laneDir, 'results'), { recursive: true });
+    const requestFifo = join(laneDir, 'requests.fifo');
+    const responseFifo = join(laneDir, 'responses.fifo');
+    assert.equal(spawnSync('mkfifo', [requestFifo]).status, 0);
+    assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
+    const keyPath = join(dir, 'lane.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'busy',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      currentRequestId: 'req-timeout',
+      currentRequestStartedAt: '2026-04-10T00:00:00.000Z',
+      lastRequestId: 'req-timeout',
+      lastActivityAt: new Date().toISOString(),
+      keyPath,
+    }), 'utf8');
+
+    const requestFd = openSync(requestFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK);
+    try {
+      const r = run(`${CLI} lane send --lane-dir ${laneDir} --key-path ${keyPath} --request-id req-timeout --prompt "2x3=?" --timeout-ms 5`);
+      assert.equal(r.exitCode, 0, r.stderr);
+      assert.ok(r.stdout.includes('guardrail lane wait'));
+      assert.ok(r.stdout.includes('Request id: req-timeout'));
+    } finally {
+      closeSync(requestFd);
+    }
+  });
+
   it('guardrail lane status reports expired lanes cleanly', () => {
     const dir = tmpDir();
     const laneDir = join(dir, 'lane');
@@ -776,6 +810,7 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.status, 'expired');
     assert.equal(parsed.alive, false);
     assert.equal(parsed.recommendedAction, 'start');
+    assert.ok(parsed.recommendedCommand.includes('guardrail lane start'));
   });
 
   it('guardrail lane status reports failed bootstrap reasons cleanly', () => {
@@ -821,6 +856,41 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(parsed.tailLines, 2);
     assert.equal(parsed.text, 'three\nfour');
     assert.equal(parsed.hasLog, true);
+  });
+
+  it('guardrail lane inspect combines status, latest result, and logs', () => {
+    const dir = tmpDir();
+    const laneDir = join(dir, 'lane');
+    const logsDir = join(laneDir, 'logs');
+    const resultsDir = join(laneDir, 'results');
+    mkdirSync(logsDir, { recursive: true });
+    mkdirSync(resultsDir, { recursive: true });
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'math-live',
+      sessionName: 'math-live',
+      lastRequestId: 'req-1',
+      lastCompletedRequestId: 'req-1',
+      lastResultPath: join(resultsDir, 'req-1.json'),
+      logPath: join(logsDir, 'lane.log'),
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+    writeFileSync(join(resultsDir, 'req-1.json'), JSON.stringify({
+      requestId: 'req-1',
+      ok: true,
+      exitCode: 0,
+      stdout: '6\n',
+    }), 'utf8');
+    writeFileSync(join(logsDir, 'lane.log'), 'one\ntwo\nthree\nfour\n', 'utf8');
+
+    const r = run(`${CLI} lane inspect --lane-dir ${laneDir} --tail 2 --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.status.status, 'ready');
+    assert.equal(parsed.latestResult.status, 'completed');
+    assert.equal(parsed.latestResult.result.stdout, '6\n');
+    assert.equal(parsed.logs.text, 'three\nfour');
   });
 
   it('guardrail lane status infers post-start failure from stale startup state', () => {
@@ -952,6 +1022,14 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.ok(Array.isArray(parsed.adapters));
     assert.ok(parsed.adapters.some((adapter) => adapter.id === 'claude'));
     assert.ok(parsed.adapters.some((adapter) => adapter.id === 'codex'));
+    assert.ok(parsed.adapters.every((adapter) => Array.isArray(adapter.capabilities)));
+  });
+
+  it('guardrail lane start rejects unknown tools', () => {
+    const dir = tmpDir();
+    const r = run(`${CLI} lane start --guardrail-repo ${dir} --id bad-tool --tool madeup --json`);
+    assert.equal(r.exitCode, 1);
+    assert.ok(r.stderr.includes('Unknown resident lane tool'));
   });
 
   it('guardrail lane stop appends an audit entry and removes the host key', () => {

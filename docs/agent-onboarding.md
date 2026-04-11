@@ -298,8 +298,10 @@ AI execution recipes:
 - For direct interactive chat that must survive repeated host-runtime turns, prefer the resident lane CLI surface over repeated outer transport launches:
   - `node src/cli.js lane start --id <lane-id> [--tool claude|codex] ...`
   - `node src/cli.js lane send --id <lane-id> --prompt "<message>"`
+  - `node src/cli.js lane send --id <lane-id> --prompt "<message>" --wait`
   - `node src/cli.js lane result --id <lane-id> [--request-id <id>]`
   - `node src/cli.js lane wait --id <lane-id> [--request-id <id>]`
+  - `node src/cli.js lane inspect --id <lane-id> [--tail <n>]`
   - `node src/cli.js lane logs --id <lane-id> [--tail <n>]`
   - `node src/cli.js lane status --id <lane-id>`
   - `node src/cli.js lane stop --id <lane-id>`
@@ -307,18 +309,20 @@ AI execution recipes:
 - `node src/cli.js lane prune [--include-failed true] [--json]`
 - `node src/cli.js lane adapters`
 - `lane start` is the one-time host-runtime step. It launches the resident daemon through a short-lived helper in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under `~/.guardrail/lanes/<id>.key`, writes an explicit `.guardrail/lanes/<id>/identity.json` record plus a fresh boot nonce, records the selected tool, and fixes the executable boundary for later messages.
+- Unknown `--tool` values now fail closed. Treat that as a contract error, not as an invitation to guess or let Guardrail silently fall back to another adapter.
 - Lanes can also declare optional work ownership up front:
   - `--scope-type repo|worktree|paths`
   - `--scope-mode warn|block`
   - repeated `--scope-path <repo-relative-path>` when `scope-type=paths`
 - Scope conflicts are compared only against other live lanes in the same repo lane registry. `warn` allows startup but surfaces the conflicting live lanes in `lane start`, `lane status`, and `lane list`. `block` fails closed before startup.
 - `lane send` is the per-message step. It reads the host-side key through the Guardrail CLI, signs the request, writes the strict JSON payload into the lane FIFO, and reads the matching response back without reopening the outer transport/runtime hop.
-- If a request outlives the client-side wait window, `lane send` now returns a structured `pending` result with the request id instead of reporting `lane_expired`. Treat that as “the lane accepted the request and it is still running,” not as proof that Claude failed.
+- If a request outlives the client-side wait window, `lane send` now returns a structured `pending` result with the request id instead of reporting `lane_expired`. Treat that as “the lane accepted the request and it is still running,” not as proof that Claude failed. If you already know you want Guardrail to keep polling, use `lane send --wait` so you stay inside the bounded wait path.
 - `lane result` is the bounded recovery/read step for those cases. Use it to fetch the stored output for the latest or named request after a long-running turn completes.
+- `lane inspect` is the bounded triage step when you want one command that shows status, latest result, and a log tail together.
 - `lane logs` is the bounded diagnosis step when status/result are not enough. Use it before raw host-pane inspection so you can read the local lane log tail without paying another transport approval.
 - `lane wait` is the bounded wait/recovery step for those cases. Use it when you want Guardrail to keep polling for completion instead of dropping to raw host inspection or an ad hoc retry loop.
 - `lane stop` is the explicit teardown step. It terminates the daemon, removes the lane FIFOs, and purges the host-side key.
-- `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is ready, busy, failed, expired, stale, or stopped, includes the current request id/start time plus the last completed result path, and surfaces `failureReason`, `failureStage`, `logPath`, lane identity, and boot nonce metadata when bootstrap, immediate post-start, or runtime startup failed. If the daemon disappears before the first request and no explicit failure metadata was written, Guardrail now infers that as `failed/post_start` instead of leaving a silent stale lane.
+- `lane status` is the introspection step. Use it before assuming a lane is dead or starting a replacement. It reports whether the lane is ready, busy, failed, expired, stale, or stopped, includes the current request id/start time plus the last completed result path, surfaces `failureReason`, `failureStage`, `logPath`, lane identity, and boot nonce metadata when bootstrap, immediate post-start, or runtime startup failed, and now also emits a concrete next command instead of only a generic action label. If the daemon disappears before the first request and no explicit failure metadata was written, Guardrail now infers that as `failed/post_start` instead of leaving a silent stale lane.
 - `lane list` is the portfolio view. Use it before starting another lane when multiple agents may already be active in the same repo.
 - `lane list` and `lane status` now surface declared scope ownership and overlapping live-lane conflicts. Read those first instead of guessing whether another agent already owns the same write surface.
 - `lane prune` removes dead lane artifacts (`stale`, `expired`, `stopped` by default). Use it after diagnosis/cleanup, not as a first reaction to a live lane you have not inspected yet.
