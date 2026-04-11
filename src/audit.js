@@ -6,6 +6,7 @@ import {
 import { dirname } from 'node:path';
 import { serializeStable } from './contract.js';
 import { captureFingerprint } from './fingerprint.js';
+import { sovereignMeta, computePayloadHash } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Hash computation
@@ -57,18 +58,26 @@ export function createAuditLog(auditPath) {
 /**
  * Append a hash-chained entry to the audit log.
  *
- * @param {string} auditPath - Path to the audit.jsonl file.
- * @param {object} entry     - Entry fields (event, trace_id, manifest_hash, etc.).
+ * @param {string} auditPath   - Path to the audit.jsonl file.
+ * @param {object} entry       - Entry fields (event, trace_id, manifest_hash, etc.).
+ * @param {object} [provenance] - Optional source provenance descriptor passed to sovereignMeta().
  */
-export function appendEntry(auditPath, entry) {
+export function appendEntry(auditPath, entry, provenance) {
   const prevHash = getLastEntryHash(auditPath);
 
-  const fullEntry = {
+  // Build the entry without chain hashes first so payload_hash can cover it
+  const base = {
     timestamp:        new Date().toISOString(),
     ...entry,
     fingerprint:      captureFingerprint(),
+    ...sovereignMeta(provenance),
     prev_hash:        prevHash,
   };
+
+  // payload_hash covers everything except the chain hashes themselves
+  base.payload_hash = computePayloadHash(base);
+
+  const fullEntry = base;
 
   fullEntry.entry_hash = computeEntryHash(fullEntry);
 

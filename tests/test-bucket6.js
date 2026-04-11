@@ -462,3 +462,72 @@ describe('Bucket 6: Incident Response Hooks', () => {
     }
   });
 });
+
+// ===========================================================================
+// 11. Sovereign Record Metadata — Compliance Round-Trip (P0c)
+// ===========================================================================
+describe('Bucket 6: Sovereign Metadata in Compliance Exports', () => {
+  it('generateReport sovereign_summary populated from audit entries', () => {
+    const dir = tmpDir();
+    const auditPath = join(dir, 'audit.jsonl');
+    const entry = {
+      event: 'execution_start',
+      timestamp: '2026-01-01T00:00:00Z',
+      organization_id: 'org-acme',
+      workspace_id: 'ws-prod',
+      retention_class: 'extended',
+      sensitivity: 'confidential',
+      source_provenance: { root: 'shared-global', ref: 'recipe-x', pinned_hash: null },
+    };
+    writeFileSync(auditPath, JSON.stringify(entry) + '\n');
+    const report = generateReport(auditPath);
+    assert.ok(report.sovereign_summary, 'missing sovereign_summary');
+    assert.ok(report.sovereign_summary.organization_ids.includes('org-acme'));
+    assert.ok(report.sovereign_summary.workspace_ids.includes('ws-prod'));
+    assert.ok(report.sovereign_summary.retention_classes.includes('extended'));
+    assert.ok(report.sovereign_summary.sensitivity_labels.includes('confidential'));
+    assert.ok(report.sovereign_summary.provenance_roots.includes('shared-global'));
+  });
+
+  it('CSV export flattens source_provenance to dotted keys', () => {
+    const dir = tmpDir();
+    const auditPath = join(dir, 'audit.jsonl');
+    const entry = {
+      event: 'execution_start',
+      timestamp: '2026-01-01T00:00:00Z',
+      organization_id: 'org-1',
+      workspace_id: null,
+      retention_class: 'standard',
+      sensitivity: 'internal',
+      source_provenance: { root: 'project-local', ref: null, pinned_hash: null },
+    };
+    writeFileSync(auditPath, JSON.stringify(entry) + '\n');
+    const csv = exportAuditLog(auditPath, { format: 'csv' });
+    assert.ok(csv.includes('source_provenance.root'), 'CSV missing source_provenance.root column');
+    assert.ok(csv.includes('project-local'), 'CSV missing provenance value');
+    assert.ok(csv.includes('organization_id'), 'CSV missing organization_id column');
+    assert.ok(csv.includes('retention_class'), 'CSV missing retention_class column');
+    assert.ok(csv.includes('sensitivity'), 'CSV missing sensitivity column');
+  });
+
+  it('JSON export includes sovereign fields verbatim', () => {
+    const dir = tmpDir();
+    const auditPath = join(dir, 'audit.jsonl');
+    const entry = {
+      event: 'audit_test',
+      timestamp: '2026-01-01T00:00:00Z',
+      organization_id: 'org-xyz',
+      workspace_id: 'ws-a',
+      retention_class: 'permanent',
+      sensitivity: 'restricted',
+      source_provenance: { root: 'shared-global', ref: 'r1', pinned_hash: 'abc' },
+    };
+    writeFileSync(auditPath, JSON.stringify(entry) + '\n');
+    const json = exportAuditLog(auditPath, { format: 'json' });
+    const parsed = JSON.parse(json);
+    assert.equal(parsed[0].organization_id, 'org-xyz');
+    assert.equal(parsed[0].retention_class, 'permanent');
+    assert.equal(parsed[0].sensitivity, 'restricted');
+    assert.deepEqual(parsed[0].source_provenance, { root: 'shared-global', ref: 'r1', pinned_hash: 'abc' });
+  });
+});

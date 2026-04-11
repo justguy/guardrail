@@ -53,6 +53,13 @@ export function generateReport(auditPath, opts = {}) {
       medium: entries.filter(e => e.details?.risk_level === 'medium').length,
       low: entries.filter(e => e.details?.risk_level === 'low').length,
     },
+    sovereign_summary: {
+      organization_ids: [...new Set(entries.map(e => e.organization_id).filter(Boolean))],
+      workspace_ids:    [...new Set(entries.map(e => e.workspace_id).filter(Boolean))],
+      retention_classes: [...new Set(entries.map(e => e.retention_class).filter(Boolean))],
+      sensitivity_labels: [...new Set(entries.map(e => e.sensitivity).filter(Boolean))],
+      provenance_roots: [...new Set(entries.map(e => e.source_provenance?.root).filter(Boolean))],
+    },
   };
   return report;
 }
@@ -75,11 +82,32 @@ function loadEntries(auditPath, opts) {
   });
 }
 
+/**
+ * Flatten an audit/metrics entry for CSV export.
+ * Sovereign object fields (source_provenance) are expanded to dotted keys.
+ */
+function flattenEntry(e) {
+  const flat = {};
+  for (const [k, v] of Object.entries(e)) {
+    if (k === 'source_provenance' && v && typeof v === 'object') {
+      for (const [sk, sv] of Object.entries(v)) {
+        flat[`source_provenance.${sk}`] = sv;
+      }
+    } else if (typeof v === 'object' && v !== null) {
+      flat[k] = JSON.stringify(v);
+    } else {
+      flat[k] = v;
+    }
+  }
+  return flat;
+}
+
 function toCSV(entries) {
   if (entries.length === 0) return '';
-  const keys = [...new Set(entries.flatMap(e => Object.keys(e)))].filter(k => typeof entries[0][k] !== 'object');
+  const flattened = entries.map(flattenEntry);
+  const keys = [...new Set(flattened.flatMap(e => Object.keys(e)))];
   const header = keys.join(',');
-  const rows = entries.map(e => keys.map(k => {
+  const rows = flattened.map(e => keys.map(k => {
     const v = e[k];
     if (v === undefined || v === null) return '';
     const s = String(v);

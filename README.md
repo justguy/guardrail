@@ -225,12 +225,15 @@ Workflow approvals now bind `recipe_ref` sources through portable source locator
 
 ### 4. Resident Lane Mode
 
-Keep an interactive AI session alive behind one bounded lane, then send later user messages without reopening the outer transport every turn:
+Keep an interactive AI session alive behind one bounded lane, then send later user messages without reopening the outer transport every turn. This is the primary Guardrail path for multi-shot AI work, fire trials, human review loops, and any run where the operator may need to ask questions or give feedback mid-stream. Treat one-shot `claude-exec` as the fallback path for narrow bounded packets only. For autonomous write-bearing packet work, choose the Claude permission mode deliberately: `--permission-mode acceptEdits` is suitable when edits should proceed without constant approval prompts, but a fully autonomous packet that must also execute local proof commands can still stall there. In that case use `--permission-mode dontAsk` and explicitly expose the tool set Claude needs, for example `--allowed-tools "Bash Read Edit Write Glob Grep"`, inside the already-bounded Guardrail lane scope:
 
 ```bash
 # Start the lane once from the authenticated host runtime
 guardrail lane start \
   --id claude-live \
+  --permission-mode dontAsk \
+  --allowed-tools "Bash Read Edit Write Glob Grep" \
+  --max-budget-usd 10.00 \
   --system-prompt "Answer directly and briefly."
 
 # Later turns go through the lane FIFO bridge
@@ -327,21 +330,24 @@ guardrail lane start \
   --resource service:postgres
 ```
 
+For Claude-backed lanes and Claude execution recipes, Guardrail now defaults the LLM budget to `$10.00` unless you override it, and the review/approval summary shows that budget explicitly before execution.
+Guardrail controls the Guardrail approval boundary, lane/session contract, and bounded monitoring surface. It does not control Claude's own internal tool availability or any downstream Claude-side approval behavior. If Claude itself needs or surfaces a tool-approval decision, that remains the operator's responsibility.
+
 Resident lanes are for direct interactive use when the executable boundary should stay fixed but later user messages should not count as execution drift. The shipped lane control plane now supports `claude`, `codex`, `local-exec`, `prompt-wrapper`, and `ssh-prompt-wrapper` adapters behind the same `lane start` / `lane send` / `lane result` / `lane wait` / `lane status` / `lane inspect` / `lane history` / `lane cleanup` / `lane stop` surface, and `lane adapters` exposes the bundled adapter inventory plus adapter capabilities. Unknown `--tool` values now fail closed instead of silently falling back. The current helper:
 - creates owner-only FIFOs (`0600`) under the lane directory
-- stores an ephemeral per-lane HMAC key outside the workspace under a repo-scoped host path derived from the Guardrail repo identity instead of a bare global lane id
+- stores an ephemeral per-lane HMAC key under a repo-local host root (`.guardrail/host-lanes/...`) by default, so normal lane start/send/status/inspect traffic stays inside the Guardrail repo boundary
 - accepts only strict JSON requests with `id` and `prompt`
 - can require an HMAC signature delivered through an inherited file descriptor instead of env or workspace state
 - rejects duplicate request ids inside the active lane window to make signed FIFO sends one-shot
 - enforces prompt and payload size limits
 - expires after idle timeout, removes its key/FIFOs, and records lane state under `.guardrail/lanes/<name>/state.json`
 - writes an explicit lane identity record under `.guardrail/lanes/<name>/identity.json` so Guardrail can reason about ownership and boot identity separately from leftover FIFOs or keys
-- writes a host-side live-lane registry entry so duplicate live lanes can be detected across checkouts when `lane list --all-repos` or lane startup coordination needs it
+- writes a repo-local live-lane registry entry by default and can still widen to host-level mirrored views when `lane list --all-repos` or lane startup coordination needs broader visibility
 - appends `lane_start`, `lane_send`, `lane_result`, `lane_wait`, `lane_cleanup`, and `lane_stop` lifecycle entries to `.guardrail/audit.jsonl` so later ops review can distinguish lane creation, message traffic, bounded polling, targeted cleanup, result reads, expiry, and explicit teardown
 
 Resident lanes are also the first step toward the broader "manager of managers" direction for Guardrail. Today Guardrail ships lifecycle control for individual named lanes, repo-local and host-registry lane discovery, tool-selectable local and remote adapters, startup locking, swarm scope coordination, typed non-path resource claims, and bounded audit/history surfaces. Guardrail now also ships `lane portfolio` as the bounded swarm-timeline surface: it can read the current repo lane audit or the mirrored host-level lane audit (`--all-repos`), summarize event/tool/status counts, show the currently visible live-lane snapshot beside that timeline, and preserve prune/cleanup tombstone paths so operators can review startup, cleanup, prune, and conflict-related lane events without stitching together per-lane history by hand.
 
-Lane startup still has to happen in a runtime where the downstream CLI auth already works. Direct AI recipes can now declare bounded `requires_auth` checks too, so Guardrail fails before launch with `missing_auth_prerequisite` instead of letting the underlying CLI die late. The same bounded preflight now applies when those recipes are executed through workflow `recipe_ref` steps, so chained recipe workflows stop before launch on missing tool auth instead of surfacing a late downstream CLI failure. `lane start` now launches the daemon through a short-lived helper so the resident lane survives the wrapped CLI process exiting, records a fresh boot nonce in the lane identity record, scopes the default host key path by Guardrail repo identity, writes a host-side live-lane claim, and uses both repo-local and host-side startup lock files to fail closed when another Guardrail process is already starting the same lane. Lanes can also declare `--scope-type repo|worktree|paths` plus `--scope-mode warn|block`, repeated `--scope-path <relative-path>` values, and typed `--resource <class:name>` claims with `--resource-mode warn|block` for non-path ownership such as `git-branch:main`, `service:postgres`, or `env:staging`. Guardrail now canonicalizes legacy `branch:<name>` to `git-branch:<name>`, auto-discovers the current `git-branch:<name>` claim when the working tree is on an attached branch and no explicit branch claim was provided, and compares repo-scoped branch ownership separately from host-scoped resources like services or environments. When callers narrow `working_dir` below the repo root and omit explicit scope flags, Guardrail now infers a default `worktree/warn` ownership scope from that working directory. Guardrail compares those declared or inferred scopes and resource claims against other live lanes, blocks startup on overlapping `block` claims, and surfaces overlapping ownership through `lane start`, `lane status`, and `lane list`. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again. Use `--tool claude` (default), `--tool codex`, `--tool local-exec`, `--tool prompt-wrapper`, or `--tool ssh-prompt-wrapper` to bind that lane to the right wrapped executor.
+Lane startup still has to happen in a runtime where the downstream CLI auth already works. Direct AI recipes can now declare bounded `requires_auth` checks too, so Guardrail fails before launch with `missing_auth_prerequisite` instead of letting the underlying CLI die late. The same bounded preflight now applies when those recipes are executed through workflow `recipe_ref` steps, so chained recipe workflows stop before launch on missing tool auth instead of surfacing a late downstream CLI failure. `lane start` now launches the daemon through a short-lived helper so the resident lane survives the wrapped CLI process exiting, records a fresh boot nonce in the lane identity record, uses repo-local `.guardrail/host-lanes/...` key and registry paths by default for autonomous runs, and still uses mirrored host-level views plus startup lock files to fail closed when broader duplicate-live-lane coordination is needed. Lanes can also declare `--scope-type repo|worktree|paths` plus `--scope-mode warn|block`, repeated `--scope-path <relative-path>` values, and typed `--resource <class:name>` claims with `--resource-mode warn|block` for non-path ownership such as `git-branch:main`, `service:postgres`, or `env:staging`. Guardrail now canonicalizes legacy `branch:<name>` to `git-branch:<name>`, auto-discovers the current `git-branch:<name>` claim when the working tree is on an attached branch and no explicit branch claim was provided, and compares repo-scoped branch ownership separately from host-scoped resources like services or environments. When callers narrow `working_dir` below the repo root and omit explicit scope flags, Guardrail now infers a default `worktree/warn` ownership scope from that working directory. Guardrail compares those declared or inferred scopes and resource claims against other live lanes, blocks startup on overlapping `block` claims, and surfaces overlapping ownership through `lane start`, `lane status`, and `lane list`. Later `lane send` turns reuse that resident lane instead of launching a fresh outer transport hop each time. If the lane has expired, `lane send` returns a structured `lane_expired` error and the correct recovery is to run `lane start` again. Use `--tool claude` (default), `--tool codex`, `--tool local-exec`, `--tool prompt-wrapper`, or `--tool ssh-prompt-wrapper` to bind that lane to the right wrapped executor.
 Guardrail now exposes first-class startup and long-turn state for resident lanes. If a request outlives the client-side wait window, `lane send` returns a structured `pending` response with the request id and an exact bounded next step instead of collapsing into `lane_expired`. `lane start` also now fails early with `lane_boot_failed` when the daemon dies during bootstrap or in the immediate post-start window, and `lane status` reports `failureReason`, `failureStage`, `logPath`, transport summary, and a concrete next command when a lane is in `failed` state. If the daemon disappears before the first request and leaves no explicit failure metadata, Guardrail now infers that as `failed/post_start` instead of showing a bare `stale` lane. Use `lane status` to see whether the lane is `ready`, `busy`, `failed`, `expired`, `stale`, or `stopped`, including the current request id/start time, lane identity metadata, transport summary, and the last completed result path. Use `lane inspect` when you want one bounded surface that combines status, latest result, bounded logs, and recent audit history with chain-validity. Use `lane history` when you want just the resident-lane audit timeline. Use `lane portfolio` when you want the repo-level or host-level lane timeline instead of one lane’s history. Use `lane result` to read the stored output for the latest or named request once it completes, and `lane wait` when you want Guardrail to wait on that same result instead of dropping to raw host inspection. Use `lane list` to inspect every repo-local lane in one portfolio view, add `--all-repos` when you need to include host-registry lanes from other checkouts, narrow that view first with `--status`, `--tool-filter`, `--lane-id-filter`, `--session-name-filter`, `--scope-type-filter`, `--scope-mode-filter`, `--resource-filter`, `--alive`, or `--has-conflicts`, use `lane cleanup` to remove one failed/dead lane directly once diagnosis is complete, and use `lane prune` for bulk dead-lane cleanup with explicit audit entries. `lane prune --dry-run` now previews the exact candidates and reasons before deletion, and real prune runs write a bounded tombstone under `.guardrail/lane-tombstones/` before deleting the lane directory so post-mortem review survives cleanup. Raw host inspection should be the last resort, not the default recovery path.
 If a direct recipe run and a composed host-runtime recipe both fail with the same downstream tool-auth error such as `Not logged in`, treat that as missing auth in the target host runtime, not as Guardrail drift. Direct recipes now preflight in the current runtime; composed host-runtime recipes re-run the same bounded auth check inside the hosted surface before the downstream CLI starts. For Claude, the bundled recipes now use a real bounded `claude --print` probe instead of trusting `claude auth status` alone, and the actual bounded Claude probe/invoke path now preserves the wider current runtime env so secure-store-backed auth matches the shell/runtime that launched Guardrail more closely. The declared `requires_env` / `--env-allow` subset is still what Guardrail binds into approval drift. Hosted transport wrappers still isolate the child env with `env -i` and rehydrate only the approved vars, so seeing `env -i` in a pane capture is expected; missing runtime vars or false-positive shell-level auth are the real failure modes. The bundled `cmux-claude-exec` recipe now defaults to one hosted auth repair attempt too: if the hosted probe or exec hits login, Guardrail runs `claude auth login --console` in that exact hosted runtime, reruns the probe, and retries the original exec once. If login itself still needs a human to finish it, the run now fails with `auth_repair_pending_user_input` instead of pretending the slice ran. For repeated interaction or monitoring after startup, prefer the resident FIFO lane over repeated raw host-surface inspection commands so you do not trigger another approval-bearing transport hop every turn.
 
@@ -448,6 +454,42 @@ Risk levels describe operational danger:
 - **Red** -- generated/unknown provenance, installs, admin tooling, destructive behavior, production-like targets, or secret exposure combined with shell mode or production targets
 
 Guardrail shows both the trust class and the risk reasons at approval time. Non-interactive reuse requires a previously acknowledged Guardrail manifest; a matching file without that acknowledgement is rejected.
+
+### Policy Simulation (Pre-Rollout Impact Preview)
+
+Before committing a new policy or rolling out a change to existing rules, operators can ask what the policy engine would decide for a given execution context — without triggering any execution, acquiring any lock, or producing any approval record.
+
+```bash
+# Ask what would happen if a developer ran terraform apply under the current policy
+guardrail policy simulate \
+  --contract '{"command":"terraform","args":["apply"],"cwd":"/infra","mode":"structured"}' \
+  --trust-class reviewed_internal \
+  --project-root /infra \
+  --principal ops-team
+
+# Same query with machine-readable JSON output (exit 0 = allow, exit 1 = deny)
+guardrail policy simulate \
+  --contract '{"command":"echo","args":["hello"],"cwd":"/project","mode":"structured"}' \
+  --trust-class reviewed_internal \
+  --project-root /project \
+  --json
+
+# Load the contract from a file
+guardrail policy simulate \
+  --contract-file ./contracts/deploy.json \
+  --trust-class reviewed_internal \
+  --project-root /project
+```
+
+The simulation result carries:
+- `decision` — `allow` or `deny`
+- `simulated: true` — guaranteed marker so dry-run output is never confused with real authorization
+- `risk_level` and `trust_class` — same values the supervisor would compute at execution time
+- `matched_rules` — structured array identifying each risk-engine rule and policy rule that drove the decision (source: `risk_engine`, `local_policy`, or `org_policy`)
+- `trace.checks` — ordered list of checks that ran, each with `name`, `result`, and `detail`
+- `reasons` — human-readable list of risk signals for the decision
+
+The simulation path calls the same `evaluateRisk()` and `enforcePolicy()` functions as real execution — no separate code path, no divergence risk.
 
 ---
 
@@ -606,7 +648,7 @@ guardrail run --recipe claude-exec \
   --input effort=high \
   --input mode=plan \
   --input output_format=text \
-  --input max_budget_usd=1.00 \
+  --input max_budget_usd=10.00 \
   --input system_prompt="Focus on reproducibility and concrete failures." \
   --input session_name=auth-review
 
@@ -671,6 +713,7 @@ Agent session contracts:
 Important prompt-handling rules:
 
 - Repeat `--input input_files=...` to pass one or more prompt-bearing files.
+- For long-running AI packets, also pass `--input report_artifact=<relative/path.md>` when you know the canonical report file up front. Guardrail passes that path into the wrapper contract and treats report-file mtime changes as synthetic progress heartbeats.
 - Guardrail stores SHA-256 content hashes for `input_files` in the approved recipe manifest and rechecks them immediately before execution.
 - Inline `prompt` and `system_prompt` values are `review_each_time` inputs: they require fresh approval every run, even if the text is unchanged.
 - For repeatable unattended automation, prefer stable prompt material in `input_files` instead of inline prompt text.
@@ -682,6 +725,8 @@ Important prompt-handling rules:
 Important caveat for the progress channel:
 
 - The progress file is Guardrail-owned and queryable in real time, but the content of the checkpoints is still model-cooperative. Guardrail can detect silence/stalls and surface soft states, but it cannot force Claude to write high-quality progress messages if the wrapper contract is ignored.
+- Guardrail now mitigates that slightly when `report_artifact` is declared: report-file mtime changes become synthetic `ai_artifact_written` progress events even if Claude never writes NDJSON checkpoints itself.
+- If you need true back-and-forth review, feedback, and question-answering during a run, prefer the resident FIFO lane. The one-shot progress channel is for bounded visibility and continuation, not for replacing the lane model.
 
 Naming convention for AI wrapper recipes:
 
@@ -952,6 +997,7 @@ Adapter caveats:
 - Bare-name installs through trusted signed indexes now fail closed on ambiguity and record the chosen index path plus signer `key_id` in the installed pin metadata. This is still a local/team distribution flow, not ambient unsigned public discovery.
 - `--env-allow` is bounded and explicit. It only controls what environment keys are handed to the adapter process for that run.
 - `claude-exec` and `codex-exec` are approval-bounded wrappers, not outer sandboxes. If you run them outside your host sandbox/container boundary, the underlying AI CLI runs with host privileges subject to its own permission model. Guardrail now calls this out as a yellow-to-red risk reason in approval UX.
+- For actual multi-shot operator-in-the-loop execution, do not keep reusing one-shot `claude-exec`. Start a resident lane and use `lane chat` / `lane send` / `lane wait` / `lane result` as the primary interface.
 
 See [docs/adapter-implementation-plan.md](docs/adapter-implementation-plan.md) for the build plan and current boundaries.
 
@@ -1027,7 +1073,7 @@ Tests are organized in five levels:
 | Level | What It Proves |
 |-------|----------------|
 | **Schema/unit** (645) | Deterministic functions: hashing, validation, risk classification, approval, policy |
-| **Policy scenarios** (30) | Declarative policy -> expected decision (GREEN/YELLOW/RED, channel, strict mode) |
+| **Policy scenarios** (30+) | Declarative policy → expected decision (GREEN/YELLOW/RED, channel, strict mode, simulation) |
 | **E2E integration** (42) | Full path: load recipe -> validate -> dry-run -> scope check -> channel -> audit |
 | **Golden demos + adversarial** (68) | Viral demos as regressions + intentional breakage (path traversal, version swap, agent bypass, audit tamper) |
 | **Gap closure + versioning** (39) | Recipe runner, versioned install, version resolution, runbook, verify, demos |

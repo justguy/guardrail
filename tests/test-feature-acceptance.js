@@ -1730,7 +1730,7 @@ describe('README Feature: Recipe System', () => {
       `--input effort=high ` +
       `--input mode=plan ` +
       `--input output_format=text ` +
-      `--input max_budget_usd=1.00 ` +
+      `--input max_budget_usd=10.00 ` +
       `--input system_prompt="Focus on deterministic failures." ` +
       `--input session_name=readme-review ` +
       `--dry-run`,
@@ -2401,5 +2401,71 @@ describe('README Feature: Recipe Immutability', () => {
 
     const r = run(`${CLI} recipe inspect ${join(dir, 'packed.json')}`);
     assert.ok(r.exitCode !== 0 || r.stdout.includes('FAILED'));
+  });
+});
+
+// ===========================================================================
+// Policy simulation CLI surface (P0b)
+// ===========================================================================
+
+describe('Feature: policy simulate CLI surface', () => {
+  it('policy simulate allow — safe contract exits 0 and prints ALLOW', () => {
+    const contract = JSON.stringify({
+      command: 'echo', args: ['hello'], cwd: '/tmp', mode: 'structured',
+    });
+    const r = run(`${CLI} policy simulate --contract '${contract}' --trust-class reviewed_internal --project-root /tmp`);
+    assert.equal(r.exitCode, 0, `expected exit 0, got ${r.exitCode}. stderr: ${r.stderr}`);
+    assert.ok(r.stdout.includes('ALLOW'), `expected ALLOW in output: ${r.stdout}`);
+    assert.ok(r.stdout.includes('simulated'), `expected simulated marker: ${r.stdout}`);
+  });
+
+  it('policy simulate deny — red contract exits 1 and prints DENY', () => {
+    const contract = JSON.stringify({
+      command: 'terraform', args: ['apply'], cwd: '/tmp', mode: 'structured',
+    });
+    const r = run(`${CLI} policy simulate --contract '${contract}' --trust-class reviewed_internal --project-root /tmp`);
+    assert.equal(r.exitCode, 1, `expected exit 1 for red contract, got ${r.exitCode}`);
+    assert.ok(r.stdout.includes('DENY'), `expected DENY in output: ${r.stdout}`);
+  });
+
+  it('policy simulate --json returns machine-readable trace', () => {
+    const contract = JSON.stringify({
+      command: 'git', args: ['status'], cwd: '/tmp', mode: 'structured',
+    });
+    const r = run(`${CLI} policy simulate --contract '${contract}' --trust-class reviewed_internal --project-root /tmp --json`);
+    assert.equal(r.exitCode, 0, `expected exit 0: ${r.stderr}`);
+    let parsed;
+    assert.doesNotThrow(() => { parsed = JSON.parse(r.stdout); }, 'output must be valid JSON');
+    assert.equal(parsed.simulated, true);
+    assert.ok(['allow', 'deny'].includes(parsed.decision), 'decision must be allow or deny');
+    assert.ok(Array.isArray(parsed.matched_rules), 'matched_rules must be array');
+    assert.ok(Array.isArray(parsed.trace?.checks),  'trace.checks must be array');
+  });
+
+  it('policy simulate with --contract-file reads from file', () => {
+    const dir = tmpDir();
+    const contractPath = join(dir, 'contract.json');
+    writeFileSync(contractPath, JSON.stringify({
+      command: 'node', args: ['app.js'], cwd: '/tmp', mode: 'structured',
+    }));
+    const r = run(`${CLI} policy simulate --contract-file ${contractPath} --trust-class reviewed_internal --project-root /tmp`);
+    assert.ok(r.exitCode === 0 || r.exitCode === 1, 'must exit 0 or 1');
+    assert.ok(r.stdout.includes('(simulated)'), `expected simulated marker: ${r.stdout}`);
+  });
+
+  it('policy simulate missing --contract → error', () => {
+    const r = run(`${CLI} policy simulate --trust-class reviewed_internal`);
+    assert.ok(r.exitCode !== 0, 'must fail without contract');
+    assert.ok((r.stdout + r.stderr).includes('required'), `expected required error: ${r.stderr}`);
+  });
+
+  it('policy simulate --principal propagated to JSON output', () => {
+    const contract = JSON.stringify({
+      command: 'echo', args: ['hi'], cwd: '/tmp', mode: 'structured',
+    });
+    const r = run(`${CLI} policy simulate --contract '${contract}' --trust-class reviewed_internal --principal ops-team --json`);
+    assert.equal(r.exitCode, 0);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.principal, 'ops-team');
   });
 });

@@ -1,6 +1,6 @@
 import { writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { join, resolve, isAbsolute } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 
 // ---------------------------------------------------------------------------
@@ -167,6 +167,68 @@ export function buildEnvFromPolicy(envPolicy) {
   }
 
   return env;
+}
+
+// ---------------------------------------------------------------------------
+// Sovereign record metadata — canonical shape for enterprise audit/event fields
+// ---------------------------------------------------------------------------
+
+/**
+ * Valid retention classes.
+ * @type {Set<string>}
+ */
+export const RETENTION_CLASSES = new Set(['standard', 'extended', 'permanent']);
+
+/**
+ * Valid sensitivity labels.
+ * @type {Set<string>}
+ */
+export const SENSITIVITY_LABELS = new Set(['public', 'internal', 'confidential', 'restricted']);
+
+/**
+ * Compute SHA-256 hex of the stable-serialized payload object.
+ * Excludes fields that are themselves derived (entry_hash, payload_hash, prev_hash).
+ *
+ * @param {object} payload - The event payload object to hash.
+ * @returns {string} SHA-256 hex digest.
+ */
+export function computePayloadHash(payload) {
+  const { entry_hash: _a, payload_hash: _b, prev_hash: _c, ...rest } = payload ?? {};
+  const stable = JSON.stringify(rest, Object.keys(rest).sort());
+  return createHash('sha256').update(stable).digest('hex');
+}
+
+/**
+ * Build the canonical sovereign metadata block from environment variables
+ * and an optional provenance descriptor.
+ *
+ * Environment variables sourced:
+ *   GUARDRAIL_ORG_ID          → organization_id
+ *   GUARDRAIL_WORKSPACE_ID    → workspace_id
+ *   GUARDRAIL_RETENTION_CLASS → retention_class (default: 'standard')
+ *   GUARDRAIL_SENSITIVITY     → sensitivity (default: 'internal')
+ *
+ * @param {object} [provenance] - Optional source provenance descriptor.
+ * @param {string} [provenance.root]        - 'project-local' | 'shared-global'
+ * @param {string|null} [provenance.ref]    - recipe_id, template path, etc.
+ * @param {string|null} [provenance.pinned_hash] - installed artifact hash if available
+ * @returns {object} Sovereign metadata block.
+ */
+export function sovereignMeta(provenance) {
+  const retentionClass = process.env.GUARDRAIL_RETENTION_CLASS ?? 'standard';
+  const sensitivity    = process.env.GUARDRAIL_SENSITIVITY     ?? 'internal';
+
+  return {
+    organization_id: process.env.GUARDRAIL_ORG_ID          ?? null,
+    workspace_id:    process.env.GUARDRAIL_WORKSPACE_ID     ?? null,
+    retention_class: RETENTION_CLASSES.has(retentionClass) ? retentionClass : 'standard',
+    sensitivity:     SENSITIVITY_LABELS.has(sensitivity)   ? sensitivity    : 'internal',
+    source_provenance: {
+      root:        provenance?.root        ?? 'project-local',
+      ref:         provenance?.ref         ?? null,
+      pinned_hash: provenance?.pinned_hash ?? null,
+    },
+  };
 }
 
 export function diffNestedBlocks(candidateBlock, approvedBlock) {

@@ -185,7 +185,7 @@ describe('Claude resident lane', () => {
       effort: 'low',
       permissionMode: 'default',
       outputFormat: 'text',
-      maxBudgetUsd: '1.00',
+      maxBudgetUsd: '10.00',
       systemPrompt: 'Answer briefly.',
     }, dir);
 

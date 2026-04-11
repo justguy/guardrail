@@ -99,7 +99,8 @@
     },
     "max_budget_usd": {
       "type": "string",
-      "description": "Maximum dollar spend for the composed Claude invocation (e.g. '1.00')",
+      "description": "Maximum dollar spend for the composed Claude invocation. Guardrail shows this explicitly during review/approval. Default is '10.00'.",
+      "default": "10.00",
       "pattern": "^[0-9]{1,4}\\.[0-9]{2}$"
     },
     "system_prompt": {

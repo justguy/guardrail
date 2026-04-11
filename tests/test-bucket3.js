@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 
 import { captureFingerprint } from '../src/fingerprint.js';
 import { createAuditLog, appendEntry, verifyAuditChain, queryAuditLog } from '../src/audit.js';
+import { sovereignMeta, computePayloadHash, RETENTION_CLASSES, SENSITIVITY_LABELS } from '../src/shared.js';
 import { checkTimePolicy, checkAndIncrementCounter, checkRateLimit, acquireLock } from '../src/runtime-policy.js';
 import { evaluateRisk } from '../src/policy-engine.js';
 import { createContract } from '../src/contract.js';
@@ -527,5 +528,129 @@ describe('Bucket 3: Append-Only Audit Log', () => {
     assert.ok(exports.includes('appendEntry'));
     assert.ok(exports.includes('verifyAuditChain'));
     assert.ok(exports.includes('queryAuditLog'));
+  });
+});
+
+// ===========================================================================
+// 11. Sovereign Record Metadata (P0c)
+// ===========================================================================
+
+describe('Bucket 3: Sovereign Record Metadata', () => {
+  it('sovereignMeta returns canonical shape with defaults', () => {
+    const meta = sovereignMeta();
+    assert.equal(meta.organization_id, null);
+    assert.equal(meta.workspace_id, null);
+    assert.equal(meta.retention_class, 'standard');
+    assert.equal(meta.sensitivity, 'internal');
+    assert.ok(meta.source_provenance);
+    assert.ok(['project-local', 'shared-global'].includes(meta.source_provenance.root));
+    assert.equal(meta.source_provenance.ref, null);
+    assert.equal(meta.source_provenance.pinned_hash, null);
+  });
+
+  it('sovereignMeta reads org/workspace from env vars', () => {
+    process.env.GUARDRAIL_ORG_ID = 'org-test-123';
+    process.env.GUARDRAIL_WORKSPACE_ID = 'ws-test-456';
+    process.env.GUARDRAIL_RETENTION_CLASS = 'extended';
+    process.env.GUARDRAIL_SENSITIVITY = 'confidential';
+    try {
+      const meta = sovereignMeta();
+      assert.equal(meta.organization_id, 'org-test-123');
+      assert.equal(meta.workspace_id, 'ws-test-456');
+      assert.equal(meta.retention_class, 'extended');
+      assert.equal(meta.sensitivity, 'confidential');
+    } finally {
+      delete process.env.GUARDRAIL_ORG_ID;
+      delete process.env.GUARDRAIL_WORKSPACE_ID;
+      delete process.env.GUARDRAIL_RETENTION_CLASS;
+      delete process.env.GUARDRAIL_SENSITIVITY;
+    }
+  });
+
+  it('sovereignMeta falls back to defaults for invalid retention_class/sensitivity', () => {
+    process.env.GUARDRAIL_RETENTION_CLASS = 'bogus';
+    process.env.GUARDRAIL_SENSITIVITY = 'top-secret';
+    try {
+      const meta = sovereignMeta();
+      assert.equal(meta.retention_class, 'standard');
+      assert.equal(meta.sensitivity, 'internal');
+    } finally {
+      delete process.env.GUARDRAIL_RETENTION_CLASS;
+      delete process.env.GUARDRAIL_SENSITIVITY;
+    }
+  });
+
+  it('sovereignMeta accepts provenance descriptor', () => {
+    const meta = sovereignMeta({
+      root: 'shared-global',
+      ref: 'github://acme/recipes/deploy@abc123',
+      pinned_hash: 'deadbeef',
+    });
+    assert.equal(meta.source_provenance.root, 'shared-global');
+    assert.equal(meta.source_provenance.ref, 'github://acme/recipes/deploy@abc123');
+    assert.equal(meta.source_provenance.pinned_hash, 'deadbeef');
+  });
+
+  it('computePayloadHash is deterministic and excludes chain fields', () => {
+    const payload = { event: 'execution_start', trace_id: 'T1', timestamp: '2026-01-01T00:00:00Z' };
+    const h1 = computePayloadHash(payload);
+    const h2 = computePayloadHash(payload);
+    assert.equal(h1, h2);
+    assert.equal(h1.length, 64); // SHA-256 hex
+
+    // Excluded fields should not affect the hash
+    const withChain = { ...payload, entry_hash: 'aaa', payload_hash: 'bbb', prev_hash: 'ccc' };
+    assert.equal(computePayloadHash(withChain), h1);
+
+    // Different payload → different hash
+    const h3 = computePayloadHash({ ...payload, event: 'execution_end' });
+    assert.notEqual(h1, h3);
+  });
+
+  it('RETENTION_CLASSES and SENSITIVITY_LABELS are Sets with expected members', () => {
+    assert.ok(RETENTION_CLASSES.has('standard'));
+    assert.ok(RETENTION_CLASSES.has('extended'));
+    assert.ok(RETENTION_CLASSES.has('permanent'));
+    assert.ok(SENSITIVITY_LABELS.has('public'));
+    assert.ok(SENSITIVITY_LABELS.has('internal'));
+    assert.ok(SENSITIVITY_LABELS.has('confidential'));
+    assert.ok(SENSITIVITY_LABELS.has('restricted'));
+  });
+
+  it('audit entries carry sovereign metadata fields', () => {
+    const dir = tmpDir();
+    const auditPath = join(dir, 'audit.jsonl');
+    const log = createAuditLog(auditPath);
+    log.append({ event: 'execution_start', trace_id: 'T1' });
+    const entry = JSON.parse(readFileSync(auditPath, 'utf8').trim());
+    assert.ok('organization_id' in entry, 'missing organization_id');
+    assert.ok('workspace_id' in entry, 'missing workspace_id');
+    assert.ok('retention_class' in entry, 'missing retention_class');
+    assert.ok('sensitivity' in entry, 'missing sensitivity');
+    assert.ok('source_provenance' in entry, 'missing source_provenance');
+    assert.ok('payload_hash' in entry, 'missing payload_hash');
+    assert.equal(entry.payload_hash.length, 64);
+  });
+
+  it('audit chain still verifies after sovereign fields are added', () => {
+    const dir = tmpDir();
+    const auditPath = join(dir, 'audit.jsonl');
+    const log = createAuditLog(auditPath);
+    log.append({ event: 'execution_start', trace_id: 'T1' });
+    log.append({ event: 'execution_end', trace_id: 'T1' });
+    const result = log.verify();
+    assert.equal(result.valid, true);
+  });
+
+  it('payload_hash changes when event payload changes', () => {
+    const dir = tmpDir();
+    const auditPath = join(dir, 'audit.jsonl');
+    const log = createAuditLog(auditPath);
+    log.append({ event: 'execution_start', trace_id: 'T1' });
+    log.append({ event: 'execution_end', trace_id: 'T1' });
+    const lines = readFileSync(auditPath, 'utf8').trim().split('\n');
+    const e1 = JSON.parse(lines[0]);
+    const e2 = JSON.parse(lines[1]);
+    assert.notEqual(e1.payload_hash, e2.payload_hash);
   });
 });

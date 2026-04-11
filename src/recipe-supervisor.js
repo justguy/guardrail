@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
 
 import { resolveRecipeById, resolveInputs, parseRecipeSpecifier } from './recipe-runner.js';
 import {
@@ -121,6 +121,15 @@ function isAiProgressRecipe(recipe) {
     recipe?.progress_channel?.enabled === true;
 }
 
+function resolveAiReportArtifactPath(resolvedCwd, resolvedInputs) {
+  const reportArtifact = resolvedInputs?.report_artifact;
+  if (typeof reportArtifact !== 'string' || reportArtifact.trim() === '') return null;
+  const workingDir = typeof resolvedInputs?.working_dir === 'string' && resolvedInputs.working_dir.trim() !== ''
+    ? resolve(resolvedCwd, resolvedInputs.working_dir)
+    : resolvedCwd;
+  return resolve(workingDir, reportArtifact);
+}
+
 function initAiProgressFiles(stateDir, initialState = null) {
   const progressFile = join(stateDir, 'ai-progress.ndjson');
   const progressStateFile = join(stateDir, 'ai-progress-state.json');
@@ -216,6 +225,10 @@ function buildAiProgressRelay({ progressSink, runId, stateDir, progressStateFile
     getLastSoftState() { return lastSoftState; },
     /** Returns the epoch-ms timestamp of the last successfully parsed AI progress event. */
     getLastEventTime() { return lastEventTime; },
+    noteSyntheticProgress(event, data = {}) {
+      lastEventTime = Date.now();
+      emitAiProgress(progressSink, runId, event, data);
+    },
   };
 }
 
@@ -299,6 +312,10 @@ function printRecipeApprovalSummary(
   if (sourcePath) line(lv('Source', sourcePath));
   if (Object.keys(resolvedInputs).length > 0) {
     line(lv('Inputs', JSON.stringify(resolvedInputs)));
+  }
+  const llmBudget = resolvedInputs?.max_budget_usd;
+  if (typeof llmBudget === 'string' && llmBudget.trim() !== '') {
+    line(lv('LLM budget (USD)', llmBudget));
   }
   if (envIntersection.length > 0) {
     line(lv('Env vars passed', envIntersection.join(', ')));
@@ -1114,9 +1131,11 @@ export async function runRecipeSupervisor(options) {
     let aiProgressFile = null;
     let aiProgressStateFile = null;
     let aiProgressRelay = null;
+    let aiReportArtifact = null;
     const executorEnvExtra = {};
 
     if (isAiProgressRecipe(recipe)) {
+      aiReportArtifact = resolveAiReportArtifactPath(resolvedCwd, resolvedInputs);
       // Write an initial progress-state record so CLI inspection has something
       // to show even before the first checkpoint arrives from Claude.
       const initialProgressState = {
@@ -1127,7 +1146,7 @@ export async function runRecipeSupervisor(options) {
         sessionName: resolvedInputs.session_name ?? null,
         workingDir: resolvedInputs.working_dir ?? null,
         progressArtifact: null, // filled in below after path is known
-        reportArtifact: null,
+        reportArtifact: aiReportArtifact,
         timestamp: new Date().toISOString(),
       };
       const progressPaths = initAiProgressFiles(stateDir, initialProgressState);
@@ -1138,6 +1157,7 @@ export async function runRecipeSupervisor(options) {
       try {
         const existing = JSON.parse(readFileSync(aiProgressStateFile, 'utf8'));
         existing.progressArtifact = aiProgressFile;
+        existing.reportArtifact = aiReportArtifact;
         writeFileSync(aiProgressStateFile, JSON.stringify(existing, null, 2) + '\n');
       } catch { /* non-fatal */ }
 
@@ -1147,6 +1167,9 @@ export async function runRecipeSupervisor(options) {
       executorEnvExtra.GUARDRAIL_AI_HEARTBEAT_SECONDS = String(
         AI_HEARTBEAT_POLICY.stallWarnSeconds,
       );
+      if (aiReportArtifact) {
+        executorEnvExtra.GUARDRAIL_AI_REPORT_ARTIFACT = aiReportArtifact;
+      }
 
       // Build the stderr relay so AI checkpoint lines feed the progress sink.
       aiProgressRelay = buildAiProgressRelay({
@@ -1161,6 +1184,7 @@ export async function runRecipeSupervisor(options) {
         message: `Progress channel initialized for ${recipe.id}`,
         severity: 'info',
         progressArtifact: aiProgressFile,
+        reportArtifact: aiReportArtifact,
         tool: 'claude',
       });
     }
@@ -1178,7 +1202,24 @@ export async function runRecipeSupervisor(options) {
     if (aiProgressRelay) {
       let stalledWarned = false;
       let hardStalledWarned = false;
+      let lastReportMtimeMs = aiReportArtifact && existsSync(aiReportArtifact)
+        ? statSync(aiReportArtifact).mtimeMs
+        : 0;
       aiStallMonitor = setInterval(() => {
+        if (aiReportArtifact && existsSync(aiReportArtifact)) {
+          const reportMtimeMs = statSync(aiReportArtifact).mtimeMs;
+          if (reportMtimeMs > lastReportMtimeMs) {
+            lastReportMtimeMs = reportMtimeMs;
+            aiProgressRelay.noteSyntheticProgress('ai_artifact_written', {
+              phase: 'report_artifact',
+              message: `Report artifact updated: ${aiReportArtifact}`,
+              severity: 'info',
+              tool: 'claude',
+              reportArtifact: aiReportArtifact,
+              progressArtifact: aiProgressFile,
+            });
+          }
+        }
         const elapsed = Date.now() - aiProgressRelay.getLastEventTime();
         if (!hardStalledWarned && elapsed >= AI_HEARTBEAT_POLICY.hardStallSeconds * 1000) {
           hardStalledWarned = true;

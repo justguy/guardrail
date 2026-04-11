@@ -5,6 +5,34 @@ import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:
 // ---------------------------------------------------------------------------
 // Key Management — encrypted storage with scoped access
 // ---------------------------------------------------------------------------
+//
+// CRYPTO BOUNDARY (P0d — single sensitive-at-rest boundary)
+// ==========================================================
+// This module is the ONLY place in Guardrail that writes or reads
+// credential/secret values to/from disk. All writes pass through
+// `encrypt()` (AES-256-GCM, scrypt-derived key) before reaching the
+// filesystem; all reads pass through `decrypt()` before returning to
+// callers.
+//
+// Covered data class:
+//   Credentials — API keys, tokens, passphrases, and any other secret
+//   values stored via `createKeyStore(stateDir, passphrase).set(name, value)`.
+//   On-disk representation is always an encrypted envelope
+//   (salt + iv + ciphertext + auth tag). The plaintext is never written.
+//
+// Intentionally plaintext (not covered — not secrets):
+//   - Org policy JSON      (src/org-policy.js)   — governance config
+//   - Approval queue JSON  (src/approval-queue.js) — workflow state
+//   - Shared manifests     (src/shared-manifest.js) — team distribution
+//   - Audit log (JSONL)    (src/audit.js)          — tamper-evident events
+//   - Execution state      (src/shared.js)          — supervisor checkpoints
+//   These are governance/workflow records whose integrity relies on
+//   hash-chaining and access controls, not encryption at rest.
+//
+// No caller outside this module accesses *.key.json files. There is no
+// bypass path (no --force flag, no env-var override, no direct writeFileSync
+// on *.key.json outside this module).
+// ---------------------------------------------------------------------------
 
 const ALGORITHM = 'aes-256-gcm';
 const KEY_DIR_NAME = 'keys';

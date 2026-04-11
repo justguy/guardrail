@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { sovereignMeta } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -39,6 +40,7 @@ export function createMetricsCollector(logDir) {
       recipe_id: event.recipeId ?? null,
       trace_id:  event.traceId ?? null,
       details:   event.details ?? {},
+      ...sovereignMeta(event.provenance),
     };
     appendFileSync(metricsPath, JSON.stringify(entry) + '\n', 'utf8');
   }

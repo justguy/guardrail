@@ -36,7 +36,15 @@ function defaultLaneKeyPath(laneId, guardrailRepo = '.') {
     .update(repoPath)
     .digest('hex')
     .slice(0, 16);
-  return resolve(homedir(), '.guardrail', 'lanes', repoId, `${laneId}.key`);
+  return resolve(repoPath, '.guardrail', 'host-lanes', repoId, `${laneId}.key`);
+}
+
+function defaultLaneHostStateDir(guardrailRepo = '.') {
+  let repoPath = resolve(process.cwd(), guardrailRepo);
+  try {
+    repoPath = realpathSync(repoPath);
+  } catch {}
+  return resolve(repoPath, '.guardrail', 'host-lanes');
 }
 
 function normalizeLaneCliOptions(raw = {}) {
@@ -44,6 +52,7 @@ function normalizeLaneCliOptions(raw = {}) {
   const laneDir = raw.laneDir || (laneId ? defaultLaneDir(laneId) : '');
   const guardrailRepo = raw.guardrailRepo || '.';
   const keyPath = raw.keyPath || (laneId ? defaultLaneKeyPath(laneId, guardrailRepo) : '');
+  const hostStateDir = raw.hostStateDir || defaultLaneHostStateDir(guardrailRepo);
   return {
     ...raw,
     laneId,
@@ -58,7 +67,7 @@ function normalizeLaneCliOptions(raw = {}) {
     scopePaths: raw.scopePaths || [],
     resourceMode: raw.resourceMode || raw.scopeMode || 'warn',
     resources: raw.resources || [],
-    hostStateDir: raw.hostStateDir || '',
+    hostStateDir,
   };
 }
 
@@ -868,7 +877,7 @@ export function parseArgs(argv) {
   // --- policy subcommand -----------------------------------------------------
 
   if (sub === 'policy') {
-    if (i >= argv.length || !['list', 'inspect', 'validate'].includes(argv[i])) {
+    if (i >= argv.length || !['list', 'inspect', 'validate', 'simulate'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -877,6 +886,11 @@ export function parseArgs(argv) {
     while (i < argv.length) {
       if (argv[i] === '--name') { i++; result.policyOpts.name = argv[i++]; continue; }
       if (argv[i] === '--json') { result.json = true; i++; continue; }
+      if (argv[i] === '--contract') { i++; result.policyOpts.contract = argv[i++]; continue; }
+      if (argv[i] === '--contract-file') { i++; result.policyOpts.contractFile = argv[i++]; continue; }
+      if (argv[i] === '--trust-class') { i++; result.policyOpts.trustClass = argv[i++]; continue; }
+      if (argv[i] === '--project-root') { i++; result.policyOpts.projectRoot = argv[i++]; continue; }
+      if (argv[i] === '--principal') { i++; result.policyOpts.principal = argv[i++]; continue; }
       if (!argv[i].startsWith('--')) { result.policyOpts.name = argv[i++]; continue; }
       return { error: 'usage' };
     }
@@ -2785,6 +2799,40 @@ async function main() {
       if (errors.length === 0) { console.log(`Policy "${name}" is valid.`); process.exit(0); }
       else { console.error(`Policy "${name}" has errors:\n  - ${errors.join('\n  - ')}`); process.exit(1); }
     } catch (err) { console.error(err.message); process.exit(1); }
+  }
+
+  if (parsed.subcommand === 'policy-simulate') {
+    const { simulatePolicy, formatSimulationResult } = await import('./policy-simulate.js');
+    const opts = parsed.policyOpts || {};
+    let contract;
+    if (opts.contractFile) {
+      try {
+        contract = JSON.parse(readFileSync(opts.contractFile, 'utf8'));
+      } catch (err) {
+        console.error(`Error reading contract file: ${err.message}`);
+        process.exit(1);
+      }
+    } else if (opts.contract) {
+      try {
+        contract = JSON.parse(opts.contract);
+      } catch (err) {
+        console.error(`Error parsing contract JSON: ${err.message}`);
+        process.exit(1);
+      }
+    } else {
+      console.error('Error: --contract <json> or --contract-file <path> is required');
+      process.exit(1);
+    }
+    const simOptions = {};
+    if (opts.trustClass) simOptions.trustClass = opts.trustClass;
+    if (opts.projectRoot) simOptions.projectRoot = opts.projectRoot;
+    const result = simulatePolicy({ contract, options: simOptions, principal: opts.principal });
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(formatSimulationResult(result));
+    }
+    process.exit(result.allowed ? 0 : 1);
   }
 
   // --- metrics ---------------------------------------------------------------

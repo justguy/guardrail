@@ -5,8 +5,8 @@ Status: In progress
 ## Run Summary
 
 - Start time: 2026-04-11
-- Current packet: `P0b` next
-- Current status: `P0a closed after review/fix`
+- Current packet: `P0e` next
+- Current status: `P0a through P0d closed after review/fix`
 - Operator follow-on: `D0y closed after review/fix`
 
 ## Packet Timeline
@@ -147,3 +147,83 @@ Minimum shape:
 
 - The progress side channel is Guardrail-owned and queryable in real time, but the content of the checkpoints is still model-cooperative rather than a native Claude streaming API.
 - That caveat is acceptable for the current shipped scope and is now documented clearly in the D0y report, README, and roadmap.
+- A later `P0b` run confirmed the failure mode precisely: Guardrail surfaced the wrapper-owned `started` and `completed` checkpoints correctly, but Claude itself emitted no intermediate NDJSON checkpoints. This was a model-cooperation gap, not a dropped Guardrail event.
+- As a mitigation, the `claude-exec` contract now accepts an explicit `report_artifact` input and Guardrail treats report-file mtime changes as synthetic progress heartbeats when that path is declared.
+- Even with that mitigation, the resident FIFO lane remains the preferred path for genuinely interactive review/feedback loops. The one-shot progress channel is visibility-first, not a replacement for the lane model.
+
+## P0b — Policy Simulation and Decision Traces
+
+- Start time: 2026-04-11
+- End time: 2026-04-11
+- Execution path: resident Claude lane (`guardrail lane start` + `lane send` / `lane inspect`)
+- Declared artifact: `docs/plans/REPORT_enterprise_P0b_policy_simulation_and_decision_traces.md`
+- Outcome: `closed after review/fix`
+
+### Issues Observed During Lane-First Execution
+
+1. The resident lane solved the core operator problem from the one-shot runs.
+   - Guardrail could query live status and fetch Claude's current assessment mid-run through `lane status` / `lane inspect`.
+   - This proved the lane path is the right primary surface for multi-shot execution.
+
+2. Claude initially still could not run the focused `node --test` proof from inside the lane.
+   - This happened first under `--permission-mode acceptEdits`, then again after restarting the lane under `--permission-mode dontAsk`.
+   - Claude reported its inner shell/Bash tool as blocked, even though the Guardrail lane itself remained healthy and queryable.
+   - Follow-up debug confirmed the missing requirement: explicit tool exposure.
+   - Restarting the lane with `--allowed-tools "Bash Read Edit Write Glob Grep"` fixed the problem.
+   - This also clarified an important boundary: Guardrail can configure the bounded lane contract, but it does not control Claude's own internal tool policy. Claude-side tool approvals or tool availability remain operator-managed downstream behavior.
+
+3. After that restart, Claude itself ran the focused proof successfully through the live lane:
+   - `node --test tests/test-policy-scenarios.js` → `43 pass, 0 fail`
+   - `node --test --test-name-pattern "policy simulate CLI surface" tests/test-feature-acceptance.js` → `2 passed, 0 failed`
+
+### P0b Conclusion
+
+- The lane-first contract is correct and now documented in the recipe, onboarding, README, and fire-trial plan.
+- Guardrail can now supervise a live multi-shot Claude run and retrieve real status updates without collapsing back to one-shot.
+- The remaining follow-on is narrower than before: preserve the exact lane-start contract for proof-bearing runs (`--permission-mode dontAsk --allowed-tools "Bash Read Edit Write Glob Grep"`) and expand that pattern into the next packet runs.
+
+### Outer-Sandbox Boundary
+
+- Guardrail resident lanes are implemented and are the intended multi-shot autonomous path inside Guardrail.
+- Guardrail now defaults resident-lane key and host-state paths to repo-local `.guardrail/host-lanes/...` for autonomous repo-scoped runs.
+- That removes the repeated outer-sandbox approval churn for ordinary `lane start`, `lane send`, `lane status`, `lane inspect`, `lane wait`, and `lane result` traffic in this repo-scoped fire-trial mode.
+- Broader host-wide portfolio views remain an explicit widening step rather than the default.
+- This gap was tracked as `D0z` and is now closed in the roadmap.
+
+### Operator Rule: Approved Lane Prefix Reuse
+
+- If the supervising environment has already approved the `node src/cli.js lane` command prefix, later lane operations inside that same boundary must reuse the approved prefix directly.
+- Do not reissue routine `lane send`, `lane status`, `lane inspect`, `lane wait`, or `lane result` calls as new escalated requests once that prefix is already approved.
+- Ask for a fresh approval only when the boundary truly changes:
+  - widened scope
+  - different runtime/tool/model/system prompt/budget in an approval-bound way
+  - widened host-level operations outside the repo-local lane mode
+  - raw host inspection outside Guardrail
+
+### P0c — Sovereign Record Metadata Model
+
+- Start time: 2026-04-11
+- End time: 2026-04-11
+- Execution path: resident Claude lane (`enterprise-p0cd-lane`) with `dontAsk`, explicit allowed tools, and visible `$10.00` budget
+- Declared artifact: `docs/plans/REPORT_enterprise_P0c_sovereign_record_metadata_model.md`
+- Outcome: `closed after review/fix`
+- Focused proof:
+  - `node --test tests/test-bucket3.js tests/test-bucket6.js`
+  - result: `108 pass, 0 fail`
+- Notes:
+  - `organization_id`, `workspace_id`, `retention_class`, `payload_hash`, `sensitivity`, and `source_provenance` are now standardized through shared helpers and carried into audit/metrics/compliance export paths.
+  - The packet held up under local review after the lane run; no follow-up rerun was needed.
+
+### P0d — Single Crypto Boundary
+
+- Start time: 2026-04-11
+- End time: 2026-04-11
+- Execution path: same resident Claude lane/session as `P0c`
+- Declared artifact: `docs/plans/REPORT_enterprise_P0d_single_crypto_boundary.md`
+- Outcome: `closed after review/fix`
+- Focused proof:
+  - `node --test tests/test-bucket6.js`
+  - result: `59 pass, 0 fail`
+- Notes:
+  - The packet confirmed that secret-at-rest writes stay behind `src/key-management.js` and documented the intentionally-plaintext governance/workflow state paths.
+  - The lane remained healthy through the packet transition; Guardrail monitoring stayed inside lane-native surfaces.
