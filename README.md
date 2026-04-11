@@ -221,7 +221,9 @@ Bundled Guardrail recipes also resolve shipped wrapper helpers internally now, s
 
 Extra recipe roots remain opt-in, but they no longer bypass central governance: repo/user-configured `default_recipe_roots` and explicit extra roots are blocked when the active org policy does not trust them via `trusted_recipe_roots` in `.guardrail/org-policy.json` or `.guardrail/org-policies/default.json`.
 
-Workflow approvals now bind `recipe_ref` sources through portable source locators instead of absolute recipe file paths, so the same workflow can move between different checkout paths or runners without false drift from path changes alone. Guardrail still fails closed if the target machine cannot actually resolve the referenced recipe source.
+Remote recipe installs and adapter-profile installs now load that same active org policy by default and enforce `trusted_execution_sources` before pulling GitHub or URL content.
+
+Workflow approvals now bind `recipe_ref` sources through portable source locators instead of absolute recipe file paths, so the same workflow can move between different checkout paths or runners without false drift from path changes alone. External shared roots now record stable origin locators (`explicit`, `repo_config`, `user_config`, or `absolute`) so two different shared roots with the same relative recipe filename cannot silently reuse approval.
 
 ### 4. Resident Lane Mode
 
@@ -414,11 +416,17 @@ guardrail recipe install https://registry.example.com/recipes/deploy.recipe.json
 # Install from GitHub with an immutable commit pin
 guardrail recipe install github://guardrail-dev/recipes/github/open-pr.json@a3f9c12e4b7d8f0a1c2e3d4f5a6b7c8d9e0f1a2b
 
+# Export a static self-hosted recipe registry snapshot
+guardrail recipe registry export ./dist/recipe-registry
+
 # List available recipes
 guardrail list
 
 # Dry-run a recipe (latest version)
 guardrail run --recipe git-branch-cleanup --input repo_path=. --dry-run
+
+# Safe Terraform planning without apply/destroy
+guardrail run --recipe terraform-plan-only --input config_path=infra/staging --dry-run
 
 # Pin to a specific version
 guardrail run --recipe git-branch-cleanup@1.0.0 --input repo_path=. --dry-run

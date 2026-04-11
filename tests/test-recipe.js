@@ -58,6 +58,8 @@ function writeRecipeFile(dir, recipe, filename = 'test.recipe.json') {
   return path;
 }
 
+const RECIPE_DIR = join(process.cwd(), 'recipes');
+
 // ===========================================================================
 // 1. Schema Validation — Required Fields
 // ===========================================================================
@@ -141,6 +143,15 @@ describe('Recipe: Schema Validation', () => {
       () => validateRecipe(makeRecipe({ requires_auth: [{ type: 'claude_login', env: ['bad-var'] }] })),
       (err) => err.errors.some(e => e.includes('requires_auth.env')),
     );
+  });
+
+  it('bundled terraform-plan-only recipe validates and stays plan-only', () => {
+    const recipe = loadRecipe(join(RECIPE_DIR, 'terraform-plan-only.recipe.json'));
+    assert.doesNotThrow(() => validateRecipe(recipe));
+    const commands = recipe.steps.flatMap((step) => step.run?.args || []);
+    assert.ok(commands.some((arg) => arg === 'plan'));
+    assert.ok(!commands.some((arg) => arg === 'apply'));
+    assert.ok(!commands.some((arg) => arg === 'destroy'));
   });
 
   it('risk_level must be low, medium, or high', () => {

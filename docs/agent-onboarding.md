@@ -228,8 +228,10 @@ node src/cli.js recipe versions <recipe-id>
 - `recipe_roots` is still accepted as a compatibility alias for `default_recipe_roots`.
 - Configured default recipe roots are additional search roots, not silent overrides. Explicit `--recipe-search-dir` still wins, and missing configured roots fail closed.
 - If the active org policy defines `trusted_recipe_roots`, extra configured roots and explicit extra roots must stay inside that allowlist. Guardrail loads the active policy from `.guardrail/org-policy.json` or `.guardrail/org-policies/default.json` before accepting those extra roots.
+- Remote recipe installs and adapter-profile installs now load that same active org policy by default and enforce `trusted_execution_sources` before they fetch GitHub or URL content. Do not assume a remote install is allowed just because `trusted_sources` in config would permit it.
 - If the same recipe id/version is discoverable from more than one root at the same precedence point, Guardrail fails closed with an explicit collision error instead of silently picking one candidate.
 - Workflow manifests bind `recipe_ref` source provenance through portable source locators (`sourceRootKind` + relative locator), not absolute checkout paths. That avoids false drift when the repo checkout path changes.
+- External workflow roots now record stable origin locators (`explicit`, `repo_config`, `user_config`, or `absolute`). That keeps repo-configured shared roots portable across machines while still forcing drift if a workflow resolves the same recipe filename from a different shared root.
 - The source class still matters. If a workflow was approved against `node_modules/.guardrail/recipes` and later resolves the same recipe from local `recipes/` or an external root, Guardrail treats that as workflow drift and stops for reapproval.
 - When a recipe cannot be found, Guardrail now includes the current search order in the error. Use that before assuming the recipe id is wrong.
 
@@ -474,6 +476,7 @@ Public GitHub recipe install rules:
 - Public repos can install through raw GitHub fetch alone. Private repos require `gh` to be installed and authenticated in the same runtime the agent uses.
 - If the agent runs with a different `HOME`, container, or sandbox profile, make sure GitHub CLI auth is still reachable there. In practice this may mean setting `GH_CONFIG_DIR` explicitly.
 - If neither raw GitHub access nor authenticated `gh` access is available, Guardrail fails closed and the agent must stop instead of bypassing the install path.
+- For self-hosted or air-gapped distribution, Guardrail can now export a static recipe registry snapshot with `guardrail recipe registry export <output-dir>`. That snapshot writes `v1/recipes/index.json`, per-recipe metadata, and per-version JSON documents for static hosting. Remote registry install/discovery is still a separate follow-on.
 
 Private-repo agent install example:
 
@@ -482,6 +485,17 @@ GH_CONFIG_DIR=/path/to/gh-config \
 node /Users/adilevinshtein/Documents/dev/Guardian/src/cli.js recipe install \
   github://owner/repo/recipes/safe.recipe.json@<full-commit-sha>
 ```
+
+Safe plan-only infrastructure recipe:
+
+```bash
+node src/cli.js run --recipe terraform-plan-only \
+  --input config_path=infra/staging \
+  --dry-run
+```
+
+- Use `terraform-plan-only` when the task is reviewable planning only.
+- Use `infra-deploy` only when the task truly needs approval-bearing mutation (`apply`) and the operator wants that stronger contract.
 
 ## Adapter Mode
 

@@ -1,11 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, relative, sep } from 'node:path';
+import { homedir } from 'node:os';
 import { serializeStable, checkRegexSafety } from './contract.js';
 import { deepEqual, pretty, indexById, resolvePath } from './shared.js';
 import {
   buildRecipeSearchDirs,
   classifyRecipeSourceRoot,
+  loadConfiguredRecipeRoots,
   resolveRecipeById,
   resolveInputs,
   parseRecipeSpecifier,
@@ -587,6 +589,41 @@ function toPortableRelativePath(rootPath, filePath) {
   return relative(rootPath, filePath).split(sep).join('/');
 }
 
+function resolveExternalRootLocator(sourceRoot, projectRoot, options = {}) {
+  const normalizedRoot = normalizePathForRecipeLookup(sourceRoot);
+  const basePath = options.basePath ?? projectRoot;
+  const explicitRoots = (options.recipeSearchDirs || []).map((root) => normalizePathForRecipeLookup(root, basePath));
+  if (explicitRoots.includes(normalizedRoot)) {
+    return `external_root:explicit:${toPortableRelativePath(basePath, normalizedRoot)}`;
+  }
+
+  const { repoRoots, userRoots } = loadConfiguredRecipeRoots({
+    projectRoot,
+    basePath,
+    repoConfigPath: options.repoConfigPath,
+    userConfigPath: options.userConfigPath,
+    orgPolicy: options.orgPolicy,
+    orgPolicyName: options.orgPolicyName,
+    orgPolicyDir: options.orgPolicyDir,
+  });
+
+  if (repoRoots.includes(normalizedRoot)) {
+    return `external_root:repo_config:${toPortableRelativePath(projectRoot, normalizedRoot)}`;
+  }
+  if (userRoots.includes(normalizedRoot)) {
+    return `external_root:user_config:${toPortableRelativePath(homedir(), normalizedRoot)}`;
+  }
+  return `external_root:absolute:${normalizedRoot}`;
+}
+
+function buildRecipeSourceLocator(sourceRootKind, sourceRoot, sourcePath, projectRoot, options = {}) {
+  const recipePath = toPortableRelativePath(sourceRoot, sourcePath);
+  if (sourceRootKind !== 'external_root') {
+    return `${sourceRootKind}:${recipePath}`;
+  }
+  return `${resolveExternalRootLocator(sourceRoot, projectRoot, options)}:${recipePath}`;
+}
+
 function materializeRecipeRefForApproval(recipeRef = {}) {
   const { sourcePath, sourceRoot, ...portableRecipeRef } = recipeRef;
   return portableRecipeRef;
@@ -687,7 +724,13 @@ function normalizeRecipeRefStep(step, projectRoot, options = {}) {
     requestedVersion,
     resolvedVersion: resolvedRecipe.version,
     sourceRootKind,
-    sourceLocator: `${sourceRootKind}:${toPortableRelativePath(sourceRoot, resolvedRecipe.sourcePath)}`,
+    sourceLocator: buildRecipeSourceLocator(
+      sourceRootKind,
+      sourceRoot,
+      resolvedRecipe.sourcePath,
+      projectRoot,
+      options,
+    ),
     sourcePath: normalizePathForRecipeLookup(resolvedRecipe.sourcePath),
     recipeHash,
     channel: trust.channel,

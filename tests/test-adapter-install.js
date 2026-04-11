@@ -62,6 +62,21 @@ function makeConfig(dir, trustedSources) {
   return path;
 }
 
+function writeOrgPolicy(dir, trustedExecutionSources) {
+  const policyDir = join(dir, '.guardrail');
+  mkdirSync(policyDir, { recursive: true });
+  const path = join(policyDir, 'org-policy.json');
+  writeFileSync(path, JSON.stringify({
+    name: 'adapter-exec-policy',
+    version: '1.0.0',
+    trusted_execution_sources: trustedExecutionSources,
+    forbidden_operations: [],
+    required_approvals: [],
+    allowed_actions: [],
+  }));
+  return path;
+}
+
 function makeSignedAdapterIndex(profiles, keyPair = generateKeyPairSync('ed25519')) {
   const unsigned = {
     version: 1,
@@ -516,6 +531,31 @@ describe('installAdapterProfile — source routing', () => {
     assert.equal(result.pin, undefined, 'URL route must not produce pin metadata');
   });
 
+  it('enforces trusted_execution_sources for URL installs via active org policy', async () => {
+    const url = 'https://example.com/profiles/testtool.json';
+    const configPath = makeConfig(work, ['https://example.com/profiles/']);
+    writeOrgPolicy(work, ['https://other.example.com/']);
+
+    await assert.rejects(
+      () => installFromUrl(url, {
+        configPath,
+        profileDir: join(work, 'store'),
+        orgPolicyDir: work,
+        fetchJson: async () => makeProfile(),
+      }),
+      /trusted execution sources/
+    );
+
+    writeOrgPolicy(work, ['https://example.com/']);
+    const result = await installFromUrl(url, {
+      configPath,
+      profileDir: join(work, 'store'),
+      orgPolicyDir: work,
+      fetchJson: async () => makeProfile(),
+    });
+    assert.equal(result.installed, true);
+  });
+
   it('routes local paths through installFromPath', async () => {
     const src = writeProfileFile(work, makeProfile());
     const profileDir = join(work, 'store');
@@ -566,6 +606,54 @@ describe('installAdapterProfile — source routing', () => {
     assert.equal(result.installed, true);
     assert.equal(result.tool, 'aider');
     assert.ok(seenUrl && seenUrl.includes('/adapter-profiles/'));
+  });
+
+  it('enforces trusted_execution_sources for GitHub installs via active org policy', async () => {
+    const fullSha = 'd'.repeat(40);
+    const source =
+      `github://guardrail-dev/adapter-profiles/testtool.json@${fullSha}`;
+    const configPath = makeConfig(work, ['github://guardrail-dev/adapter-profiles/']);
+    writeOrgPolicy(work, ['github://other-org/']);
+
+    await assert.rejects(
+      () => installFromGitHub(source, {
+        configPath,
+        profileDir: join(work, 'store'),
+        orgPolicyDir: work,
+        fetchJson: async () => makeProfile(),
+      }),
+      /trusted execution sources/
+    );
+  });
+
+  it('enforces trusted_execution_sources for bare-name signed-index installs', async () => {
+    const { index, publicKeyPem } = makeSignedAdapterIndex({
+      aider: {
+        owner: 'guardrail-dev',
+        repo: 'adapter-profiles',
+        path: 'aider.json',
+        sha: 'a'.repeat(40),
+        version: '1.0.0',
+        content_hash: 'b'.repeat(64),
+      },
+    });
+    const indexPath = join(work, 'adapter-profiles.index.json');
+    const keyPath = join(work, 'adapter-profiles.index.pub.pem');
+    writeFileSync(indexPath, JSON.stringify(index, null, 2));
+    writeFileSync(keyPath, publicKeyPem);
+    writeOrgPolicy(work, ['github://other-org/']);
+
+    await assert.rejects(
+      () => installAdapterProfile('aider', {
+        profileDir: join(work, 'store'),
+        configPath: makeConfig(work, ['github://guardrail-dev/adapter-profiles/']),
+        indexPath,
+        indexKeyPath: keyPath,
+        orgPolicyDir: work,
+        fetchJson: async () => makeProfile({ tool: 'aider' }),
+      }),
+      /trusted execution sources/
+    );
   });
 });
 

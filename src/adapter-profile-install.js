@@ -5,6 +5,7 @@ import { validateProfile, hashProfile } from './adapter-profile.js';
 import { loadRawJson } from './recipe.js';
 import { parseGitHubUrl, checkTrustedSource, loadConfig } from './recipe-install.js';
 import { resolveAdapterProfileFromSignedIndex } from './adapter-profile-index.js';
+import { isTrustedExecutionSource, resolveActiveOrgPolicy } from './org-policy.js';
 
 // ---------------------------------------------------------------------------
 // Shared validation helper — produces a stable error prefix that downstream
@@ -90,6 +91,12 @@ export function installFromPath(filePath, opts = {}) {
 
 export async function installFromUrl(url, opts = {}) {
   const config = loadConfig(opts.configPath);
+  const policy = resolveActiveOrgPolicy({
+    orgPolicy: opts.orgPolicy,
+    orgPolicyName: opts.orgPolicyName,
+    orgPolicyDir: opts.orgPolicyDir,
+    fallbackDir: opts.policyFallbackDir || process.cwd(),
+  }).policy;
   if (!config.trusted_sources || config.trusted_sources.length === 0) {
     throw new Error(
       'No trusted sources configured for remote adapter profile install. ' +
@@ -100,6 +107,13 @@ export async function installFromUrl(url, opts = {}) {
     throw new Error(
       `Source "${url}" is not in trusted sources. ` +
       'Add a matching prefix to ~/.guardrail/config.json.'
+    );
+  }
+  if (!isTrustedExecutionSource(url, policy)) {
+    const policyLabel = policy?.name || 'active';
+    throw new Error(
+      `Source "${url}" is not in trusted execution sources for org policy "${policyLabel}". ` +
+      'Add a matching prefix to trusted_execution_sources.'
     );
   }
 
@@ -116,6 +130,12 @@ export async function installFromUrl(url, opts = {}) {
 
 export async function installFromGitHub(source, opts = {}) {
   const config = loadConfig(opts.configPath);
+  const policy = resolveActiveOrgPolicy({
+    orgPolicy: opts.orgPolicy,
+    orgPolicyName: opts.orgPolicyName,
+    orgPolicyDir: opts.orgPolicyDir,
+    fallbackDir: opts.policyFallbackDir || process.cwd(),
+  }).policy;
   const configPath = opts.configPath || resolve(homedir(), '.guardrail', 'config.json');
 
   if (!config.trusted_sources || config.trusted_sources.length === 0) {
@@ -128,6 +148,13 @@ export async function installFromGitHub(source, opts = {}) {
     throw new Error(
       `Source "${source}" is not in trusted sources.\n` +
       `Add a matching prefix to ${configPath}.`
+    );
+  }
+  if (!isTrustedExecutionSource(source, policy)) {
+    const policyLabel = policy?.name || 'active';
+    throw new Error(
+      `Source "${source}" is not in trusted execution sources for org policy "${policyLabel}". ` +
+      'Add a matching prefix to trusted_execution_sources.'
     );
   }
 

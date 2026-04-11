@@ -1043,6 +1043,12 @@ describe('README Feature: Recipe System', () => {
     assert.ok(r.exitCode === 0);
   });
 
+  it('guardrail recipe validate → validates terraform-plan-only', () => {
+    const r = run(`${CLI} recipe validate recipes/terraform-plan-only.recipe.json`);
+    assert.equal(r.exitCode, 0);
+    assert.ok(r.stdout.includes('valid'));
+  });
+
   it('guardrail recipe versions → lists installed versions', () => {
     run(`${CLI} recipe install recipes/git-branch-cleanup.recipe.json`);
     const r = run(`${CLI} recipe versions git-branch-cleanup`);
@@ -1054,6 +1060,16 @@ describe('README Feature: Recipe System', () => {
     const r = run(`${CLI} recipe install open-pr`);
     assert.ok(r.exitCode !== 0);
     assert.ok((r.stderr || '').includes('github://guardrail-dev/recipes/'));
+  });
+
+  it('guardrail recipe registry export → writes a static recipe registry snapshot', () => {
+    const dir = tmpDir();
+    const out = join(dir, 'registry');
+    const r = run(`${CLI} recipe registry export ${out}`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.ok(r.stdout.includes('Exported recipe registry snapshot'));
+    const index = JSON.parse(readFileSync(join(out, 'v1', 'recipes', 'index.json'), 'utf8'));
+    assert.ok(index.recipes.some((entry) => entry.id === 'terraform-plan-only'));
   });
 
   it('guardrail recipe publish --dry-run converts an approved manifest into a publishable recipe', () => {
@@ -1300,7 +1316,14 @@ describe('README Feature: Recipe Execution + Versioning', () => {
     assert.ok(r.stderr.includes('staging') || r.stderr.includes('production'));
   });
 
-  it('all 6 shipped recipes dry-run successfully', () => {
+  it('terraform-plan-only dry-runs safely', () => {
+    const r = run(`${CLI} run --recipe terraform-plan-only --input config_path=configs/main.tf --dry-run`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.ok(r.stdout.includes('Safe'));
+    assert.ok(r.stdout.includes('plan -input=false'));
+  });
+
+  it('all shipped infrastructure-safe recipes dry-run successfully', () => {
     const runs = [
       `${CLI} run --recipe git-branch-cleanup --input repo_path=. --dry-run`,
       `${CLI} run --recipe dep-upgrade --input package_dir=. --input scope=patch --dry-run`,

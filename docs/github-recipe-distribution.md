@@ -1,6 +1,6 @@
 # GitHub Recipe Distribution — Implementation Spec
 
-**Status:** GitHub install and `recipe publish` are shipped; signed index and registry follow-ons remain planned
+**Status:** GitHub install and `recipe publish` are shipped; signed index remains planned, and self-hosted registry export now ships as a static snapshot surface
 **Target:** v0.2 (pre-SaaS, open source launch)
 **Depends on:** recipe.js, recipe-install.js, recipe-runner.js, cli.js
 
@@ -1381,7 +1381,7 @@ These features belong in **Open Source Launch (v0.2)** — they require no infra
 | D0b | Recipe publish (`guardrail recipe publish`) | v0.2 | Done |
 | D0c | Signed index for name-based install | v0.3 | Not started |
 | D1 | npm registry (`@guardrail/recipes`) | v0.3 | Not started — ships after GitHub distribution is proven |
-| D2 | Self-hosted recipe registry | v0.5 | Not started — enterprise air-gap |
+| D2 | Self-hosted recipe registry | v0.5 | Partial — `guardrail recipe registry export` writes the static `v1/recipes/*` JSON layout; remote registry install/discovery stays open |
 
 ---
 

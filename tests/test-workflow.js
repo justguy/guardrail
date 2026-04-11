@@ -1625,7 +1625,10 @@ describe('Workflow Normalization', () => {
 
       assert.equal(normalized.steps[0].recipeRef.id, 'external-recipe');
       assert.equal(normalized.steps[0].recipeRef.sourceRootKind, 'external_root');
-      assert.equal(normalized.steps[0].recipeRef.sourceLocator, 'external_root:external-recipe.recipe.json');
+      assert.equal(
+        normalized.steps[0].recipeRef.sourceLocator,
+        'external_root:explicit:../guardian-recipes:external-recipe.recipe.json',
+      );
       assert.ok(
         normalized.steps[0].recipeRef.sourcePath.endsWith('external-recipe.recipe.json'),
       );
@@ -1756,6 +1759,134 @@ describe('Workflow Normalization', () => {
         normalized.steps[0].recipeRef.sourcePath.endsWith('configured-default-recipe.recipe.json'),
       );
       assert.equal(normalized.steps[0].recipeRef.sourceRootKind, 'external_root');
+      assert.equal(
+        normalized.steps[0].recipeRef.sourceLocator,
+        'external_root:repo_config:../shared-recipes:configured-default-recipe.recipe.json',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('repo-configured external roots stay portable across different checkout roots', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-config-root-portable-'));
+    const leftWorkflowDir = join(dir, 'left', 'workflow');
+    const rightWorkflowDir = join(dir, 'right', 'workflow');
+    const leftShared = join(dir, 'left', 'shared-recipes');
+    const rightShared = join(dir, 'right', 'shared-recipes');
+
+    try {
+      for (const workflowDir of [leftWorkflowDir, rightWorkflowDir]) {
+        mkdirSync(workflowDir, { recursive: true });
+        mkdirSync(join(workflowDir, '.guardrail'), { recursive: true });
+        writeFileSync(join(workflowDir, '.guardrail', 'config.json'), JSON.stringify({
+          default_recipe_roots: ['../shared-recipes'],
+        }));
+      }
+
+      for (const sharedDir of [leftShared, rightShared]) {
+        mkdirSync(sharedDir, { recursive: true });
+        writeRecipeFile(sharedDir, {
+          id: 'portable-config-root-recipe',
+          name: 'Portable Config Root Recipe',
+          description: 'Portable repo-config external root',
+          version: '1.0.0',
+          author: 'tester',
+          category: 'custom',
+          channel: 'community',
+          approval_required: true,
+          risk_level: 'low',
+          inputs: {},
+          steps: [{
+            id: 'main',
+            description: 'echo portable-config-root',
+            run: { command: 'echo', args: ['portable-config-root'], mode: 'structured' },
+          }],
+          guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+        });
+      }
+
+      const def = makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'portable-config-root-recipe',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      });
+
+      const left = normalizeWorkflowDefinition(def, leftWorkflowDir, {
+        repoConfigPath: join(leftWorkflowDir, '.guardrail', 'config.json'),
+        userConfigPath: false,
+      });
+      const right = normalizeWorkflowDefinition(def, rightWorkflowDir, {
+        repoConfigPath: join(rightWorkflowDir, '.guardrail', 'config.json'),
+        userConfigPath: false,
+      });
+
+      assert.equal(left.steps[0].recipeRef.sourceLocator, right.steps[0].recipeRef.sourceLocator);
+      assert.equal(
+        left.steps[0].recipeRef.sourceLocator,
+        'external_root:repo_config:../shared-recipes:portable-config-root-recipe.recipe.json',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('external_root recipe_ref manifests drift when different shared roots expose the same relative recipe path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-external-root-identity-'));
+    const leftWorkflowDir = join(dir, 'left');
+    const rightWorkflowDir = join(dir, 'right');
+    const sharedAlpha = join(dir, 'shared-alpha');
+    const sharedBeta = join(dir, 'shared-beta');
+
+    try {
+      mkdirSync(leftWorkflowDir, { recursive: true });
+      mkdirSync(rightWorkflowDir, { recursive: true });
+      mkdirSync(sharedAlpha, { recursive: true });
+      mkdirSync(sharedBeta, { recursive: true });
+
+      for (const root of [sharedAlpha, sharedBeta]) {
+        writeRecipeFile(root, {
+          id: 'external-root-identity',
+          name: 'External Root Identity',
+          description: 'Portable external root provenance test',
+          version: '1.0.0',
+          author: 'tester',
+          category: 'custom',
+          channel: 'community',
+          approval_required: true,
+          risk_level: 'low',
+          inputs: {},
+          steps: [{
+            id: 'main',
+            description: 'echo external-root',
+            run: { command: 'echo', args: ['external-root'], mode: 'structured' },
+          }],
+          guardrails: { constraints: ['structured only'], invariants: ['mode: structured'] },
+        });
+      }
+
+      const def = makeDefinition({
+        steps: [{
+          id: 'step_a',
+          type: 'recipe_ref',
+          recipe: 'external-root-identity',
+          inputs: {},
+          on: { success: 'done', failure: 'abort' },
+        }],
+      });
+
+      const left = normalizeWorkflowDefinition(def, leftWorkflowDir, {
+        recipeSearchDirs: [sharedAlpha],
+      });
+      const right = normalizeWorkflowDefinition(def, rightWorkflowDir, {
+        recipeSearchDirs: [sharedBeta],
+      });
+
+      assert.notEqual(left.steps[0].recipeRef.sourceLocator, right.steps[0].recipeRef.sourceLocator);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -4,12 +4,17 @@ import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadRecipe, loadRemoteRecipe, hashRecipe, loadRawJson, validateRecipe } from './recipe.js';
-import { isTrustedExecutionSource } from './org-policy.js';
+import { isTrustedExecutionSource, resolveActiveOrgPolicy } from './org-policy.js';
 
 const execFileAsync = promisify(execFile);
 
 function getPolicyFromOpts(opts = {}) {
-  return opts.orgPolicy || null;
+  return resolveActiveOrgPolicy({
+    orgPolicy: opts.orgPolicy,
+    orgPolicyName: opts.orgPolicyName,
+    orgPolicyDir: opts.orgPolicyDir,
+    fallbackDir: opts.policyFallbackDir || process.cwd(),
+  }).policy;
 }
 
 // ---------------------------------------------------------------------------

@@ -994,6 +994,7 @@ Available tools: guardrail adapter profile list
 ✓ install from path writes to correct location
 ✓ install from github:// URL writes pin metadata
 ✓ URL install checks trusted sources
+✓ remote install also enforces active org-policy `trusted_execution_sources`
 ✓ immutability prevents overwrite of different content
 ✓ same-hash install is idempotent
 ✓ list/show resolve newest installed version

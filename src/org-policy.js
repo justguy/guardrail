@@ -14,6 +14,7 @@ import { join, resolve, sep } from 'node:path';
  * @property {string[]} required_approvals
  * @property {string[]} trusted_recipe_roots
  * @property {string[]} trusted_execution_sources
+ * @property {string[]} trusted_registries
  * @property {boolean} overrides_local - Always true for org policies.
  */
 
@@ -25,6 +26,7 @@ export function validateOrgPolicy(policy) {
   if (!Array.isArray(policy.required_approvals)) errors.push('required_approvals must be an array');
   if (!Array.isArray(policy.trusted_recipe_roots || [])) errors.push('trusted_recipe_roots must be an array');
   if (!Array.isArray(policy.trusted_execution_sources || [])) errors.push('trusted_execution_sources must be an array');
+  if (!Array.isArray(policy.trusted_registries || [])) errors.push('trusted_registries must be an array');
   return errors;
 }
 
@@ -99,6 +101,11 @@ export function resolveHierarchy(orgPolicy, teamPolicy, userPolicy) {
       ...(teamPolicy?.trusted_execution_sources ?? []),
       ...(userPolicy?.trusted_execution_sources ?? []),
     ],
+    trusted_registries: [
+      ...(orgPolicy?.trusted_registries ?? []),
+      ...(teamPolicy?.trusted_registries ?? []),
+      ...(userPolicy?.trusted_registries ?? []),
+    ],
     source: orgPolicy ? 'org' : teamPolicy ? 'team' : 'user',
   };
 
@@ -111,6 +118,9 @@ export function resolveHierarchy(orgPolicy, teamPolicy, userPolicy) {
   }
   if (orgPolicy?.trusted_execution_sources?.length > 0) {
     effective.trusted_execution_sources = orgPolicy.trusted_execution_sources;
+  }
+  if (orgPolicy?.trusted_registries?.length > 0) {
+    effective.trusted_registries = orgPolicy.trusted_registries;
   }
 
   return effective;
@@ -167,4 +177,16 @@ export function loadEffectiveOrgPolicy(dir) {
     return JSON.parse(readFileSync(directPath, 'utf8'));
   }
   return loadOrgPolicy('default', dir);
+}
+
+export function resolveActiveOrgPolicy({
+  orgPolicy = null,
+  orgPolicyName = null,
+  orgPolicyDir = null,
+  fallbackDir = process.cwd(),
+} = {}) {
+  const policyBase = resolve(orgPolicyDir || fallbackDir);
+  const policy = orgPolicy
+    || (orgPolicyName ? loadOrgPolicy(orgPolicyName, policyBase) : loadEffectiveOrgPolicy(policyBase));
+  return { policy, policyBase };
 }

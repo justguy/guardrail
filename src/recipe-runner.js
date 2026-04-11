@@ -11,7 +11,7 @@ import { hashRecipe, loadRemoteRecipe } from './recipe.js';
 import { validateInputValue, inferApprovalMode } from './input-validator.js';
 import { classifyBucket, summarizeCapabilities, escalateTraits } from './risk-traits.js';
 import { loadConfig, pinPathForRecipePath, loadGitHubRecipeFromApi } from './recipe-install.js';
-import { loadOrgPolicy, loadEffectiveOrgPolicy, isTrustedRecipeRoot } from './org-policy.js';
+import { isTrustedRecipeRoot, resolveActiveOrgPolicy } from './org-policy.js';
 
 // ---------------------------------------------------------------------------
 // Canonical search directory builders
@@ -34,18 +34,6 @@ function normalizeConfiguredRecipeRoot(rawRoot, baseDir, sourceLabel) {
     throw new Error(`Configured recipe root "${rawRoot}" from ${sourceLabel} does not exist: ${resolvedRoot}`);
   }
   return resolvedRoot;
-}
-
-function resolveActiveOrgPolicy({
-  orgPolicy = null,
-  orgPolicyName = null,
-  orgPolicyDir = null,
-  fallbackDir = process.cwd(),
-} = {}) {
-  const policyBase = resolve(orgPolicyDir || fallbackDir);
-  const policy = orgPolicy
-    || (orgPolicyName ? loadOrgPolicy(orgPolicyName, policyBase) : loadEffectiveOrgPolicy(policyBase));
-  return { policy, policyBase };
 }
 
 function assertTrustedRecipeRoot(root, rawLabel, policy, policyBase, kind = 'Configured recipe root') {

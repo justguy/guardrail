@@ -176,6 +176,7 @@ Commands:
   recipe validate <recipe.json>         Validate a recipe file
   recipe inspect <packed.json>          Inspect a packaged recipe (verify hash)
   recipe install <path|url|github://>   Install a recipe to local registry
+  recipe registry export <output-dir>   Export a static self-hosted recipe registry snapshot
   recipe versions <id>                  List installed versions of a recipe
   recipe publish --name <n> --category <c> [--manifest <path>] [--description <d>] [--dry-run]
   adapter run --tool <name> -- <cmd>    Run a command through an adapter profile
@@ -787,11 +788,30 @@ export function parseArgs(argv) {
   // --- recipe subcommand ----------------------------------------------------
 
   if (sub === 'recipe') {
-    if (i >= argv.length || !['validate', 'inspect', 'install', 'versions', 'publish'].includes(argv[i])) {
+    if (i >= argv.length || !['validate', 'inspect', 'install', 'versions', 'publish', 'registry'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
     result.subcommand = `recipe-${action}`;
+
+    if (action === 'registry') {
+      if (i >= argv.length || argv[i] !== 'export') return { error: 'usage' };
+      i++;
+      result.subcommand = 'recipe-registry-export';
+      if (i >= argv.length) return { error: 'usage' };
+      result.outputPath = argv[i++];
+      result.recipeSearchDirs = [];
+      while (i < argv.length) {
+        if (argv[i] === '--recipe-search-dir' && i + 1 < argv.length) {
+          result.recipeSearchDirs.push(argv[++i]);
+          i++;
+          continue;
+        }
+        if (argv[i] === '--json') { result.json = true; i++; continue; }
+        return { error: 'usage' };
+      }
+      return result;
+    }
 
     if (action === 'publish') {
       // parse --name, --category, --description, --version, --author, --dry-run, --manifest/--manifest-path
@@ -2204,6 +2224,31 @@ async function main() {
         if (result.pin) {
           console.log(`  SHA:  ${result.pin.sha}`);
         }
+      }
+      process.exit(0);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  }
+
+  if (parsed.subcommand === 'recipe-registry-export') {
+    try {
+      const { exportRecipeRegistry } = await import('./recipe-registry.js');
+      const { buildRecipeSearchDirs } = await import('./recipe-runner.js');
+      const searchDirs = buildRecipeSearchDirs({
+        explicitSearchDirs: parsed.recipeSearchDirs || [],
+        projectRoot: process.cwd(),
+        basePath: process.cwd(),
+        includeDefaults: true,
+      });
+      const result = exportRecipeRegistry(parsed.outputPath, searchDirs);
+      if (parsed.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Exported recipe registry snapshot to ${result.outputDir}`);
+        console.log(`  Recipes: ${result.count}`);
+        console.log(`  Generated: ${result.generatedAt}`);
       }
       process.exit(0);
     } catch (err) {

@@ -41,6 +41,21 @@ function makeValidRecipe(overrides = {}) {
   };
 }
 
+function writeOrgPolicy(dir, trustedExecutionSources) {
+  const policyDir = join(dir, '.guardrail');
+  mkdirSync(policyDir, { recursive: true });
+  const policyPath = join(policyDir, 'org-policy.json');
+  writeFileSync(policyPath, JSON.stringify({
+    name: 'exec-policy',
+    version: '1.0.0',
+    trusted_execution_sources: trustedExecutionSources,
+    forbidden_operations: [],
+    required_approvals: [],
+    allowed_actions: [],
+  }));
+  return policyPath;
+}
+
 // ---------------------------------------------------------------------------
 // parseGitHubUrl
 // ---------------------------------------------------------------------------
@@ -265,6 +280,36 @@ describe('installFromGitHub', () => {
         required_approvals: [],
         allowed_actions: [],
       },
+    });
+
+    assert.equal(result.installed, true);
+    assert.equal(result.id, 'test-recipe');
+  });
+
+  it('loads the active org policy from org-policy.json when no policy object is injected', async () => {
+    const recipe = makeValidRecipe();
+    const configPath = makeConfigFile(['github://guardrail-dev/recipes/']);
+    const registryDir = join(tempDir, 'recipes');
+
+    writeOrgPolicy(tempDir, ['github://other-org/']);
+
+    await assert.rejects(
+      () => installFromGitHub(source, {
+        configPath,
+        registryDir,
+        loadRemoteRecipe: async () => recipe,
+        orgPolicyDir: tempDir,
+      }),
+      /trusted execution sources/
+    );
+
+    writeOrgPolicy(tempDir, ['github://guardrail-dev/']);
+
+    const result = await installFromGitHub(source, {
+      configPath,
+      registryDir,
+      loadRemoteRecipe: async () => recipe,
+      orgPolicyDir: tempDir,
     });
 
     assert.equal(result.installed, true);

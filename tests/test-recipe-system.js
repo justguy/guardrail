@@ -507,6 +507,16 @@ describe('Recipe System: Example Recipes', () => {
     assert.equal(r.approval_required, true);
   });
 
+  it('terraform-plan-only recipe is valid and plan-only', () => {
+    const r = loadRecipe(join(recipeDir, 'terraform-plan-only.recipe.json'));
+    assert.equal(r.category, 'infra');
+    assert.equal(r.approval_required, true);
+    const args = r.steps.flatMap((step) => step.run?.args || []);
+    assert.ok(args.includes('plan'));
+    assert.ok(!args.includes('apply'));
+    assert.ok(!args.includes('destroy'));
+  });
+
   it('openclaw-wrapper recipe is categorized', () => {
     const r = loadRecipe(join(recipeDir, 'openclaw-wrapper.recipe.json'));
     assert.equal(r.category, 'openclaw');
@@ -521,7 +531,7 @@ describe('Recipe System: Example Recipes', () => {
   });
 
   it('all recipes have guardrails defined', () => {
-    const files = ['git-branch-cleanup', 'git-commit', 'github-pr-merge', 'dep-upgrade', 'infra-deploy', 'openclaw-wrapper', 'npm-publish'];
+    const files = ['git-branch-cleanup', 'git-commit', 'github-pr-merge', 'dep-upgrade', 'infra-deploy', 'terraform-plan-only', 'openclaw-wrapper', 'npm-publish'];
     for (const name of files) {
       const r = loadRecipe(join(recipeDir, `${name}.recipe.json`));
       assert.ok(r.guardrails.constraints?.length > 0, `${name} should have constraints`);
