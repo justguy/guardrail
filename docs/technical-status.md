@@ -273,6 +273,11 @@ docs/                    Product requirements, specs, invariants, implementation
 | Environment separation | Done | dev/staging/prod isolation, cross-env access blocked (dev ✗ prod) |
 | Marketplace | Done | Recipe discovery, publishing, version conflict detection, usage stats |
 | Incident response hooks | Done | Trigger on violations/failures; alert/halt/escalate/log actions |
+| Identity & admin lifecycle | Designed | Approval queue, multi-stage chains, org policy hierarchy, actor/origin tracking, and RBAC logic exist; SSO/SCIM, delegated admin, service accounts, and org/workspace admin surfaces are not yet operational |
+| Reliability & production operations | Designed | Hash-chained audit, runtime time/quota policy, locks, incident hooks, and compliance exports exist; HA/DR, backup/restore, failover, and SLO/ops automation still need backend infrastructure |
+| Deployment flexibility & control | Designed | Deployment modes, self-hosted registries, trusted registries/indexes, and local-first runtime seams exist; private VPC, single-tenant, regional, and on-prem packaging are not yet shipped |
+| Cost governance / FinOps | Designed | `max_cost`, time/rate/run caps, resource tracking, and recipe-level AI budget inputs exist; org quotas, chargeback, and provider-backed spend tripwires are not yet wired |
+| Enterprise integrations & operational fit | Designed | Notifications, compliance exports, GitHub/private distribution, adapters, and CLI surfaces exist; SIEM, IdP, ticketing, webhook, and admin API integrations still need production connectors |
 
 ### Gap Closure — Pre-SaaS Readiness
 
@@ -517,6 +522,22 @@ Three product phases, each with its own go-to-market motion.
 | 15 | Cloud audit log shipping + retention | v0.5 | Enterprise compliance | Not started — no remote shipping code |
 | 16 | HSM / KMS key management | v0.5 | Enterprise key governance | Client-side AES-256-GCM done (key-management.js), no HSM/AWS KMS integration |
 | 17 | SOC 2 Type II certification | v0.5 | Large enterprise contracts | Compliance exports done, needs process + audit |
+| 18 | Org/workspace lifecycle, delegated admin, and service accounts | v0.5 | Enterprise rollout governance | Designed — approval queue, actor/origin governance, org policy hierarchy, and RBAC logic exist; needs SSO/OIDC/SAML, SCIM, delegated-admin APIs/UI, service-account credentials, and org/workspace persistence |
+| 19 | HA/DR, backups, restore, failover, and SLOs | v0.5 | Production operations | Designed — local audit/state, runtime locks/timeouts, incident hooks, and compliance exports exist; needs replicated backend state, backup/restore orchestration, failover handling, and ops telemetry |
+| 20 | Spend governance / FinOps / chargeback | v0.5 | Runaway-cost protection | Designed — `max_cost`, `maxRuns`, rate limits, runtime counters, and recipe-level model budgets exist; needs org/project quotas, provider cost ingestion, chargeback, and billing-backed budget tripwires |
+| 21 | Private VPC / single-tenant / on-prem / regional deployment | v0.5 | Regulated buyer deployment control | Designed — deployment modes, self-hosted registry/export flows, trusted registries/indexes, and local-first execution seams exist; needs packaging/orchestration artifacts, network topology controls, and regional control-plane choices |
+| 22 | BYOM / enterprise model endpoint control | v0.5 | Data governance and private-model adoption | Designed — adapter/profile abstraction plus recipe/runtime model/profile flags create the seam; needs endpoint registry, credential injection, policy enforcement, and deployment packaging for private model backends |
+| 23 | Operational integrations (SIEM, IdP, ticketing, SCM/webhooks/API) | v0.5 | Fit into existing enterprise workflows | Designed — audit exports, notifications framework, private GitHub flows, adapter system, and CLI surfaces exist; needs production connectors, webhook delivery, public admin APIs, and SIEM/ticketing integrations |
+
+### Enterprise-Aware Themes (Designed Seams, Pending Operationalization)
+
+| Theme | Already in the system | What still needs time/funding |
+|-------|------------------------|-------------------------------|
+| Identity and admin lifecycle | Approval queue + multi-stage chains, org policy hierarchy, RBAC logic, actor/origin governance, shared manifests | SSO/SAML/OIDC, SCIM, delegated admin, service accounts, org/workspace directory model, hosted persistence |
+| Reliability and production operations | Hash-chained audit, runtime time/quota policy, concurrency locks, incident hooks, compliance exports | HA/DR, backups, restore tooling, failover, SLOs, remote ops/state backends |
+| Deployment flexibility and control | Deployment modes, local-first execution, self-hosted recipe registry/export flows, trusted registries/indexes | Private VPC, single-tenant packaging, regional deployment, on-prem/air-gapped artifacts, enterprise deployment automation |
+| Cost governance / FinOps | `max_cost`, max-runs, rate limits, runtime counters, recipe-level model budgets | Provider spend ingestion, org/project quotas, chargeback, billing-backed budget tripwires, FinOps dashboards |
+| Integrations and operational fit | Notifications abstraction, compliance exports, private GitHub flows, adapter/profile system, CLI/admin surfaces | SIEM shipping, IdP sync, ticketing, live webhooks, SCM integrations, stable public admin APIs |
 
 ### Recipe Distribution (v0.2–v0.5)
 

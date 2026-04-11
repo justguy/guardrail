@@ -750,6 +750,8 @@ Recipe inputs are validated by schema, but approval reuse is still exact-value b
 
 > Think of it as the App Store for safe execution.
 
+The enterprise-aware roadmap is already shaped around five explicit themes: identity/admin lifecycle, reliability/production operations, deployment flexibility/control, cost governance/FinOps, and integrations/operational fit. The current codebase already contains the local control-plane seams for those areas — approval chains, org policy, RBAC logic, audit/compliance export, runtime tripwires, deployment modes, self-hosted registry flows, notifications, and adapter abstractions — even where the hosted enterprise infrastructure is still not wired. The authoritative status and backlog for that work lives in [docs/technical-status.md](docs/technical-status.md).
+
 ---
 
 ## Manifest Paths
