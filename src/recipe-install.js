@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadRecipe, loadRemoteRecipe, hashRecipe, loadRawJson, validateRecipe } from './recipe.js';
-import { isTrustedExecutionSource, resolveActiveOrgPolicy } from './org-policy.js';
+import { isTrustedExecutionSource, isTrustedRegistry, resolveActiveOrgPolicy } from './org-policy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -112,6 +112,82 @@ export function checkTrustedSource(source, trustedSources) {
   return trustedSources.some(ts => source.startsWith(ts));
 }
 
+function normalizeRegistryBase(registry, basePath = process.cwd()) {
+  if (!registry || typeof registry !== 'string') {
+    throw new Error('Recipe registry base is required.');
+  }
+  return registry.includes('://') ? registry.replace(/\/+$/, '') : resolve(basePath, registry);
+}
+
+function assertTrustedRegistryBase(registry, opts = {}) {
+  const policy = getPolicyFromOpts(opts);
+  if (!isTrustedRegistry(registry, policy, opts.policyFallbackDir || process.cwd())) {
+    const policyLabel = policy?.name || 'active';
+    throw new Error(
+      `Registry "${registry}" is not in trusted registries for org policy "${policyLabel}". ` +
+      'Add a matching prefix to trusted_registries.'
+    );
+  }
+}
+
+function readRegistryJson(registryBase, relativePath, opts = {}) {
+  if (registryBase.includes('://')) {
+    const fetchJson = opts.fetchJson || loadRawJson;
+    return fetchJson(`${registryBase}/${relativePath}`);
+  }
+  const absolute = join(registryBase, ...relativePath.split('/'));
+  if (!existsSync(absolute)) {
+    throw new Error(`Recipe registry document not found: ${absolute}`);
+  }
+  try {
+    return JSON.parse(readFileSync(absolute, 'utf8'));
+  } catch (err) {
+    throw new Error(`Recipe registry document is not valid JSON: ${err.message}`);
+  }
+}
+
+function resolveRegistryRecipeEntry(source, index) {
+  const recipes = Array.isArray(index?.recipes) ? index.recipes : [];
+  const spec = parseRegistryRecipeSpecifier(source);
+  const exact = recipes.find((entry) => (
+    entry.category === spec.category
+    && entry.id === spec.id
+    && entry.latest_version === spec.version
+  ));
+  if (!exact) {
+    throw new Error(`Recipe "${source}" was not found in the registry index.`);
+  }
+  return exact;
+}
+
+export function parseRegistryRecipeSpecifier(source) {
+  const at = source.lastIndexOf('@');
+  if (at <= 0) {
+    throw new Error(
+      `Registry recipe install requires an exact category/id@version specifier: ${source}\n`
+      + 'Format: <category>/<id>@<version>'
+    );
+  }
+
+  const version = source.slice(at + 1);
+  const recipePath = source.slice(0, at);
+  const slash = recipePath.indexOf('/');
+  if (slash <= 0 || slash === recipePath.length - 1) {
+    throw new Error(
+      `Registry recipe install requires category/id before @version: ${source}\n`
+      + 'Format: <category>/<id>@<version>'
+    );
+  }
+
+  const category = recipePath.slice(0, slash);
+  const id = recipePath.slice(slash + 1);
+  if (!/^[a-z][a-z0-9-]*$/.test(category) || !/^[a-z][a-z0-9-]*$/.test(id)) {
+    throw new Error(`Invalid registry recipe specifier "${source}".`);
+  }
+
+  return { category, id, version };
+}
+
 // ---------------------------------------------------------------------------
 // Core install logic (shared by path and URL install)
 // ---------------------------------------------------------------------------
@@ -193,6 +269,56 @@ export async function installFromUrl(url, opts = {}) {
   const remoteLoader = opts.loadRemoteRecipe ?? loadRemoteRecipe;
   const recipe = await remoteLoader(url);
   return _installRecipeToStore(recipe, opts);
+}
+
+export async function listRegistryRecipes(registry, opts = {}) {
+  const registryBase = normalizeRegistryBase(registry, opts.registryBasePath || process.cwd());
+  assertTrustedRegistryBase(registryBase, {
+    ...opts,
+    policyFallbackDir: opts.policyFallbackDir || process.cwd(),
+  });
+  const index = await readRegistryJson(registryBase, 'v1/recipes/index.json', opts);
+  if (!Array.isArray(index?.recipes)) {
+    throw new Error('Recipe registry index is missing a recipes array.');
+  }
+  return {
+    registry: registryBase,
+    generated_at: index.generated_at ?? null,
+    count: index.count ?? index.recipes.length,
+    recipes: index.recipes,
+  };
+}
+
+export async function installFromRegistry(source, registry, opts = {}) {
+  const registryBase = normalizeRegistryBase(registry, opts.registryBasePath || process.cwd());
+  assertTrustedRegistryBase(registryBase, {
+    ...opts,
+    policyFallbackDir: opts.policyFallbackDir || process.cwd(),
+  });
+
+  const index = await readRegistryJson(registryBase, 'v1/recipes/index.json', opts);
+  const entry = resolveRegistryRecipeEntry(source, index);
+  const { category, id, version } = parseRegistryRecipeSpecifier(source);
+  if (typeof version !== 'string' || version.length === 0) {
+    throw new Error(`Recipe "${source}" is missing an exact version.`);
+  }
+
+  const recipe = await readRegistryJson(
+    registryBase,
+    `v1/recipes/${category}/${id}/versions/${version}.json`,
+    opts,
+  );
+  validateRecipe(recipe);
+  const result = _installRecipeToStore(recipe, opts);
+  return {
+    ...result,
+    registry: registryBase,
+    registryEntry: {
+      id,
+      category,
+      version,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

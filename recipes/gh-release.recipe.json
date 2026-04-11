@@ -1,0 +1,74 @@
+{
+  "id": "gh-release",
+  "name": "GitHub Release",
+  "description": "Create a bounded GitHub release from an explicit tag, repo, and reviewed notes file.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "repo": {
+      "type": "string",
+      "description": "GitHub repository in owner/repo form",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "tag": {
+      "type": "string",
+      "description": "Release tag",
+      "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?$"
+    },
+    "title": {
+      "type": "string",
+      "description": "Release title",
+      "pattern": "^.{1,120}$"
+    },
+    "notes_file": {
+      "type": "string",
+      "description": "Relative path to the release notes file",
+      "approval_mode": "path_policy",
+      "content_hash": true,
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "allowed_extensions": [".md", ".txt"],
+        "max_depth": 8
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "release",
+      "description": "Create the release through GitHub CLI",
+      "run": {
+        "command": "gh",
+        "args": ["release", "create", "{{inputs.tag}}", "--repo", "{{inputs.repo}}", "--title", "{{inputs.title}}", "--notes-file", "{{inputs.notes_file}}"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Tag, repository, and release notes file are explicit approved inputs",
+      "Release notes content is content-hash-bound through notes_file",
+      "The command surface is fixed to gh release create with no asset-upload expansion"
+    ],
+    "invariants": [
+      "No asset upload or delete operation occurs through this recipe",
+      "Only structured gh argv is allowed",
+      "GitHub CLI auth must be present in the runtime before execution"
+    ]
+  },
+  "requires_auth": [
+    {
+      "type": "gh_auth",
+      "message": "GitHub CLI login is required to create a release."
+    }
+  ],
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "github",
+  "tags": ["github", "release", "tag"],
+  "channel": "verified",
+  "signature": null
+}

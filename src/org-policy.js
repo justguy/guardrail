@@ -153,6 +153,18 @@ export function isTrustedExecutionSource(source, orgPolicy) {
   ));
 }
 
+export function isTrustedRegistry(registry, orgPolicy, baseDir = process.cwd()) {
+  const policyRegistries = orgPolicy?.trusted_registries;
+  if (!Array.isArray(policyRegistries) || policyRegistries.length === 0) return true;
+
+  const candidate = registry.includes('://') ? registry : resolve(baseDir, registry);
+  return policyRegistries.some((rawRegistry) => {
+    if (typeof rawRegistry !== 'string' || rawRegistry.length === 0) return false;
+    const normalized = rawRegistry.includes('://') ? rawRegistry : resolve(baseDir, rawRegistry);
+    return candidate === normalized || candidate.startsWith(`${normalized}${sep}`);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------

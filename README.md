@@ -221,7 +221,7 @@ Bundled Guardrail recipes also resolve shipped wrapper helpers internally now, s
 
 Extra recipe roots remain opt-in, but they no longer bypass central governance: repo/user-configured `default_recipe_roots` and explicit extra roots are blocked when the active org policy does not trust them via `trusted_recipe_roots` in `.guardrail/org-policy.json` or `.guardrail/org-policies/default.json`.
 
-Remote recipe installs and adapter-profile installs now load that same active org policy by default and enforce `trusted_execution_sources` before pulling GitHub or URL content.
+Remote recipe installs and adapter-profile installs now load that same active org policy by default and enforce `trusted_execution_sources` before pulling GitHub or URL content. Self-hosted recipe registries are a separate trust boundary: `recipe registry list` and `recipe install ... --registry ...` enforce org-policy `trusted_registries`.
 
 Workflow approvals now bind `recipe_ref` sources through portable source locators instead of absolute recipe file paths, so the same workflow can move between different checkout paths or runners without false drift from path changes alone. External shared roots now record stable origin locators (`explicit`, `repo_config`, `user_config`, or `absolute`) so two different shared roots with the same relative recipe filename cannot silently reuse approval.
 
@@ -419,6 +419,12 @@ guardrail recipe install github://guardrail-dev/recipes/github/open-pr.json@a3f9
 # Export a static self-hosted recipe registry snapshot
 guardrail recipe registry export ./dist/recipe-registry
 
+# Inspect a self-hosted recipe registry snapshot
+guardrail recipe registry list ./dist/recipe-registry
+
+# Install an exact recipe version from a trusted registry snapshot
+guardrail recipe install infra/terraform-plan-only@1.0.0 --registry ./dist/recipe-registry
+
 # List available recipes
 guardrail list
 
@@ -427,6 +433,15 @@ guardrail run --recipe git-branch-cleanup --input repo_path=. --dry-run
 
 # Safe Terraform planning without apply/destroy
 guardrail run --recipe terraform-plan-only --input config_path=infra/staging --dry-run
+
+# Create a bounded PR through GitHub CLI with a reviewed body file
+guardrail run --recipe gh-open-pr \
+  --input repo=guardrail-dev/recipes \
+  --input base=dev \
+  --input head=feature/my-change \
+  --input title="Add reviewed change" \
+  --input body_file=docs/pr-body.md \
+  --dry-run
 
 # Pin to a specific version
 guardrail run --recipe git-branch-cleanup@1.0.0 --input repo_path=. --dry-run

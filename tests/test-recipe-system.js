@@ -495,6 +495,18 @@ describe('Recipe System: Example Recipes', () => {
     assert.equal(r.risk_level, 'high');
   });
 
+  it('gh-open-pr recipe is valid and categorized', () => {
+    const r = loadRecipe(join(recipeDir, 'gh-open-pr.recipe.json'));
+    assert.equal(r.category, 'github');
+    assert.equal(r.approval_required, true);
+  });
+
+  it('gh-release recipe is valid and categorized', () => {
+    const r = loadRecipe(join(recipeDir, 'gh-release.recipe.json'));
+    assert.equal(r.category, 'github');
+    assert.equal(r.approval_required, true);
+  });
+
   it('dep-upgrade recipe is community channel', () => {
     const r = loadRecipe(join(recipeDir, 'dep-upgrade.recipe.json'));
     assert.equal(r.category, 'packages');
@@ -530,8 +542,37 @@ describe('Recipe System: Example Recipes', () => {
     assert.equal(r.approval_required, true);
   });
 
+  it('git-clone-allowed recipe is valid and categorized', () => {
+    const r = loadRecipe(join(recipeDir, 'git-clone-allowed.recipe.json'));
+    assert.equal(r.category, 'git');
+    assert.equal(r.approval_required, true);
+  });
+
+  it('docker recipes are valid and categorized', () => {
+    const build = loadRecipe(join(recipeDir, 'docker-build.recipe.json'));
+    const push = loadRecipe(join(recipeDir, 'docker-push.recipe.json'));
+    assert.equal(build.category, 'packages');
+    assert.equal(push.category, 'packages');
+    assert.equal(build.approval_required, true);
+    assert.equal(push.approval_required, true);
+  });
+
   it('all recipes have guardrails defined', () => {
-    const files = ['git-branch-cleanup', 'git-commit', 'github-pr-merge', 'dep-upgrade', 'infra-deploy', 'terraform-plan-only', 'openclaw-wrapper', 'npm-publish'];
+    const files = [
+      'git-branch-cleanup',
+      'git-clone-allowed',
+      'git-commit',
+      'github-pr-merge',
+      'gh-open-pr',
+      'gh-release',
+      'dep-upgrade',
+      'docker-build',
+      'docker-push',
+      'infra-deploy',
+      'terraform-plan-only',
+      'openclaw-wrapper',
+      'npm-publish',
+    ];
     for (const name of files) {
       const r = loadRecipe(join(recipeDir, `${name}.recipe.json`));
       assert.ok(r.guardrails.constraints?.length > 0, `${name} should have constraints`);

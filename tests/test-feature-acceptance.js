@@ -1049,6 +1049,22 @@ describe('README Feature: Recipe System', () => {
     assert.ok(r.stdout.includes('valid'));
   });
 
+  it('new bounded ship-now recipes dry-run safely', () => {
+    const commands = [
+      `${CLI} run --recipe git-clone-allowed --input source=https://github.com/guardrail-dev/recipes.git --input destination=tmp/recipes --dry-run`,
+      `${CLI} run --recipe gh-open-pr --input repo=guardrail-dev/recipes --input base=dev --input head=feature/test --input title="Test PR" --input body_file=README.md --dry-run`,
+      `${CLI} run --recipe gh-release --input repo=guardrail-dev/recipes --input tag=v1.2.3 --input title="Release 1.2.3" --input notes_file=README.md --dry-run`,
+      `${CLI} run --recipe docker-build --input image=registry.internal/team/app:1.0.0 --input context_dir=. --dry-run`,
+      `${CLI} run --recipe docker-push --input image=registry.internal/team/app:1.0.0 --dry-run`,
+    ];
+
+    for (const cmd of commands) {
+      const r = run(cmd);
+      assert.equal(r.exitCode, 0, `${cmd}\n${r.stderr}`);
+      assert.ok(r.stdout.includes('Safe'), cmd);
+    }
+  });
+
   it('guardrail recipe versions → lists installed versions', () => {
     run(`${CLI} recipe install recipes/git-branch-cleanup.recipe.json`);
     const r = run(`${CLI} recipe versions git-branch-cleanup`);
@@ -1070,6 +1086,30 @@ describe('README Feature: Recipe System', () => {
     assert.ok(r.stdout.includes('Exported recipe registry snapshot'));
     const index = JSON.parse(readFileSync(join(out, 'v1', 'recipes', 'index.json'), 'utf8'));
     assert.ok(index.recipes.some((entry) => entry.id === 'terraform-plan-only'));
+  });
+
+  it('guardrail recipe registry list → shows exported snapshot contents', () => {
+    const dir = tmpDir();
+    const out = join(dir, 'registry');
+    run(`${CLI} recipe registry export ${out}`);
+    const r = run(`${CLI} recipe registry list ${out}`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.ok(r.stdout.includes('terraform-plan-only'));
+  });
+
+  it('guardrail recipe install <category/id@version> --registry <path> installs from a static registry snapshot', () => {
+    const dir = tmpDir();
+    const out = join(dir, 'registry');
+    const fakeHome = join(dir, 'home');
+    run(`${CLI} recipe registry export ${out}`);
+    const r = run(`${CLI} recipe install infra/terraform-plan-only@1.0.0 --registry ${out}`, {
+      env: {
+        ...process.env,
+        HOME: fakeHome,
+      },
+    });
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.ok(r.stdout.includes('Installed recipe "terraform-plan-only"'));
   });
 
   it('guardrail recipe publish --dry-run converts an approved manifest into a publishable recipe', () => {

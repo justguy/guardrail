@@ -176,7 +176,9 @@ Commands:
   recipe validate <recipe.json>         Validate a recipe file
   recipe inspect <packed.json>          Inspect a packaged recipe (verify hash)
   recipe install <path|url|github://>   Install a recipe to local registry
+                                        or install <category/id@version> --registry <root>
   recipe registry export <output-dir>   Export a static self-hosted recipe registry snapshot
+  recipe registry list <registry>       Inspect a self-hosted recipe registry snapshot
   recipe versions <id>                  List installed versions of a recipe
   recipe publish --name <n> --category <c> [--manifest <path>] [--description <d>] [--dry-run]
   adapter run --tool <name> -- <cmd>    Run a command through an adapter profile
@@ -795,18 +797,29 @@ export function parseArgs(argv) {
     result.subcommand = `recipe-${action}`;
 
     if (action === 'registry') {
-      if (i >= argv.length || argv[i] !== 'export') return { error: 'usage' };
-      i++;
-      result.subcommand = 'recipe-registry-export';
-      if (i >= argv.length) return { error: 'usage' };
-      result.outputPath = argv[i++];
+      if (i >= argv.length || !['export', 'list'].includes(argv[i])) return { error: 'usage' };
+      const registryAction = argv[i++];
+      result.subcommand = `recipe-registry-${registryAction}`;
       result.recipeSearchDirs = [];
-      while (i < argv.length) {
-        if (argv[i] === '--recipe-search-dir' && i + 1 < argv.length) {
-          result.recipeSearchDirs.push(argv[++i]);
-          i++;
-          continue;
+
+      if (registryAction === 'export') {
+        if (i >= argv.length) return { error: 'usage' };
+        result.outputPath = argv[i++];
+        while (i < argv.length) {
+          if (argv[i] === '--recipe-search-dir' && i + 1 < argv.length) {
+            result.recipeSearchDirs.push(argv[++i]);
+            i++;
+            continue;
+          }
+          if (argv[i] === '--json') { result.json = true; i++; continue; }
+          return { error: 'usage' };
         }
+        return result;
+      }
+
+      if (i >= argv.length) return { error: 'usage' };
+      result.registry = argv[i++];
+      while (i < argv.length) {
         if (argv[i] === '--json') { result.json = true; i++; continue; }
         return { error: 'usage' };
       }
@@ -836,6 +849,7 @@ export function parseArgs(argv) {
     if (i >= argv.length) return { error: 'usage' };
     result.recipePath = argv[i++];
     while (i < argv.length) {
+      if (argv[i] === '--registry') { i++; result.registry = argv[i++]; continue; }
       if (argv[i] === '--json') { result.json = true; i++; continue; }
       if (argv[i] === '--overwrite') { result.force = true; i++; continue; }
       return { error: 'usage' };
@@ -2196,7 +2210,10 @@ async function main() {
     const source = parsed.recipePath;
     try {
       let result;
-      if (source.startsWith('github://')) {
+      if (parsed.registry) {
+        const { installFromRegistry } = await import('./recipe-install.js');
+        result = await installFromRegistry(source, parsed.registry, { force: parsed.force });
+      } else if (source.startsWith('github://')) {
         const { installFromGitHub } = await import('./recipe-install.js');
         result = await installFromGitHub(source, { force: parsed.force });
       } else if (source.startsWith('http://') || source.startsWith('https://')) {
@@ -2249,6 +2266,29 @@ async function main() {
         console.log(`Exported recipe registry snapshot to ${result.outputDir}`);
         console.log(`  Recipes: ${result.count}`);
         console.log(`  Generated: ${result.generatedAt}`);
+      }
+      process.exit(0);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  }
+
+  if (parsed.subcommand === 'recipe-registry-list') {
+    try {
+      const { listRegistryRecipes } = await import('./recipe-install.js');
+      const result = await listRegistryRecipes(parsed.registry, {});
+      if (parsed.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Recipe registry: ${result.registry}`);
+        console.log(`  Recipes: ${result.count}`);
+        if (result.generated_at) {
+          console.log(`  Generated: ${result.generated_at}`);
+        }
+        for (const recipe of result.recipes) {
+          console.log(`  ${recipe.category}/${recipe.id}@${recipe.latest_version}`);
+        }
       }
       process.exit(0);
     } catch (err) {

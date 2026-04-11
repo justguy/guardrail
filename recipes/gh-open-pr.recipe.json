@@ -1,0 +1,79 @@
+{
+  "id": "gh-open-pr",
+  "name": "GitHub Open PR",
+  "description": "Create a pull request in a bounded GitHub repository with explicit base/head branches and a reviewed body file.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "repo": {
+      "type": "string",
+      "description": "GitHub repository in owner/repo form",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "base": {
+      "type": "string",
+      "description": "Base branch to merge into",
+      "pattern": "^(main|master|dev|staging|release/[A-Za-z0-9._/-]+)$"
+    },
+    "head": {
+      "type": "string",
+      "description": "Source branch for the pull request",
+      "pattern": "^[A-Za-z0-9._/-]{1,120}$"
+    },
+    "title": {
+      "type": "string",
+      "description": "Pull request title",
+      "pattern": "^.{1,120}$"
+    },
+    "body_file": {
+      "type": "string",
+      "description": "Relative path to the PR body file",
+      "approval_mode": "path_policy",
+      "content_hash": true,
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "allowed_extensions": [".md", ".txt"],
+        "max_depth": 8
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "open-pr",
+      "description": "Create the pull request through GitHub CLI",
+      "run": {
+        "command": "gh",
+        "args": ["pr", "create", "--repo", "{{inputs.repo}}", "--base", "{{inputs.base}}", "--head", "{{inputs.head}}", "--title", "{{inputs.title}}", "--body-file", "{{inputs.body_file}}"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Repository, base branch, head branch, and PR body file are explicit approved inputs",
+      "PR body content is content-hash-bound through the reviewed body_file input",
+      "The command surface is fixed to gh pr create with no extra flags"
+    ],
+    "invariants": [
+      "No merge, push, or branch mutation happens through this recipe",
+      "GitHub CLI auth must be present in the runtime before execution",
+      "Only structured gh argv is allowed"
+    ]
+  },
+  "requires_auth": [
+    {
+      "type": "gh_auth",
+      "message": "GitHub CLI login is required to open a pull request."
+    }
+  ],
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "github",
+  "tags": ["github", "pr", "review"],
+  "channel": "verified",
+  "signature": null
+}
