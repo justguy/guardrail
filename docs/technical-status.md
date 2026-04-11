@@ -592,6 +592,8 @@ P0 means the architecture must carry the seam now even if the hosted backend doe
 
 The P0 rows above are architectural priorities. They are still too coarse for unattended agent execution unless they are broken into one-slice-at-a-time packets with explicit proofs. The queue below is the execution order another agent should follow when using Guardrail itself to invoke Claude/Codex, land code, run focused tests, review the diff/result, update docs, and only then continue.
 
+Detailed packets live under `docs/plans/PLAN_enterprise_P0*.md`, starting with `docs/plans/PLAN_enterprise_P0_execution_packets.md`.
+
 | Slice | Goal | Required code changes | Proof of done before moving on |
 |-------|------|-----------------------|--------------------------------|
 | P0a | Universal authorization seam | Add one shared `authorize(action, facts)` boundary and route command, workflow, template, recipe, adapter, and lane lifecycle through it before execution. | Focused supervisor parity tests prove every execution surface hits the same decision seam; blocked decisions return one structured policy result shape. |
