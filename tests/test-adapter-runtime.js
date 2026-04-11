@@ -24,6 +24,7 @@ import {
   renderResponse,
   probeAdapterMcpStdio,
   callAdapterMcpTool,
+  callAdapterMcpToolBatch,
 } from '../src/adapter-engine.js';
 import {
   createShim,
@@ -451,7 +452,8 @@ describe('MCP stdio discovery probe', () => {
     assert.equal(result.ok, true);
     assert.equal(result.probe.tool, 'test-mcp-probe');
     assert.equal(result.probe.server.serverInfo.name, 'fake-mcp');
-    assert.deepEqual(result.probe.server.tools, ['echo', 'sum']);
+    assert.deepEqual(result.probe.server.toolNames, ['echo', 'sum']);
+    assert.deepEqual(result.probe.server.tools.map((tool) => tool.name), ['echo', 'sum']);
   });
 
   it('fails closed when request correlation does not match', async () => {
@@ -584,6 +586,54 @@ describe('MCP stdio bounded tool call', () => {
     assert.equal(result.ok, false);
     assert.equal(result.adapterResult.guardrail.code, 'PROTOCOL_ERROR');
     assert.ok(result.adapterResult.guardrail.reason.includes('mismatched request_id'));
+  });
+
+  it('executes multiple tools/call operations against one bounded stdio session', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeMcpServer(dir, 'success');
+    const profile = {
+      version: '1.0.0',
+      tool: 'test-mcp-batch',
+      description: 'generic mcp profile under test',
+      schema_target: 'adapter-result/v1',
+      protocol: 'mcp',
+      mcp_transport: {
+        type: 'stdio',
+        command: process.execPath,
+        args: [serverPath],
+        correlation: 'request_id',
+        capability_discovery: 'required',
+        streaming: false,
+      },
+      intercept: {
+        command: '$.command',
+        args: '$.args',
+        cwd: '$.cwd',
+      },
+      response: {
+        format: 'json',
+        blocked: { status: 'blocked', reason: '$.guardrail.reason' },
+      },
+      exit_codes: { success: 0, blocked: 12, failed: 1 },
+      defaults: { non_interactive: true, json_output: true },
+    };
+    const profilePath = join(dir, 'test-mcp-batch.json');
+    writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+
+    const result = await callAdapterMcpToolBatch({
+      profilePath,
+      calls: [
+        { tool: 'echo', params: { text: 'one' } },
+        { tool: 'echo', params: { text: 'two' } },
+      ],
+      supervisorFn: runProbeHelperSupervisor,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.batch.callCount, 2);
+    assert.equal(result.batch.calls[0].tool, 'echo');
+    assert.equal(result.batch.calls[0].result.content[0].text, 'one');
+    assert.equal(result.batch.calls[1].result.content[0].text, 'two');
   });
 });
 

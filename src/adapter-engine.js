@@ -486,6 +486,36 @@ export async function callAdapterMcpTool(opts = {}) {
     return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
   }
 
+  const discoveryMode = profile.mcp_transport?.capability_discovery || 'required';
+  if (discoveryMode === 'required') {
+    const discovery = await probeAdapterMcpStdio({
+      tool,
+      profilePath,
+      cwd: directCwd,
+      supervisorFn,
+      envAllow,
+      authCheckFn,
+      timeoutMs,
+    });
+    if (!discovery.ok) {
+      return {
+        ok: false,
+        adapterResult: discovery.adapterResult,
+        exitCode: discovery.exitCode,
+      };
+    }
+    const knownTools = Array.isArray(discovery.probe?.server?.toolNames)
+      ? discovery.probe.server.toolNames
+      : [];
+    if (!knownTools.includes(mcpTool)) {
+      const error = wrapFailed(
+        ADAPTER_REASON_CODES.VALIDATION_FAILED,
+        `Adapter MCP call requested unknown tool "${mcpTool}". Declared transport exposed: ${knownTools.join(', ') || '<none>'}.`,
+      );
+      return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+    }
+  }
+
   const preflightResult = await runAdapterPreflight(profile, {
     envAllow,
     cwd: directCwd || process.cwd(),
@@ -562,6 +592,145 @@ export async function callAdapterMcpTool(opts = {}) {
     adapterResult,
     call: parsedCall.call,
     exitCode: resolveProfileExitCode(profile, 'success', adapterResult.guardrail.exitCode),
+  };
+}
+
+export async function callAdapterMcpToolBatch(opts = {}) {
+  const {
+    tool, profilePath,
+    cwd: directCwd,
+    supervisorFn = runSupervisor,
+    envAllow = [],
+    authCheckFn,
+    timeoutMs = 5000,
+    calls = [],
+  } = opts;
+
+  const profileResult = loadAndValidateAdapterProfile(tool, profilePath);
+  if (profileResult.error) return { ok: false, adapterResult: profileResult.error.adapterResult, exitCode: profileResult.error.exitCode };
+  const profile = profileResult.profile;
+
+  if (profile.protocol !== 'mcp') {
+    const error = wrapBlocked(
+      ADAPTER_REASON_CODES.UNSUPPORTED,
+      'Adapter MCP batch only supports profiles that declare protocol "mcp".',
+      profile,
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+  if (profile.mcp_transport?.type !== 'stdio') {
+    const error = wrapBlocked(
+      ADAPTER_REASON_CODES.UNSUPPORTED,
+      'Adapter MCP batch currently supports only stdio MCP transports.',
+      profile,
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+  if (!Array.isArray(calls) || calls.length === 0) {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.VALIDATION_FAILED,
+      'Adapter MCP batch requires a non-empty calls array.',
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+  for (const call of calls) {
+    if (!call || typeof call !== 'object' || Array.isArray(call)) {
+      const error = wrapFailed(
+        ADAPTER_REASON_CODES.VALIDATION_FAILED,
+        'Adapter MCP batch requires each call to be an object with { tool, params }.',
+      );
+      return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+    }
+    if (typeof call.tool !== 'string' || call.tool.trim() === '') {
+      const error = wrapFailed(
+        ADAPTER_REASON_CODES.VALIDATION_FAILED,
+        'Adapter MCP batch requires each call to include a non-empty tool name.',
+      );
+      return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+    }
+    if (call.params == null || typeof call.params !== 'object' || Array.isArray(call.params)) {
+      const error = wrapFailed(
+        ADAPTER_REASON_CODES.VALIDATION_FAILED,
+        'Adapter MCP batch requires each call params value to be a JSON object.',
+      );
+      return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+    }
+  }
+
+  const preflightResult = await runAdapterPreflight(profile, {
+    envAllow,
+    cwd: directCwd || process.cwd(),
+    authCheckFn,
+  });
+  if (preflightResult.error) {
+    return { ok: false, adapterResult: preflightResult.error.adapterResult, exitCode: preflightResult.error.exitCode };
+  }
+
+  const transport = profile.mcp_transport;
+  const supervisorOptions = {
+    command: process.execPath,
+    args: [
+      resolveMcpCallHelperPath(),
+      '--command', transport.command,
+      ...((transport.args || []).flatMap((value) => ['--arg', value])),
+      ...(transport.cwd ? ['--cwd', transport.cwd] : []),
+      '--timeout-ms', String(timeoutMs),
+      '--calls-json', JSON.stringify(calls),
+    ],
+    nonInteractive: true,
+    jsonOutput: true,
+    envPolicy: { inherit: false, allow: ['PATH', ...envAllow], inject: {} },
+  };
+  if (directCwd) supervisorOptions.cwd = directCwd;
+
+  let supervisorResult;
+  try {
+    supervisorResult = await supervisorFn(supervisorOptions);
+  } catch (err) {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.SUPERVISOR_THREW,
+      `Supervisor execution error: ${err?.message || 'unknown'}`,
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+
+  const adapterResult = normalizeToAdapterResult(supervisorResult);
+  if (adapterResult.guardrail.category !== 'success') {
+    return {
+      ok: false,
+      adapterResult,
+      exitCode: resolveProfileExitCode(profile, adapterResult.guardrail.category, adapterResult.guardrail.exitCode),
+    };
+  }
+
+  let parsedBatch;
+  try {
+    parsedBatch = JSON.parse(supervisorResult?.worker?.stdout || '{}');
+  } catch (err) {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.PROTOCOL_ERROR,
+      `MCP stdio batch returned invalid JSON: ${err.message}`,
+    );
+    return { ok: false, adapterResult: error.adapterResult, exitCode: error.exitCode };
+  }
+
+  if (parsedBatch?.ok !== true) {
+    const error = wrapFailed(
+      ADAPTER_REASON_CODES.PROTOCOL_ERROR,
+      parsedBatch?.reason || 'MCP stdio batch did not complete successfully.',
+    );
+    return {
+      ok: false,
+      adapterResult: error.adapterResult,
+      exitCode: error.exitCode,
+      batch: parsedBatch,
+    };
+  }
+
+  return {
+    ok: true,
+    batch: parsedBatch.batch,
+    exitCode: 0,
   };
 }
 

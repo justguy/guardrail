@@ -1154,8 +1154,24 @@ describe('README Feature: Adapter System', () => {
     assert.ok(!raw.includes('MCP protocol is not yet supported in v0.2.'), raw);
   });
 
+  it('guardrail adapter mcp tools routes MCP profiles into bounded discovery instead of the hard MCP block', () => {
+    const r = run(`${CLI} adapter mcp tools --tool cline`);
+    const raw = [r.stdout, r.stderr].filter(Boolean).join('\n');
+    assert.ok(r.exitCode !== 0);
+    assert.ok(raw.includes('No approved manifest found'), raw);
+    assert.ok(!raw.includes('MCP protocol is not yet supported in v0.2.'), raw);
+  });
+
   it('guardrail adapter mcp call routes MCP profiles into the bounded call path instead of the hard MCP block', () => {
     const r = run(`${CLI} adapter mcp call --tool cline --mcp-tool echo --params-json '{"text":"hi"}'`);
+    const raw = [r.stdout, r.stderr].filter(Boolean).join('\n');
+    assert.ok(r.exitCode !== 0);
+    assert.ok(raw.includes('No approved manifest found'), raw);
+    assert.ok(!raw.includes('MCP protocol is not yet supported in v0.2.'), raw);
+  });
+
+  it('guardrail adapter mcp batch routes MCP profiles into the bounded batch path instead of the hard MCP block', () => {
+    const r = run(`${CLI} adapter mcp batch --tool cline --calls-json '[{"tool":"echo","params":{"text":"hi"}}]'`);
     const raw = [r.stdout, r.stderr].filter(Boolean).join('\n');
     assert.ok(r.exitCode !== 0);
     assert.ok(raw.includes('No approved manifest found'), raw);

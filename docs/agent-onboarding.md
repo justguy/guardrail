@@ -507,7 +507,7 @@ Adapter mode operator rules:
 - `adapter run` builds on the selected profile and the underlying supervisor contract. If the profile/runtime does not support the interactive approval path you need, stop and report that instead of guessing hidden flags.
 - MCP profiles are still blocked at runtime, but they may now declare an explicit `mcp_transport` contract. Treat that as design-gate metadata only until Guardrail ships actual MCP transport support.
 - If a blocked MCP run mentions a declared transport, that means the profile shape was recognized; it does not mean the MCP runtime is live.
-- The shipped MCP exceptions are additive and explicit, not ambient. `adapter probe --tool <name>` is the discovery-only path for MCP `stdio` profiles: Guardrail approves and launches the declared transport, performs `initialize` plus `tools/list`, and reports the discovered tool inventory. `adapter mcp call --tool <name> --mcp-tool <tool> --params-json <json>` is the first bounded runtime path: it performs exactly one `tools/call` over the declared transport with explicit tool name and JSON params.
+- The shipped MCP exceptions are additive and explicit, not ambient. `adapter probe --tool <name>` is the discovery-only path for MCP `stdio` profiles: Guardrail approves and launches the declared transport, performs `initialize` plus `tools/list`, and reports the discovered tool inventory. `adapter mcp tools --tool <name>` is the agent-facing inventory view for that same bounded path: it returns the discovered tool metadata so you can choose an MCP tool without guessing. `adapter mcp call --tool <name> --mcp-tool <tool> --params-json <json>` is the first bounded runtime path: it performs exactly one `tools/call` over the declared transport with explicit tool name and JSON params. `adapter mcp batch --tool <name> --calls-json <json>` is the next bounded runtime path: it performs an explicit array of `{ tool, params }` MCP calls over one approved stdio session.
 - Neither of those exceptions makes `adapter run` live for MCP profiles. `adapter run` still blocks on MCP profiles, so do not describe the MCP runtime as “generally supported” yet.
 
 Useful adapter subcommands:
@@ -515,7 +515,9 @@ Useful adapter subcommands:
 - `guardrail adapter run --tool <name> -- <command> [args...]`
 - `guardrail adapter run --profile <profile-path> -- <command> [args...]`
 - `guardrail adapter probe --tool <name>`
+- `guardrail adapter mcp tools --tool <name>`
 - `guardrail adapter mcp call --tool <name> --mcp-tool <tool> --params-json <json>`
+- `guardrail adapter mcp batch --tool <name> --calls-json <json>`
 - `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`
 - `guardrail adapter profile install github://owner/repo/path.json@<sha>`
 - `guardrail adapter profile list`
@@ -529,7 +531,8 @@ Bounded auth preflight behavior:
 - Auth preflight returns blocked status and stops. It does not log the agent in for you; authentication must already exist in the same runtime (`claude auth login` / `gh auth status/login`). Exception: the bundled composed Claude host-runtime recipe can perform one bounded hosted `claude auth login --console` repair attempt before it gives up with `auth_repair_pending_user_input`.
 - Explicit env mapping may still be insufficient for CLIs whose login state lives in OS-managed secure stores or other process-identity-gated locations. In those cases the practical fix is to run Guardrail from the same working launcher/runtime, or to redo login from the exact shell/runtime that will later launch Guardrail.
 - The same bounded `requires_env` / `requires_auth` preflight now applies to standalone recipe mode and workflow `recipe_ref` execution too. For composed host-runtime recipes, env mapping is checked before launch and the child tool-auth preflight runs again inside the selected host runtime before the downstream CLI starts.
-- MCP protocol profiles are intentionally blocked for `adapter run` in v0.2. Use `adapter probe` for bounded discovery or `adapter mcp call` for one explicit `tools/call`; do not reinterpret arbitrary shell commands as MCP requests.
+- MCP protocol profiles are intentionally blocked for `adapter run` in v0.2. Use `adapter probe` or `adapter mcp tools` for bounded discovery and `adapter mcp call` / `adapter mcp batch` for explicit `tools/call` execution; do not reinterpret arbitrary shell commands as MCP requests.
+- When an MCP profile declares required capability discovery, Guardrail now validates `--mcp-tool <name>` against the discovered MCP tool set before it launches the bounded `tools/call`. Treat an unknown-tool validation failure as a caller error, not as proof that the transport itself is broken.
 - Bare-name adapter-profile install is still intentionally blocked. The only shipped A1 groundwork is signed-index verification through `adapter profile index verify <path> --index-key <pubkey.pem>`, which is for local/team validation of index publishing rather than public-name discovery.
 
 Host runtime decision rule:

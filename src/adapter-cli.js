@@ -73,13 +73,36 @@ function parseMcpCallArgs(argv, startIndex, result) {
   });
 }
 
+function parseMcpToolsArgs(argv, startIndex, result) {
+  return parseFlags(argv, startIndex, result, {
+    '--tool': valueFlag('tool'),
+    '--profile': valueFlag('profilePath'),
+    '--env-allow': repeatedValueFlag('envAllow'),
+    '--timeout-ms': valueFlag('timeoutMs'),
+    '--json': (parsed, _argv, index) => { parsed.json = true; return { nextIndex: index + 1 }; },
+  });
+}
+
+function parseMcpBatchArgs(argv, startIndex, result) {
+  return parseFlags(argv, startIndex, result, {
+    '--tool': valueFlag('tool'),
+    '--profile': valueFlag('profilePath'),
+    '--calls-json': valueFlag('callsJson'),
+    '--env-allow': repeatedValueFlag('envAllow'),
+    '--timeout-ms': valueFlag('timeoutMs'),
+    '--json': (parsed, _argv, index) => { parsed.json = true; return { nextIndex: index + 1 }; },
+  });
+}
+
 /**
  * Parse adapter subcommand arguments.
  *
  * Supported commands:
  *   adapter run --tool <name> [--profile <path>] [--env-allow <VAR>] -- <command> [args...]
  *   adapter probe --tool <name> [--profile <path>] [--env-allow <VAR>] [--timeout-ms <ms>]
+ *   adapter mcp tools --tool <name> [--profile <path>] [--env-allow <VAR>] [--timeout-ms <ms>]
  *   adapter mcp call --tool <name> --mcp-tool <tool> [--params-json <json>] [--env-allow <VAR>] [--timeout-ms <ms>]
+ *   adapter mcp batch --tool <name> --calls-json <json> [--env-allow <VAR>] [--timeout-ms <ms>]
  *   adapter shim --tool <name> --commands <cmd1,cmd2> [--list] [--remove <cmd>] [--install-path [--write]]
  *   adapter profile install <path|url|github://>
  *   adapter profile index verify <path> [--index-key <pubkey.pem>]
@@ -121,17 +144,41 @@ export function parseAdapterArgs(argv) {
   }
 
   if (action === 'mcp') {
-    if (argv.length < 2 || argv[1] !== 'call') return { error: 'usage' };
-    return parseMcpCallArgs(argv, 2, {
-      subcommand: 'adapter-mcp-call',
-      tool: null,
-      profilePath: null,
-      mcpTool: null,
-      paramsJson: '{}',
-      envAllow: [],
-      timeoutMs: null,
-      json: false,
-    });
+    if (argv.length < 2) return { error: 'usage' };
+    if (argv[1] === 'tools') {
+      return parseMcpToolsArgs(argv, 2, {
+        subcommand: 'adapter-mcp-tools',
+        tool: null,
+        profilePath: null,
+        envAllow: [],
+        timeoutMs: null,
+        json: false,
+      });
+    }
+    if (argv[1] === 'call') {
+      return parseMcpCallArgs(argv, 2, {
+        subcommand: 'adapter-mcp-call',
+        tool: null,
+        profilePath: null,
+        mcpTool: null,
+        paramsJson: '{}',
+        envAllow: [],
+        timeoutMs: null,
+        json: false,
+      });
+    }
+    if (argv[1] === 'batch') {
+      return parseMcpBatchArgs(argv, 2, {
+        subcommand: 'adapter-mcp-batch',
+        tool: null,
+        profilePath: null,
+        callsJson: '[]',
+        envAllow: [],
+        timeoutMs: null,
+        json: false,
+      });
+    }
+    return { error: 'usage' };
   }
 
   if (action === 'shim') {
@@ -220,8 +267,33 @@ function formatProbeResult(result, jsonOutput) {
     lines.push(`  Server:            ${result.probe.server.serverInfo.name}${version}`);
   }
   lines.push(`  Tools discovered:  ${result.probe.server.toolCount}`);
-  for (const toolName of result.probe.server.tools || []) {
+  for (const toolName of result.probe.server.toolNames || []) {
     lines.push(`    - ${toolName}`);
+  }
+  return lines.join('\n');
+}
+
+function formatMcpToolsResult(result, jsonOutput) {
+  if (jsonOutput) {
+    return JSON.stringify(result.ok ? result : {
+      ok: false,
+      adapterResult: result.adapterResult,
+      ...(result.probe ? { probe: result.probe } : {}),
+    }, null, 2);
+  }
+
+  if (!result.ok) {
+    return result.adapterResult?.guardrail?.reason || 'MCP tool discovery failed.';
+  }
+
+  const lines = [
+    `MCP tools discovered for ${result.probe.tool}`,
+    `  Transport:         ${result.probe.transport.type}`,
+    `  Tool count:        ${result.probe.server.toolCount}`,
+  ];
+  for (const tool of result.probe.server.tools || []) {
+    lines.push(`  - ${tool.name}`);
+    if (tool.description) lines.push(`    ${tool.description}`);
   }
   return lines.join('\n');
 }
@@ -262,6 +334,29 @@ function formatMcpCallResult(result, jsonOutput) {
   ].join('\n');
 }
 
+function formatMcpBatchResult(result, jsonOutput) {
+  if (jsonOutput) {
+    return JSON.stringify(result, null, 2);
+  }
+
+  if (!result.ok) {
+    return result.adapterResult?.guardrail?.reason || result.batch?.reason || 'MCP tool batch failed.';
+  }
+
+  const batch = result.batch || {};
+  const lines = [
+    `MCP tool batch succeeded (${batch.callCount || 0} calls)`,
+  ];
+  for (const call of batch.calls || []) {
+    const rendered = typeof call.result === 'string'
+      ? call.result
+      : JSON.stringify(call.result, null, 2);
+    lines.push(`- ${call.tool}`);
+    lines.push(rendered);
+  }
+  return lines.join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Adapter CLI dispatcher
 // ---------------------------------------------------------------------------
@@ -274,7 +369,9 @@ export async function runAdapterCli(adapterArgv, options = {}) {
     console.error('');
     console.error('  adapter run --tool <name> [--env-allow VAR] -- <command> [args...]');
     console.error('  adapter probe --tool <name> [--env-allow VAR] [--timeout-ms MS]');
+    console.error('  adapter mcp tools --tool <name> [--env-allow VAR] [--timeout-ms MS]');
     console.error('  adapter mcp call --tool <name> --mcp-tool <tool> [--params-json JSON] [--env-allow VAR] [--timeout-ms MS]');
+    console.error('  adapter mcp batch --tool <name> --calls-json JSON [--env-allow VAR] [--timeout-ms MS]');
     console.error('  adapter shim --tool <name> --commands <cmd1,cmd2>');
     console.error('  adapter shim --list');
     console.error('  adapter shim --remove <command>');
@@ -372,6 +469,39 @@ export async function runAdapterCli(adapterArgv, options = {}) {
     return;
   }
 
+  if (parsed.subcommand === 'adapter-mcp-tools') {
+    if (!parsed.tool && !parsed.profilePath) {
+      console.error('Error: No tool specified. Use --tool <name> or --profile <path>.');
+      console.error('Available tools: guardrail adapter profile list');
+      process.exit(1);
+      return;
+    }
+
+    const { probeAdapterMcpStdio } = await import('./adapter-engine.js');
+    const jsonOutput = !!parsed.json || !!options.jsonOutput;
+    const result = await probeAdapterMcpStdio({
+      tool: parsed.tool,
+      profilePath: parsed.profilePath,
+      envAllow: parsed.envAllow || [],
+      timeoutMs: parsed.timeoutMs || 5000,
+    });
+
+    if (!result.ok) {
+      const output = formatMcpToolsResult(result, jsonOutput);
+      if (jsonOutput) {
+        console.log(output);
+      } else {
+        console.error(output);
+      }
+      process.exit(result.exitCode || 1);
+      return;
+    }
+
+    console.log(formatMcpToolsResult(result, jsonOutput));
+    process.exit(0);
+    return;
+  }
+
   if (parsed.subcommand === 'adapter-mcp-call') {
     if (!parsed.tool && !parsed.profilePath) {
       console.error('Error: No tool specified. Use --tool <name> or --profile <path>.');
@@ -411,6 +541,54 @@ export async function runAdapterCli(adapterArgv, options = {}) {
     });
 
     const output = formatMcpCallResult(result, jsonOutput);
+    if (!result.ok) {
+      if (jsonOutput) {
+        console.log(output);
+      } else {
+        console.error(output);
+      }
+      process.exit(result.exitCode || 1);
+      return;
+    }
+
+    console.log(output);
+    process.exit(result.exitCode || 0);
+    return;
+  }
+
+  if (parsed.subcommand === 'adapter-mcp-batch') {
+    if (!parsed.tool && !parsed.profilePath) {
+      console.error('Error: No tool specified. Use --tool <name> or --profile <path>.');
+      console.error('Available tools: guardrail adapter profile list');
+      process.exit(1);
+      return;
+    }
+
+    let calls = [];
+    try {
+      calls = JSON.parse(parsed.callsJson || '[]');
+    } catch (err) {
+      console.error(`Error: --calls-json must be valid JSON: ${err.message}`);
+      process.exit(1);
+      return;
+    }
+    if (!Array.isArray(calls) || calls.length === 0) {
+      console.error('Error: --calls-json must decode to a non-empty JSON array.');
+      process.exit(1);
+      return;
+    }
+
+    const { callAdapterMcpToolBatch } = await import('./adapter-engine.js');
+    const jsonOutput = !!parsed.json || !!options.jsonOutput;
+    const result = await callAdapterMcpToolBatch({
+      tool: parsed.tool,
+      profilePath: parsed.profilePath,
+      calls,
+      envAllow: parsed.envAllow || [],
+      timeoutMs: parsed.timeoutMs || 5000,
+    });
+
+    const output = formatMcpBatchResult(result, jsonOutput);
     if (!result.ok) {
       if (jsonOutput) {
         console.log(output);

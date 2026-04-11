@@ -180,7 +180,9 @@ Commands:
   recipe publish --name <n> --category <c> [--manifest <path>] [--description <d>] [--dry-run]
   adapter run --tool <name> -- <cmd>    Run a command through an adapter profile
   adapter probe --tool <name>           Probe an MCP stdio profile for discovery only
+  adapter mcp tools --tool <name>       List MCP tools for a stdio profile under Guardrail
   adapter mcp call --tool <name>        Perform one bounded MCP tools/call over stdio
+  adapter mcp batch --tool <name>       Perform a bounded ordered MCP tools/call batch over stdio
   adapter shim --tool <n> --commands <c>  Create PATH shims for adapter interception
   adapter profile install <source>      Install an adapter profile
   adapter profile index verify <path> --index-key <pubkey.pem>  Verify a signed adapter profile index file
@@ -229,6 +231,8 @@ Examples:
   guardrail lane list --json
   guardrail lane prune --json
   guardrail repo status --path .
+  guardrail adapter mcp tools --tool cline
+  guardrail adapter mcp batch --tool cline --calls-json '[{"tool":"echo","params":{"text":"hi"}}]'
   guardrail template lint --template ./templates/npm-publish.json
   guardrail template create --from-manifest .guardrail/approved.json --name npm-publish
   guardrail template list --json

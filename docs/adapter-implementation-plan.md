@@ -751,8 +751,10 @@ Current partial state:
 
 - MCP profiles may now declare a validated `mcp_transport` contract
 - Guardrail currently accepts `stdio` as the declared transport shape and requires explicit correlation/capability-discovery fields
-- `guardrail adapter probe --tool <name>` is the bounded discovery exception: it runs an approval-bearing stdio helper that performs only `initialize` plus `tools/list` and returns discovered tool names
-- `guardrail adapter mcp call --tool <name> --mcp-tool <tool> --params-json <json>` is the first bounded runtime exception: it performs one `tools/call` over the declared `stdio` transport under Guardrail approval
+- `guardrail adapter probe --tool <name>` is the bounded discovery exception: it runs an approval-bearing stdio helper that performs only `initialize` plus `tools/list`
+- `guardrail adapter mcp tools --tool <name>` is the explicit MCP inventory view: it returns the discovered tool metadata Guardrail saw during that bounded discovery exchange
+- `guardrail adapter mcp call --tool <name> --mcp-tool <tool> --params-json <json>` is the first bounded runtime exception: it performs one `tools/call` over the declared `stdio` transport under Guardrail approval and now validates the requested MCP tool against the discovered tool set when capability discovery is required
+- `guardrail adapter mcp batch --tool <name> --calls-json <json>` is the next bounded runtime exception: it performs an explicit array of MCP tool calls over one approved `stdio` session
 - general MCP execution is still blocked; `adapter run` does not reinterpret arbitrary shell commands as MCP tool calls
 
 ---
@@ -764,7 +766,9 @@ guardrail adapter run --tool openclaw -- npm test
 guardrail adapter run --profile ./my-tool.json -- npm test
 guardrail adapter run --profile ./my-tool.json --env-allow ANTHROPIC_API_KEY -- npm test
 guardrail adapter probe --tool cline
+guardrail adapter mcp tools --tool cline
 guardrail adapter mcp call --tool cline --mcp-tool echo --params-json '{"text":"hi"}'
+guardrail adapter mcp batch --tool cline --calls-json '[{"tool":"echo","params":{"text":"hi"}},{"tool":"echo","params":{"text":"bye"}}]'
 guardrail adapter profile index verify ./adapter-profiles.index.json --index-key ./adapter-profiles.index.pub.pem
 guardrail adapter shim --tool aider --commands npm,git,python
 guardrail adapter shim --list
@@ -1017,6 +1021,7 @@ Available tools: guardrail adapter profile list
 6. adversarial cases fail closed: oversized input, invalid path grammar, unsupported protocol, response path outside public schema, malformed GitHub URL
 7. `guardrail adapter run --tool cline -- ls` exits before execution with MCP-not-supported guidance
 8. `guardrail adapter mcp call --tool cline --mcp-tool echo --params-json '{"text":"hi"}'` takes the approval-bound MCP call path instead of the hard block
+9. `guardrail adapter mcp batch --tool cline --calls-json '[{"tool":"echo","params":{"text":"hi"}}]'` takes the approval-bound MCP batch path instead of the hard block
 
 ---
 

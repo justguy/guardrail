@@ -79,10 +79,19 @@ class McpFrameReader {
 }
 
 function summarizeProbeSuccess(transport, initializeResult, toolsResult) {
-  const allToolNames = Array.isArray(toolsResult?.tools)
-    ? toolsResult.tools.filter((tool) => tool && typeof tool.name === 'string').map((tool) => tool.name.slice(0, 256))
+  const allTools = Array.isArray(toolsResult?.tools)
+    ? toolsResult.tools
+      .filter((tool) => tool && typeof tool.name === 'string')
+      .map((tool) => ({
+        name: tool.name.slice(0, 256),
+        description: typeof tool.description === 'string' ? tool.description.slice(0, 1024) : null,
+        inputSchema: tool.inputSchema && typeof tool.inputSchema === 'object' && !Array.isArray(tool.inputSchema)
+          ? tool.inputSchema
+          : null,
+      }))
     : [];
-  const toolList = allToolNames.slice(0, 100);
+  const toolList = allTools.slice(0, 100);
+  const toolNames = toolList.map((tool) => tool.name);
 
   return {
     ok: true,
@@ -96,8 +105,9 @@ function summarizeProbeSuccess(transport, initializeResult, toolsResult) {
       protocolVersion: initializeResult?.protocolVersion || null,
       serverInfo: initializeResult?.serverInfo || null,
       capabilities: initializeResult?.capabilities || null,
-      toolCount: allToolNames.length,
-      toolsTruncated: allToolNames.length > toolList.length,
+      toolCount: allTools.length,
+      toolsTruncated: allTools.length > toolList.length,
+      toolNames,
       tools: toolList,
     },
   };

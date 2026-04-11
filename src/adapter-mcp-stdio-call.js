@@ -78,20 +78,19 @@ class McpFrameReader {
   }
 }
 
-function summarizeCallSuccess(transport, toolName, callResult) {
+function summarizeCallsSuccess(transport, calls) {
   return {
     ok: true,
-    call: {
-      tool: toolName,
+    batch: {
       transport: {
         type: transport.type,
         command: transport.command,
         args: Array.isArray(transport.args) ? transport.args : [],
         cwd: transport.cwd || null,
       },
-      result: callResult || {},
-      isError: !!callResult?.isError,
-    },
+      callCount: calls.length,
+      calls,
+    }
   };
 }
 
@@ -104,8 +103,11 @@ function summarizeCallFailure(code, reason, detail = null) {
   };
 }
 
-export async function runMcpStdioCall(transport, toolName, params, options = {}) {
+export async function runMcpStdioCalls(transport, calls, options = {}) {
   const timeoutMs = Number.parseInt(options.timeoutMs, 10) || DEFAULT_TIMEOUT_MS;
+  if (!Array.isArray(calls) || calls.length === 0) {
+    return summarizeCallFailure('validation_failed', 'MCP stdio call requires at least one tool call.');
+  }
   const reader = new McpFrameReader();
   let stderr = '';
 
@@ -238,24 +240,42 @@ export async function runMcpStdioCall(transport, toolName, params, options = {})
 
         sendNotification('notifications/initialized', {});
 
-        const callId = `guardrail:tools/call:${toolName}`;
-        const callResponse = await request(callId, 'tools/call', {
-          name: toolName,
-          arguments: params,
-        });
-        if (String(callResponse.id) !== callId) {
-          throw new Error('MCP stdio call received a tools/call response with a mismatched request_id.');
-        }
-        if (callResponse.error) {
-          throw new Error(`MCP tools/call failed: ${JSON.stringify(callResponse.error)}`);
+        const results = [];
+        for (let index = 0; index < calls.length; index += 1) {
+          const call = calls[index];
+          const callId = `guardrail:tools/call:${index}:${call.tool}`;
+          const callResponse = await request(callId, 'tools/call', {
+            name: call.tool,
+            arguments: call.params,
+          });
+          if (String(callResponse.id) !== callId) {
+            throw new Error('MCP stdio call received a tools/call response with a mismatched request_id.');
+          }
+          if (callResponse.error) {
+            throw new Error(`MCP tools/call failed: ${JSON.stringify(callResponse.error)}`);
+          }
+          results.push({
+            tool: call.tool,
+            result: callResponse.result || {},
+            isError: !!callResponse.result?.isError,
+          });
         }
 
-        finish(summarizeCallSuccess(transport, toolName, callResponse.result));
+        finish(summarizeCallsSuccess(transport, results));
       } catch (err) {
         fail('protocol_error', err.message);
       }
     })();
   });
+}
+
+export async function runMcpStdioCall(transport, toolName, params, options = {}) {
+  const outcome = await runMcpStdioCalls(transport, [{ tool: toolName, params }], options);
+  if (!outcome.ok) return outcome;
+  return {
+    ok: true,
+    call: outcome.batch.calls[0],
+  };
 }
 
 function parseCallArgs(argv) {
@@ -266,6 +286,7 @@ function parseCallArgs(argv) {
     timeoutMs: String(DEFAULT_TIMEOUT_MS),
     mcpTool: '',
     paramsJson: '{}',
+    callsJson: '',
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -294,14 +315,42 @@ function parseCallArgs(argv) {
       result.paramsJson = argv[++i];
       continue;
     }
+    if (token === '--calls-json' && i + 1 < argv.length) {
+      result.callsJson = argv[++i];
+      continue;
+    }
     return { error: `Unknown or incomplete flag: ${token}` };
   }
 
   if (!result.command) {
     return { error: 'Missing required --command <name>.' };
   }
-  if (!result.mcpTool) {
-    return { error: 'Missing required --mcp-tool <name>.' };
+  if (!result.mcpTool && !result.callsJson) {
+    return { error: 'Missing required --mcp-tool <name> or --calls-json <json>.' };
+  }
+
+  if (result.callsJson) {
+    let calls;
+    try {
+      calls = JSON.parse(result.callsJson);
+    } catch (err) {
+      return { error: `--calls-json must be valid JSON: ${err.message}` };
+    }
+    if (!Array.isArray(calls) || calls.length === 0) {
+      return { error: '--calls-json must decode to a non-empty JSON array.' };
+    }
+    for (const call of calls) {
+      if (!call || typeof call !== 'object' || Array.isArray(call)) {
+        return { error: '--calls-json entries must be JSON objects.' };
+      }
+      if (typeof call.tool !== 'string' || call.tool.trim() === '') {
+        return { error: '--calls-json entries require a non-empty "tool" string.' };
+      }
+      if (call.params == null || typeof call.params !== 'object' || Array.isArray(call.params)) {
+        return { error: '--calls-json entries require a "params" JSON object.' };
+      }
+    }
+    return { result: { ...result, calls } };
   }
 
   let params;
@@ -314,7 +363,7 @@ function parseCallArgs(argv) {
     return { error: '--params-json must decode to a JSON object.' };
   }
 
-  return { result: { ...result, params } };
+  return { result: { ...result, params, calls: [{ tool: result.mcpTool, params }] } };
 }
 
 async function main() {
@@ -325,14 +374,19 @@ async function main() {
     return;
   }
 
-  const outcome = await runMcpStdioCall({
+  const transport = {
     type: 'stdio',
     command: parsed.result.command,
     args: parsed.result.args,
     cwd: parsed.result.cwd || process.cwd(),
-  }, parsed.result.mcpTool, parsed.result.params, {
-    timeoutMs: parsed.result.timeoutMs,
-  });
+  };
+  const outcome = parsed.result.callsJson
+    ? await runMcpStdioCalls(transport, parsed.result.calls, {
+      timeoutMs: parsed.result.timeoutMs,
+    })
+    : await runMcpStdioCall(transport, parsed.result.mcpTool, parsed.result.params, {
+      timeoutMs: parsed.result.timeoutMs,
+    });
   process.stdout.write(`${JSON.stringify(outcome)}\n`);
   process.exit(0);
 }

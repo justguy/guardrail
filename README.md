@@ -751,7 +751,9 @@ MCP status:
 - MCP profiles are recognized and may declare a validated `mcp_transport` contract, but runtime support is still intentionally blocked
 - blocked MCP runs now tell you which transport contract was recognized so users can distinguish “profile is malformed” from “transport exists on paper but is not live yet”
 - `guardrail adapter probe --tool <name>` is the bounded MCP discovery path: it runs an approval-bearing stdio probe that only performs `initialize` plus `tools/list` for MCP profiles with declared `stdio` transport
+- `guardrail adapter mcp tools --tool <name>` is the first explicit MCP inventory surface: it returns the discovered tool metadata Guardrail saw during that bounded `initialize` + `tools/list` exchange so agents can inspect callable tool names before invoking one
 - `guardrail adapter mcp call --tool <name> --mcp-tool <tool> --params-json <json>` is the first bounded MCP runtime path: it performs exactly one `tools/call` over the declared `stdio` transport under Guardrail approval, without turning general `adapter run` into an ambient MCP execution surface
+- `guardrail adapter mcp batch --tool <name> --calls-json <json>` is the next bounded MCP runtime path: it performs an explicit array of `{ "tool": "...", "params": { ... } }` calls over one approved stdio session without turning general `adapter run` into an ambient MCP execution surface
 
 Current architecture:
 
@@ -770,7 +772,9 @@ Example:
 guardrail adapter run --tool openclaw -- npm test
 guardrail adapter run --profile ./my-tool.json --env-allow ANTHROPIC_API_KEY -- npm test
 guardrail adapter probe --tool cline
+guardrail adapter mcp tools --tool cline
 guardrail adapter mcp call --tool cline --mcp-tool echo --params-json '{"text":"hi"}'
+guardrail adapter mcp batch --tool cline --calls-json '[{"tool":"echo","params":{"text":"hi"}},{"tool":"echo","params":{"text":"bye"}}]'
 guardrail adapter run --tool cline -- echo "still blocked in v0.2"
 guardrail adapter profile index verify ./adapter-profiles.index.json --index-key ./adapter-profiles.index.pub.pem
 guardrail adapter profile install github://guardrail-dev/adapter-profiles/openclaw.json@<sha>
@@ -790,9 +794,11 @@ Adapter caveats:
 - The same bounded auth/runtime preflight now applies to workflow `recipe_ref` execution for referenced recipes. If a chained recipe declares `requires_auth`, the workflow stops before launch with the same `missing_auth_prerequisite` semantics instead of letting the child CLI fail late.
 - Adapter `run` also enforces approval reuse: first approval is interactive and binds an adapter manifest; without one, `adapter run` returns a blocked result with `No approved manifest found`.
 - `adapter probe` is discovery only. It does not run user commands through MCP profiles, and it does not make `adapter run` live for MCP tools. Use it to confirm that the declared stdio transport can initialize and expose tools under Guardrail.
-- `adapter mcp call` is the first bounded MCP execution slice. It still requires explicit MCP tool selection plus JSON params, and it does not reinterpret arbitrary shell commands as MCP calls.
+- `adapter mcp tools` is the agent-facing inventory view for that same bounded discovery path. Use it when you need the actual MCP tool names or input-schema-bearing metadata Guardrail observed before choosing a tool.
+- `adapter mcp call` is the first bounded MCP execution slice. It still requires explicit MCP tool selection plus JSON params, and it does not reinterpret arbitrary shell commands as MCP calls. Guardrail now validates the requested MCP tool against the discovered tool set when the profile declares required capability discovery.
+- `adapter mcp batch` is the next bounded execution slice. It still requires an explicit JSON array of `{ tool, params }` objects and still runs under one bounded stdio session; it does not reinterpret arbitrary shell commands as ambient MCP execution.
 - Signed adapter-profile index groundwork is now shipped via `guardrail adapter profile index verify <path> --index-key <pubkey.pem>`. It validates the index schema and signature so teams can test index publishing locally, but bare-name install is still intentionally blocked until Guardrail has real trusted-index verification for public distribution.
-- `adapter run` for MCP profiles is still blocked at CLI level in v0.2. If you need bounded MCP execution now, use `adapter mcp call`; if you need general IDE-style protocol execution, use the env-shim path until broader MCP runtime semantics ship.
+- `adapter run` for MCP profiles is still blocked at CLI level in v0.2. If you need bounded MCP execution now, use `adapter mcp call` or `adapter mcp batch`; if you need general IDE-style protocol execution, use the env-shim path until broader MCP runtime semantics ship.
 - `--env-allow` is bounded and explicit. It only controls what environment keys are handed to the adapter process for that run.
 - `claude-exec` and `codex-exec` are approval-bounded wrappers, not outer sandboxes. If you run them outside your host sandbox/container boundary, the underlying AI CLI runs with host privileges subject to its own permission model. Guardrail now calls this out as a yellow-to-red risk reason in approval UX.
 
