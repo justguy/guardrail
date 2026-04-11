@@ -1,0 +1,58 @@
+{
+  "id": "openclaw-debug-ci",
+  "name": "OpenClaw Debug CI",
+  "description": "Run the fixed OpenClaw debug-ci flow with read scope and output verification.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {},
+  "steps": [
+    {
+      "id": "validate-scope",
+      "description": "Verify the fixed debug-ci flow is allowed with read scope",
+      "run": {
+        "command": "openclaw",
+        "args": ["scope", "check", "--flow", "debug-ci", "--scope", "read"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "execute-flow",
+      "description": "Execute the fixed OpenClaw debug-ci flow within read scope",
+      "run": {
+        "command": "openclaw",
+        "args": ["run", "--flow", "debug-ci", "--scope", "read", "--no-escalate"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "verify-output",
+      "description": "Validate the fixed flow output against the declared read scope",
+      "run": {
+        "command": "openclaw",
+        "args": ["verify", "--flow", "debug-ci", "--check-scope", "read", "--check-output"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "The flow id is fixed to debug-ci",
+      "Execution is fixed to read scope with no escalation",
+      "Outputs must pass OpenClaw verification before the recipe completes"
+    ],
+    "invariants": [
+      "No alternate OpenClaw flow can be substituted at runtime",
+      "No scope other than read is allowed for this recipe",
+      "A failed verification blocks recipe success"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "openclaw",
+  "tags": ["openclaw", "debug-ci", "task-specific"],
+  "channel": "verified",
+  "signature": null
+}

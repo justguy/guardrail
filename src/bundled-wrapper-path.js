@@ -12,6 +12,9 @@ const WRAPPER_FILE_MAP = {
   codex: 'codex-exec-wrapper.js',
   git_commit: 'git-commit-wrapper.js',
   git_commit_plan: 'git-commit-plan-wrapper.js',
+  git_push_safe: 'git-push-safe-wrapper.js',
+  npm_install_safe: 'npm-install-safe-wrapper.js',
+  pip_install_safe: 'pip-install-safe-wrapper.js',
   cmux_claude: 'cmux-claude-recipe-wrapper.js',
 };
 

@@ -407,10 +407,11 @@ For open-source distribution, treat recipes as auditable artifacts, not safety c
 
 | Category | Examples |
 |----------|----------|
-| **GitHub** | `open_pr`, `clone_repo`, `release_safe` |
-| **Package** | `npm_install_safe`, `pip_install_safe` |
-| **Cloud** | `aws_s3_sync_safe`, `terraform_plan_only` |
-| **AI / Agent** | `fix_tests`, `debug_ci`, `safe_deploy` |
+| **GitHub** | `gh-open-pr`, `gh-release` |
+| **Git** | `git-clone-allowed`, `git-push` |
+| **Package** | `npm-install`, `pip-install` |
+| **Infra / Cloud** | `docker-build`, `docker-push`, `terraform-plan-only` |
+| **AI / Agent** | `openclaw-fix-tests`, `openclaw-debug-ci` |
 
 ### Using Recipes
 
@@ -442,6 +443,15 @@ guardrail run --recipe git-branch-cleanup --input repo_path=. --dry-run
 # Safe Terraform planning without apply/destroy
 guardrail run --recipe terraform-plan-only --input config_path=infra/staging --dry-run
 
+# Lockfile-only Node install with lifecycle scripts disabled
+guardrail run --recipe npm-install --input package_dir=tests/fixtures --input lockfile=package-lock.json --dry-run
+
+# Hashed Python requirements install from a reviewed file
+guardrail run --recipe pip-install --input requirements_file=tests/fixtures/requirements-hashed.txt --dry-run
+
+# Non-force push of the current HEAD to an explicit non-protected branch
+guardrail run --recipe git-push --input repo_path=. --input remote=origin --input branch=feature/demo --dry-run
+
 # Create a bounded PR through GitHub CLI with a reviewed body file
 guardrail run --recipe gh-open-pr \
   --input repo=guardrail-dev/recipes \
@@ -450,6 +460,9 @@ guardrail run --recipe gh-open-pr \
   --input title="Add reviewed change" \
   --input body_file=docs/pr-body.md \
   --dry-run
+
+# Task-specific OpenClaw flows with fixed ids and scopes
+guardrail run --recipe openclaw-debug-ci --dry-run
 
 # Pin to a specific version
 guardrail run --recipe git-branch-cleanup@1.0.0 --input repo_path=. --dry-run

@@ -513,13 +513,18 @@ node src/cli.js run --recipe terraform-plan-only \
 
 Other shipped `R0a` recipe batch entries:
 - `git-clone-allowed` for bounded GitHub clone operations into relative destinations
+- `git-push` for a non-force push of `HEAD` to an explicit non-protected branch on `origin`
 - `gh-open-pr` for opening a reviewed pull request through `gh`
 - `gh-release` for creating a release from an explicit tag and reviewed notes file
 - `docker-build` for bounded build-context image builds
 - `docker-push` for explicit image pushes to an approval-bound registry/tag
+- `npm-install` for reviewed lockfile-only `npm ci` with lifecycle scripts disabled
+- `pip-install` for reviewed hashed requirements installs with `--require-hashes` and `--no-deps`, plus wrapper-side rejection of nested requirements, editables, direct URLs, and alternate indexes
 
-First task-specific OpenClaw recipe:
+Task-specific OpenClaw recipes:
 - `openclaw-fix-tests` for the fixed `fix-tests` flow with write scope, a pre-run scope check, fixed `--no-escalate`, and post-run output verification
+- `openclaw-debug-ci` for the fixed `debug-ci` flow with read scope, the same scope check, and output verification
+- `openclaw-deploy` is still deferred. Treat generic deploy flows as high-trust environment/account-bound operations, not as community-safe task recipes.
 
 ## Adapter Mode
 

@@ -1449,61 +1449,117 @@ describe('README Feature: Adapter System', () => {
 // ==========================================================================
 
 describe('README Feature: Recipe Execution + Versioning', () => {
+  function runRecipeDocCommand(cmd) {
+    const fakeHome = join(tmpDir(), 'home');
+    mkdirSync(fakeHome, { recursive: true });
+    return run(cmd, {
+      env: { ...process.env, HOME: fakeHome },
+    });
+  }
+
   it('guardrail run --recipe <id> --dry-run → runs latest version', () => {
-    const r = run(`${CLI} run --recipe dep-upgrade --input package_dir=. --input scope=patch --dry-run`);
+    const r = runRecipeDocCommand(`${CLI} run --recipe dep-upgrade --input package_dir=. --input scope=patch --dry-run`);
     assert.equal(r.exitCode, 0);
     assert.ok(r.stdout.includes('Dependency Upgrade'));
     assert.ok(r.stdout.includes('Safe'));
   });
 
   it('guardrail run --recipe <id>@<version> → pins to version', () => {
-    run(`${CLI} recipe install recipes/npm-publish.recipe.json`);
-    const r = run(`${CLI} run --recipe npm-publish@1.0.0 --input package_dir=pkg --input tag=beta --dry-run`);
+    const fakeHome = join(tmpDir(), 'home');
+    const fakeCwd = join(tmpDir(), 'cwd');
+    mkdirSync(fakeHome, { recursive: true });
+    mkdirSync(fakeCwd, { recursive: true });
+    run(`${CLI} recipe install recipes/npm-publish.recipe.json`, {
+      env: { ...process.env, HOME: fakeHome },
+    });
+    const r = run(`${CLI} run --recipe npm-publish@1.0.0 --input package_dir=pkg --input tag=beta --dry-run`, {
+      cwd: fakeCwd,
+      env: { ...process.env, HOME: fakeHome },
+    });
     assert.equal(r.exitCode, 0);
     assert.ok(r.stdout.includes('NPM Package Publish'));
   });
 
   it('nonexistent version → error with available versions', () => {
-    const r = run(`${CLI} run --recipe git-branch-cleanup@99.0.0 --input repo_path=. --dry-run`);
+    const r = runRecipeDocCommand(`${CLI} run --recipe git-branch-cleanup@99.0.0 --input repo_path=. --dry-run`);
     assert.ok(r.exitCode !== 0);
     assert.ok(r.stderr.includes('99.0.0') || r.stderr.includes('not found'));
   });
 
   it('missing required input → error with input name', () => {
-    const r = run(`${CLI} run --recipe git-branch-cleanup --dry-run`);
+    const r = runRecipeDocCommand(`${CLI} run --recipe git-branch-cleanup --dry-run`);
     assert.ok(r.exitCode !== 0);
     assert.ok(r.stderr.includes('repo_path') || r.stderr.includes('Missing'));
   });
 
   it('invalid enum input → error with allowed values', () => {
-    const r = run(`${CLI} run --recipe infra-deploy --input environment=hacked --input config_path=x --dry-run`);
+    const r = runRecipeDocCommand(`${CLI} run --recipe infra-deploy --input environment=hacked --input config_path=x --dry-run`);
     assert.ok(r.exitCode !== 0);
     assert.ok(r.stderr.includes('staging') || r.stderr.includes('production'));
   });
 
   it('terraform-plan-only dry-runs safely', () => {
-    const r = run(`${CLI} run --recipe terraform-plan-only --input config_path=configs/main.tf --dry-run`);
+    const r = runRecipeDocCommand(`${CLI} run --recipe terraform-plan-only --input config_path=configs/main.tf --dry-run`);
     assert.equal(r.exitCode, 0, r.stderr);
     assert.ok(r.stdout.includes('Safe'));
     assert.ok(r.stdout.includes('plan -input=false'));
   });
 
+  it('bounded install and push recipes dry-run with their fixed guardrails', () => {
+    const requirements = 'tests/fixtures/requirements-hashed.txt';
+    const checks = [
+      {
+        cmd: `${CLI} run --recipe npm-install --input package_dir=tests/fixtures --input lockfile=package-lock.json --dry-run`,
+        expect: 'ci',
+      },
+      {
+        cmd: `${CLI} run --recipe pip-install --input requirements_file=${requirements} --dry-run`,
+        expect: 'pip-install-safe-wrapper.js',
+      },
+      {
+        cmd: `${CLI} run --recipe git-push --input repo_path=. --input remote=origin --input branch=feature/demo --dry-run`,
+        expect: '--branch feature/demo',
+      },
+    ];
+    for (const check of checks) {
+      const r = runRecipeDocCommand(check.cmd);
+      assert.equal(r.exitCode, 0, `Failed: ${check.cmd}\n${r.stderr}`);
+      assert.ok(r.stdout.includes('Safe'));
+      assert.ok(r.stdout.includes(check.expect), `Missing ${check.expect} in ${r.stdout}`);
+    }
+  });
+
+  it('task-specific OpenClaw recipes dry-run with fixed flows and scopes', () => {
+    const checks = [
+      {
+        cmd: `${CLI} run --recipe openclaw-debug-ci --dry-run`,
+        expect: 'debug-ci',
+      },
+    ];
+    for (const check of checks) {
+      const r = runRecipeDocCommand(check.cmd);
+      assert.equal(r.exitCode, 0, `Failed: ${check.cmd}\n${r.stderr}`);
+      assert.ok(r.stdout.includes('Safe'));
+      assert.ok(r.stdout.includes(check.expect), `Missing ${check.expect} in ${r.stdout}`);
+    }
+  });
+
   it('all shipped infrastructure-safe recipes dry-run successfully', () => {
-    const fakeHome = join(tmpDir(), 'home');
-    mkdirSync(fakeHome, { recursive: true });
     const runs = [
       `${CLI} run --recipe git-branch-cleanup --input repo_path=. --dry-run`,
+      `${CLI} run --recipe git-push --input repo_path=. --input remote=origin --input branch=feature/demo --dry-run`,
       `${CLI} run --recipe dep-upgrade --input package_dir=. --input scope=patch --dry-run`,
+      `${CLI} run --recipe npm-install --input package_dir=tests/fixtures --input lockfile=package-lock.json --dry-run`,
+      `${CLI} run --recipe pip-install --input requirements_file=tests/fixtures/requirements-hashed.txt --dry-run`,
       `${CLI} run --recipe github-pr-merge --input repo=org/repo --input max_prs=3 --input label=approved --dry-run`,
       `${CLI} run --recipe infra-deploy --input environment=staging --input config_path=configs/main.tf --dry-run`,
       `${CLI} run --recipe npm-publish --input package_dir=pkg --input tag=latest --dry-run`,
       `${CLI} run --recipe openclaw-fix-tests --dry-run`,
+      `${CLI} run --recipe openclaw-debug-ci --dry-run`,
       `${CLI} run --recipe openclaw-wrapper --input flow_id=fix-tests --input scope=write --dry-run`,
     ];
     for (const cmd of runs) {
-      const r = run(cmd, {
-        env: { ...process.env, HOME: fakeHome },
-      });
+      const r = runRecipeDocCommand(cmd);
       assert.equal(r.exitCode, 0, `Failed: ${cmd}\n${r.stderr}`);
       assert.ok(r.stdout.includes('Safe'), `Not safe: ${cmd}`);
     }

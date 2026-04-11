@@ -545,6 +545,16 @@ describe('Recipe System: Example Recipes', () => {
     assert.ok(!args.includes('admin'));
   });
 
+  it('openclaw-debug-ci recipe is fixed to the debug-ci flow and read scope', () => {
+    const r = loadRecipe(join(recipeDir, 'openclaw-debug-ci.recipe.json'));
+    assert.equal(r.category, 'openclaw');
+    assert.equal(r.approval_required, true);
+    const args = r.steps.flatMap((step) => step.run?.args || []);
+    assert.ok(args.includes('debug-ci'));
+    assert.ok(args.includes('read'));
+    assert.ok(!args.includes('admin'));
+  });
+
   it('git-commit recipe is valid and categorized', () => {
     const r = loadRecipe(join(recipeDir, 'git-commit.recipe.json'));
     assert.equal(r.category, 'git');
@@ -567,20 +577,45 @@ describe('Recipe System: Example Recipes', () => {
     assert.equal(push.approval_required, true);
   });
 
+  it('bounded install recipes are valid and categorized', () => {
+    const npmInstall = loadRecipe(join(recipeDir, 'npm-install.recipe.json'));
+    const pipInstall = loadRecipe(join(recipeDir, 'pip-install.recipe.json'));
+    assert.equal(npmInstall.category, 'packages');
+    assert.equal(pipInstall.category, 'packages');
+    assert.equal(npmInstall.approval_required, true);
+    assert.equal(pipInstall.approval_required, true);
+    assert.ok(npmInstall.steps[0].run.args.includes('{{bundled_wrapper.npm_install_safe}}'));
+    assert.ok(pipInstall.steps[0].run.args.includes('{{bundled_wrapper.pip_install_safe}}'));
+  });
+
+  it('git-push recipe is bounded to non-force pushes only', () => {
+    const r = loadRecipe(join(recipeDir, 'git-push.recipe.json'));
+    assert.equal(r.category, 'git');
+    assert.equal(r.approval_required, true);
+    const args = r.steps.flatMap((step) => step.run?.args || []);
+    assert.ok(args.includes('{{bundled_wrapper.git_push_safe}}'));
+    assert.ok(!args.includes('--force'));
+    assert.ok(args.includes('--branch'));
+  });
+
   it('all recipes have guardrails defined', () => {
     const files = [
       'git-branch-cleanup',
       'git-clone-allowed',
+      'git-push',
       'git-commit',
       'github-pr-merge',
       'gh-open-pr',
       'gh-release',
       'dep-upgrade',
+      'npm-install',
+      'pip-install',
       'docker-build',
       'docker-push',
       'infra-deploy',
       'terraform-plan-only',
       'openclaw-fix-tests',
+      'openclaw-debug-ci',
       'openclaw-wrapper',
       'npm-publish',
     ];

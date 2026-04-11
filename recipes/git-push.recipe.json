@@ -1,0 +1,70 @@
+{
+  "id": "git-push",
+  "name": "Git Push",
+  "description": "Push the current HEAD to a non-protected feature-style branch on origin without force or history rewrite.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "repo_path": {
+      "type": "string",
+      "description": "Relative path to the target git repository",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "remote": {
+      "type": "string",
+      "description": "Git remote name",
+      "enum": ["origin"]
+    },
+    "branch": {
+      "type": "string",
+      "description": "Feature-style destination branch name",
+      "pattern": "^(feature|bugfix|chore|docs|refactor|test)/[A-Za-z0-9._/-]{1,96}$"
+    }
+  },
+  "steps": [
+    {
+      "id": "push",
+      "description": "Validate the current branch bounds and push current HEAD to the approved feature-style branch on origin",
+      "run": {
+        "command": "node",
+        "args": [
+          "{{bundled_wrapper.git_push_safe}}",
+          "--repo-path", "{{inputs.repo_path}}",
+          "--remote", "{{inputs.remote}}",
+          "--branch", "{{inputs.branch}}"
+        ],
+        "mode": "structured"
+      },
+      "idempotent": false
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Only the current HEAD can be pushed",
+      "The remote is fixed to origin",
+      "Only feature-style branch names are allowed; protected branch names are excluded by pattern",
+      "The wrapper validates current-branch identity, detached-HEAD state, and remote existence before push",
+      "No force, delete, amend, or alternate git flags can be injected"
+    ],
+    "invariants": [
+      "The recipe only performs git push origin HEAD:refs/heads/<branch> through the bounded wrapper",
+      "Protected branch names like main, master, and release/* are not valid inputs",
+      "Non-fast-forward updates still fail under normal git push semantics"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "git",
+  "tags": ["git", "push", "branch"],
+  "channel": "verified",
+  "signature": null
+}
