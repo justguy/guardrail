@@ -1216,13 +1216,47 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(r.exitCode, 0, r.stderr);
     const parsed = JSON.parse(r.stdout);
     assert.equal(parsed.pruned.length, 1);
+    assert.equal(parsed.candidates.length, 1);
     assert.equal(parsed.pruned[0].laneId, 'math-stale');
+    assert.equal(parsed.pruned[0].cleanupReason, 'dead_artifacts_present');
+    assert.equal(existsSync(parsed.pruned[0].tombstonePath), true);
     assert.equal(existsSync(laneDir), false);
     assert.equal(existsSync(keyPath), false);
     const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
     const pruneEntry = entries.find((entry) => entry.event === 'lane_prune');
     assert.ok(pruneEntry, 'expected lane_prune audit entry');
     assert.equal(pruneEntry.status, 'success');
+    assert.equal(pruneEntry.prune_reason, 'dead_artifacts_present');
+  });
+
+  it('guardrail lane prune --dry-run previews dead lanes without deleting them', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const laneDir = join(repoDir, '.guardrail', 'lanes', 'math-stale');
+    mkdirSync(join(repoDir, '.guardrail'), { recursive: true });
+    mkdirSync(laneDir, { recursive: true });
+    const keyPath = join(dir, 'stale.key');
+    writeFileSync(keyPath, 'secret\n', 'utf8');
+    writeFileSync(join(laneDir, 'identity.json'), JSON.stringify({
+      laneId: 'math-stale',
+      laneDir,
+      guardrailRepo: repoDir,
+      keyPath,
+      identityNonce: 'nonce-stale',
+    }), 'utf8');
+
+    const r = run(`${CLI} lane prune --guardrail-repo ${repoDir} --dry-run --json`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.dryRun, true);
+    assert.equal(parsed.candidates.length, 1);
+    assert.equal(parsed.pruned.length, 0);
+    assert.equal(parsed.candidates[0].reason, 'dead_artifacts_present');
+    assert.equal(existsSync(laneDir), true);
+    assert.equal(existsSync(keyPath), true);
+    assert.equal(existsSync(join(repoDir, '.guardrail', 'lane-tombstones')), false);
+    const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
+    assert.equal(entries.filter((entry) => entry.event === 'lane_prune').length, 0);
   });
 
   it('guardrail lane cleanup removes one failed lane and appends an audit entry', () => {

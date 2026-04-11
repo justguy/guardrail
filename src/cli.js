@@ -262,7 +262,7 @@ Commands:
   lane stop [flags]                     Stop a resident interactive lane
   lane cleanup [flags]                  Remove one resident lane's local artifacts
   lane list [flags]                     List resident lanes in this Guardrail repo
-  lane prune [flags]                    Remove dead resident-lane artifacts
+  lane prune [flags]                    Classify and optionally remove dead resident-lane artifacts
   lane adapters                         List bundled resident lane adapters
   repo status [--path <repo>]          Show tracked and untracked repo changes
   workflow run [flags]                  Run a workflow definition under Guardrail
@@ -346,6 +346,7 @@ Examples:
   guardrail lane list --json
   guardrail lane list --all-repos --resource-filter git-branch:main --json
   guardrail lane prune --json
+  guardrail lane prune --include-failed --dry-run --json
   guardrail repo status --path .
   guardrail adapter mcp tools --tool cline
   guardrail adapter mcp batch --tool cline --calls-json '[{"tool":"echo","params":{"text":"hi"}}]'
@@ -875,7 +876,11 @@ export function parseArgs(argv) {
       '--all-repos': { key: 'allRepos', boolean: true },
       '--lanes-dir': 'lanesDir',
       '--include-failed': { key: 'includeFailed', boolean: true },
+      '--dry-run': { key: 'dryRun', boolean: true },
     });
+    if (result.laneOpts.dryRun === true) {
+      result.dryRun = true;
+    }
     return error || result;
   }
 
@@ -1878,25 +1883,36 @@ async function main() {
   if (parsed.subcommand === 'lane-prune') {
     const { pruneResidentLanes } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    laneOpts.dryRun = parsed.dryRun === true;
     const result = pruneResidentLanes(laneOpts);
-    for (const lane of result.pruned) {
-      await appendLaneAuditEntry({
-        ...laneOpts,
-        laneId: lane.laneId || null,
-        laneDir: lane.laneDir,
-      }, 'lane_prune', {
-        status: 'success',
-        pruned_status: lane.status,
-      });
+    if (!result.dryRun) {
+      for (const lane of result.pruned) {
+        await appendLaneAuditEntry({
+          ...laneOpts,
+          laneId: lane.laneId || null,
+          laneDir: lane.laneDir,
+          tool: lane.tool || null,
+        }, 'lane_prune', {
+          status: 'success',
+          pruned_status: lane.status,
+          prune_reason: lane.cleanupReason || null,
+          tombstone_path: lane.tombstonePath || null,
+        });
+      }
     }
     if (parsed.json) {
       console.log(JSON.stringify(result, null, 2));
     } else {
       console.log(`Lane registry: ${result.registryDir}`);
+      if (result.dryRun) {
+        console.log('  Mode: dry-run');
+      }
+      console.log(`  Candidates: ${result.candidates.length}`);
       console.log(`  Pruned: ${result.pruned.length}`);
       console.log(`  Skipped: ${result.skipped.length}`);
-      for (const lane of result.pruned) {
-        console.log(`  - ${lane.laneId || lane.laneDir} (${lane.status})`);
+      const visible = result.dryRun ? result.candidates : result.pruned;
+      for (const lane of visible) {
+        console.log(`  - ${lane.laneId || lane.laneDir} (${lane.status}; ${lane.reason || lane.cleanupReason || 'n/a'})`);
       }
     }
     process.exit(0);

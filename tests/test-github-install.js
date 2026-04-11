@@ -832,10 +832,12 @@ describe('CLI bare recipe name detection', () => {
     const result = parseArgs([
       'lane', 'prune',
       '--include-failed',
+      '--dry-run',
       '--json',
     ]);
     assert.equal(result.subcommand, 'lane-prune');
     assert.equal(result.laneOpts.includeFailed, true);
+    assert.equal(result.dryRun, true);
     assert.equal(result.json, true);
   });
 

@@ -309,7 +309,7 @@ AI execution recipes:
   - `node src/cli.js lane cleanup --id <lane-id>`
   - `node src/cli.js lane stop --id <lane-id>`
 - `node src/cli.js lane list [--status <status>] [--tool-filter <tool>] [--resource-filter <class>|<class:name>] [--has-conflicts] [--all-repos] [--json]`
-- `node src/cli.js lane prune [--include-failed] [--json]`
+- `node src/cli.js lane prune [--include-failed] [--dry-run] [--json]`
 - `node src/cli.js lane adapters`
 - `lane start` is the one-time host-runtime step. It launches the resident daemon through a short-lived helper in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under a repo-scoped host path derived from the Guardrail repo identity, writes an explicit `.guardrail/lanes/<id>/identity.json` record plus a fresh boot nonce, records the selected tool, writes a host-side live-lane registry entry, and fixes the executable boundary for later messages.
 - Unknown `--tool` values now fail closed. Treat that as a contract error, not as an invitation to guess or let Guardrail silently fall back to another adapter.
@@ -337,6 +337,8 @@ AI execution recipes:
 - `lane list` is the portfolio view. Use it before starting another lane when multiple agents may already be active in the same repo, add `--all-repos` when you need to include host-registry lanes from other checkouts, and narrow it first with filters like `--status`, `--tool-filter`, `--lane-id-filter`, `--session-name-filter`, `--scope-type-filter`, `--scope-mode-filter`, `--resource-filter`, `--alive`, or `--has-conflicts` when you are triaging a crowded repo.
 - `lane list` and `lane status` now surface declared scope ownership, explicit or discovered resource claims, transport summaries, and overlapping live-lane conflicts. Read those first instead of guessing whether another agent already owns the same write surface or branch/service-level resource or whether a lane is bound to the transport you think it is.
 - `lane prune` removes dead lane artifacts (`stale`, `expired`, `stopped` by default). Use it after diagnosis/cleanup, not as a first reaction to a live lane you have not inspected yet.
+- `lane prune --dry-run` is the safe preview path. It classifies candidates, shows the prune reason/signals, and leaves the lane directories and keys untouched.
+- Real prune runs now write a tombstone under `.guardrail/lane-tombstones/` before deleting the lane directory. That is the bounded post-mortem trail for a pruned lane after its live artifacts are gone.
 - Claude-oriented lane flags: `--system-prompt`, `--permission-mode`, `--allowed-tools`, `--max-budget-usd`, `--effort`, `--output-format`.
 - Codex-oriented lane flags: `--profile`, `--sandbox`, `--image-files`, `--color`, `--oss`, `--local-provider`, `--skip-git-repo-check`, `--ephemeral`, `--full-auto`.
 - Local-exec lane flags: `--command`, repeated `--arg`.

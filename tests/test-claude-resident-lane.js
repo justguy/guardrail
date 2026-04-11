@@ -1051,9 +1051,43 @@ describe('Claude resident lane', () => {
 
     const result = pruneResidentLanes({ guardrailRepo: dir });
     assert.equal(result.pruned.length, 1);
+    assert.equal(result.candidates.length, 1);
     assert.equal(result.pruned[0].laneId, 'math-stale');
+    assert.equal(result.pruned[0].cleanupReason, 'dead_artifacts_present');
+    assert.equal(existsSync(result.pruned[0].tombstonePath), true);
     assert.equal(existsSync(staleLaneDir), false);
     assert.equal(existsSync(failedLaneDir), true);
+  });
+
+  it('supports prune dry-run classification without deleting lane artifacts', () => {
+    const dir = tmpLaneDir();
+    const staleLaneDir = join(dir, '.guardrail', 'lanes', 'math-stale');
+    mkdirSync(staleLaneDir, { recursive: true });
+    const stalePaths = lanePaths(staleLaneDir);
+    writeFileSync(stalePaths.identityPath, JSON.stringify({
+      laneId: 'math-stale',
+      laneDir: staleLaneDir,
+      guardrailRepo: dir,
+      keyPath: join(dir, 'stale.key'),
+      identityNonce: 'nonce-stale',
+    }), 'utf8');
+    writeFileSync(stalePaths.statePath, JSON.stringify({
+      pid: 12345,
+      status: 'stale',
+      laneId: 'math-stale',
+      sessionName: 'math-stale',
+    }), 'utf8');
+    writeFileSync(join(dir, 'stale.key'), 'secret\n', 'utf8');
+
+    const result = pruneResidentLanes({ guardrailRepo: dir, dryRun: true });
+    assert.equal(result.dryRun, true);
+    assert.equal(result.candidates.length, 1);
+    assert.equal(result.candidates[0].laneId, 'math-stale');
+    assert.equal(result.candidates[0].reason, 'dead_artifacts_present');
+    assert.equal(result.pruned.length, 0);
+    assert.equal(existsSync(staleLaneDir), true);
+    assert.equal(existsSync(join(dir, 'stale.key')), true);
+    assert.equal(existsSync(join(dir, '.guardrail', 'lane-tombstones')), false);
   });
 
   it('treats EPERM pid probes as alive when checking resident lane status', () => {

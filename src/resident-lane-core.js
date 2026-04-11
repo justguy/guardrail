@@ -1326,6 +1326,115 @@ export function listResidentLanes(rawOptions = {}) {
 }
 
 function cleanupOneLane(lane) {
+  return cleanupLaneWithReason(lane, 'cleanup', 'manual_cleanup');
+}
+
+function removeLaneDirectory(laneDir) {
+  try {
+    rmSync(laneDir, { recursive: true, force: true });
+  } catch {
+    // Best effort.
+  }
+}
+
+function laneTombstoneDir(guardrailRepo) {
+  return join(resolve(guardrailRepo || process.cwd()), '.guardrail', 'lane-tombstones');
+}
+
+function laneTombstonePathFor(lane, cleanedAt) {
+  const stamp = String(cleanedAt || new Date().toISOString()).replaceAll(':', '-');
+  return join(laneTombstoneDir(lane.guardrailRepo), `${stamp}-${laneDirFingerprint(lane.laneDir)}.json`);
+}
+
+function writeLaneTombstone(lane, details = {}) {
+  if (!lane?.laneDir) return null;
+  const cleanedAt = new Date().toISOString();
+  const tombstonePath = laneTombstonePathFor(lane, cleanedAt);
+  mkdirSync(dirname(tombstonePath), { recursive: true });
+  writeJson(tombstonePath, {
+    schemaVersion: 1,
+    action: details.action || 'cleanup',
+    reason: details.reason || null,
+    cleanedAt,
+    laneId: lane.laneId || null,
+    laneDir: lane.laneDir,
+    guardrailRepo: lane.guardrailRepo || null,
+    ownerRepoId: lane.ownerRepoId || null,
+    tool: lane.tool || lane.adapterId || null,
+    adapterId: lane.adapterId || null,
+    status: lane.status || null,
+    aliveBeforeCleanup: !!lane.alive,
+    sessionName: lane.sessionName || null,
+    sessionId: lane.sessionId || null,
+    keyPath: lane.keyPath || null,
+    bootNonce: lane.bootNonce || null,
+    identityNonce: lane.identityNonce || null,
+    keyPresent: lane.keyPresent === true,
+    requestFifoPresent: lane.requestFifoPresent === true,
+    responseFifoPresent: lane.responseFifoPresent === true,
+    currentRequestId: lane.currentRequestId || null,
+    lastRequestId: lane.lastRequestId || null,
+    lastCompletedRequestId: lane.lastCompletedRequestId || null,
+    lastActivityAt: lane.lastActivityAt || null,
+    logPath: lane.logPath || null,
+    transportSummary: lane.transportSummary || null,
+    scopeType: lane.scopeType || 'none',
+    scopeMode: lane.scopeMode || 'warn',
+    scopePaths: Array.isArray(lane.scopePaths) ? lane.scopePaths : [],
+    resourceMode: lane.resourceMode || 'none',
+    resourceClaims: Array.isArray(lane.resourceClaims) ? lane.resourceClaims : [],
+    resourceDetails: Array.isArray(lane.resourceDetails) ? lane.resourceDetails : [],
+  });
+  return tombstonePath;
+}
+
+function lanePruneSignals(lane) {
+  const claim = lane.laneId ? readLaneClaim(lane.laneId, lane.keyPath || '') : null;
+  const claimAlive = !!claim && laneClaimIsLive(claim);
+  return {
+    alive: !!lane.alive,
+    status: lane.status,
+    identityPresent: !!lane.identityPath && existsSync(lane.identityPath),
+    statePresent: !!lane.statePath && existsSync(lane.statePath),
+    keyPresent: lane.keyPresent === true,
+    requestFifoPresent: lane.requestFifoPresent === true,
+    responseFifoPresent: lane.responseFifoPresent === true,
+    bootNonce: lane.bootNonce || null,
+    claimPresent: !!claim,
+    claimAlive,
+  };
+}
+
+function classifyResidentLaneForPrune(lane, options = {}) {
+  const includeFailed = options.includeFailed === true;
+  const signals = lanePruneSignals(lane);
+  const prunableStates = new Set(includeFailed ? ['stale', 'expired', 'stopped', 'failed'] : ['stale', 'expired', 'stopped']);
+
+  if (signals.alive) {
+    return { prunable: false, reason: 'lane_alive', signals };
+  }
+  if (signals.claimAlive) {
+    return { prunable: false, reason: 'live_claim_present', signals };
+  }
+  if (!prunableStates.has(lane.status)) {
+    return { prunable: false, reason: 'not_prunable', signals };
+  }
+
+  const reasonByStatus = {
+    stale: 'dead_artifacts_present',
+    expired: 'lane_expired',
+    stopped: 'lane_stopped',
+    failed: 'lane_failed',
+  };
+  return {
+    prunable: true,
+    reason: reasonByStatus[lane.status] || 'dead_artifacts_present',
+    signals,
+  };
+}
+
+function cleanupLaneWithReason(lane, action, reason) {
+  const tombstonePath = writeLaneTombstone(lane, { action, reason });
   removeHostLaneRegistryEntry(lane);
   if (lane.laneId) {
     removeLaneClaim(lane.laneId, lane.keyPath || '', {
@@ -1345,41 +1454,46 @@ function cleanupOneLane(lane) {
     status: lane.status,
     keyPath: lane.keyPath || null,
     aliveBeforeCleanup: lane.alive,
+    tombstonePath,
+    cleanupReason: reason || null,
   };
-}
-
-function removeLaneDirectory(laneDir) {
-  try {
-    rmSync(laneDir, { recursive: true, force: true });
-  } catch {
-    // Best effort.
-  }
 }
 
 export function pruneResidentLanes(rawOptions = {}) {
   const includeFailed = rawOptions.includeFailed === true || rawOptions.includeFailed === 'true';
+  const dryRun = rawOptions.dryRun === true || rawOptions.dryRun === 'true';
   const listing = listResidentLanes(rawOptions);
-  const prunableStates = new Set(includeFailed ? ['stale', 'expired', 'stopped', 'failed'] : ['stale', 'expired', 'stopped']);
+  const candidates = [];
   const pruned = [];
   const skipped = [];
 
   for (const lane of listing.lanes) {
-    if (lane.alive || !prunableStates.has(lane.status)) {
+    const classification = classifyResidentLaneForPrune(lane, { includeFailed });
+    const summary = {
+      laneDir: lane.laneDir,
+      laneId: lane.laneId || null,
+      tool: lane.tool || lane.adapterId || null,
+      status: lane.status,
+      reason: classification.reason,
+      signals: classification.signals,
+    };
+    if (!classification.prunable) {
       skipped.push({
-        laneDir: lane.laneDir,
-        laneId: lane.laneId,
-        status: lane.status,
-        reason: lane.alive ? 'lane_alive' : 'not_prunable',
+        ...summary,
       });
       continue;
     }
 
-    pruned.push(cleanupOneLane(lane));
+    candidates.push(summary);
+    if (dryRun) continue;
+    pruned.push(cleanupLaneWithReason(lane, 'prune', classification.reason));
   }
 
   return {
     registryDir: listing.registryDir,
     includeFailed,
+    dryRun,
+    candidates,
     pruned,
     skipped,
   };
@@ -1429,12 +1543,12 @@ export function cleanupResidentLane(rawOptions = {}) {
     sessionName: lane.sessionName || rawOptions.sessionName || lane.laneId || '',
     sessionId: lane.sessionId || rawOptions.sessionId || '',
   }) : null;
-  const cleaned = cleanupOneLane({
+  const cleaned = cleanupLaneWithReason({
     ...lane,
     alive: false,
     status: stopped ? 'stopped' : lane.status,
     keyPath: (stopped?.keyPath || lane.keyPath || null),
-  });
+  }, 'cleanup', stopped ? 'manual_stop_then_cleanup' : 'manual_cleanup');
 
   return {
     status: 'cleaned',
