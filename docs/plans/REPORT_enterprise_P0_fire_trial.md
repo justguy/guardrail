@@ -193,6 +193,13 @@ Minimum shape:
 - `D0z` is now closed with the follow-up packet in `docs/plans/PLAN_d0z_true_repo_local_autonomous_tool_state.md` and the implemented bridge documented in `docs/plans/REPORT_d0z_true_repo_local_autonomous_tool_state.md`.
 - A second follow-up was required after that closure: resident Claude lanes now run an explicit in-daemon auth preflight and surface `auth_preflight_failed` / `auth_probe_failed` in lane state before the first packet is accepted. That closes the remaining blind spot where a lane could boot and only discover Claude auth drift on the first packet.
 - Live proof after that fix is explicit: a repo-local `lane start --tool claude` in the current runtime now fails early with `lane_boot_failed` / `auth_preflight_failed` and a captured `Not logged in · Please run /login` reason. That is the correct Guardrail behavior, but it means `P0g` and `P0h` remain blocked in this runtime until Claude auth is repaired for the daemon context.
+- That auth/runtime blocker is now cleared on the real host Claude runtime. The active blocker has moved again and is now narrower: the resident interactive wrapper reaches Claude's TUI, detects readiness, and pastes the packet successfully, but Claude still does not begin processing after the paste.
+- Host-runtime PTY probes now prove:
+  - paste only does not execute
+  - paste plus single `\r` does not execute
+  - paste plus single `\n` does not execute
+- In all three cases the PTY trace stops at Claude's `[Pasted text …]` acknowledgement with no later processing marker, no report progress, and no assistant output. That means the current blocker is the Claude interactive submit contract, not Guardrail lane transport, auth preflight, D0z repo-local state, or prompt delivery.
+- This follow-on is now tracked explicitly as `D0za` in `docs/technical-status.md`, with the live evidence bundle in `docs/plans/REPORT_claude_tui_paste_submit_semantics.md`.
 
 ### Operator Rule: Approved Lane Prefix Reuse
 
