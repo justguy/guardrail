@@ -9,10 +9,12 @@ import {
   mkdtempSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readlinkSync,
   readdirSync,
   readSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -22,10 +24,12 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
+  classifyClaudeAuthSource,
   lanePaths,
   laneResultPath,
   parseResidentLaneArgs,
   normalizeResidentLaneOptions,
+  preflightClaudeLaneAuth,
   runLaneRequest,
   getResidentLaneResult,
   getResidentLaneStatus,
@@ -38,6 +42,7 @@ import {
   validateLaneRequest,
   waitForResidentLaneBootstrap,
 } from '../src/claude-resident-lane.js';
+import { runResidentLaneDaemon } from '../src/resident-lane-core.js';
 // Exercise the generic lane entrypoint, which now dispatches to Claude/Codex adapters.
 import {
   listResidentLaneAdapters,
@@ -46,6 +51,7 @@ import {
   runLaneRequest as runGenericLaneRequest,
 } from '../src/resident-lane.js';
 import { sendResidentLaneMessage } from '../src/claude-resident-lane-client.js';
+import { launchResidentLane as launchLocalExecLane } from '../src/local-exec-resident-lane.js';
 import { acquireLock } from '../src/runtime-policy.js';
 
 function tmpLaneDir() {
@@ -311,14 +317,14 @@ describe('Claude resident lane', () => {
     // break the keychain service name hash and lose credentials.
     const slug = resolve(dir).replace(/[\\/]/g, '-');
     const hostProjectDir = join(homeDir, 'projects', slug);
-    const localProjectDir = resolve(dir, '.guardrail', 'claude-runtime', 'math-live', 'projects', slug);
+    const localProjectDir = resolve(dir, '.guardrail', 'claude-runtime', 'projects', slug);
     assert.equal(seenEnvRef, process.env);
     assert.equal(seenConfigDir, undefined);
     assert.ok(lstatSync(hostProjectDir).isSymbolicLink());
     assert.equal(resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir)), localProjectDir);
   });
 
-  it('D0z: injects repo-local CLAUDE_CONFIG_DIR when ANTHROPIC_API_KEY is present', async () => {
+  it('auth preflight: classifies env-token auth without redirecting CLAUDE_CONFIG_DIR', async () => {
     const dir = tmpLaneDir();
     const homeDir = join(dir, 'home');
     mkdirSync(homeDir, { recursive: true });
@@ -341,13 +347,16 @@ describe('Claude resident lane', () => {
     delete process.env.CLAUDE_CONFIG_DIR;
 
     let seenEnv = null;
+    let seenApiKey = null;
     const runner = async (_args, _cwd, env) => {
       seenEnv = env;
+      seenApiKey = env.ANTHROPIC_API_KEY;
       return { code: 0, stdout: 'ok\n', stderr: '' };
     };
+    let result;
 
     try {
-      await runLaneRequest(options, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, { runner });
+      result = await preflightClaudeLaneAuth(options, { preflightRunner: runner });
     } finally {
       if (savedHome !== undefined) process.env.HOME = savedHome;
       else delete process.env.HOME;
@@ -356,21 +365,15 @@ describe('Claude resident lane', () => {
       if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
     }
 
-    // D0z: API key auth → CLAUDE_CONFIG_DIR redirected to repo-local runtime dir.
-    const expectedConfigDir = resolve(dir, '.guardrail', 'claude-runtime', 'math-live');
-    const slug = resolve(dir).replace(/[\\/]/g, '-');
-    const hostProjectDir = join(homeDir, 'projects', slug);
-    const localProjectDir = resolve(expectedConfigDir, 'projects', slug);
-    assert.ok(seenEnv !== process.env, 'env should be a new object when CLAUDE_CONFIG_DIR is injected');
-    assert.equal(seenEnv.CLAUDE_CONFIG_DIR, expectedConfigDir);
-    assert.equal(seenEnv.ANTHROPIC_API_KEY, 'sk-ant-test-key');
-    // The repo-local dir must exist after injection.
-    assert.ok(existsSync(expectedConfigDir), 'repo-local claude-runtime dir must be created');
-    assert.ok(lstatSync(hostProjectDir).isSymbolicLink());
-    assert.equal(resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir)), localProjectDir);
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'env_token');
+    assert.equal(classifyClaudeAuthSource({ HOME: homeDir, ANTHROPIC_API_KEY: 'sk-ant-test-key' }).source, 'env_token');
+    assert.equal(seenEnv, process.env);
+    assert.equal(seenEnv.CLAUDE_CONFIG_DIR, undefined);
+    assert.equal(seenApiKey, 'sk-ant-test-key');
   });
 
-  it('D0z: injects repo-local CLAUDE_CONFIG_DIR when CLAUDE_CODE_OAUTH_TOKEN is present', async () => {
+  it('auth preflight: classifies oauth-token auth without redirecting CLAUDE_CONFIG_DIR', async () => {
     const dir = tmpLaneDir();
     const homeDir = join(dir, 'home');
     mkdirSync(homeDir, { recursive: true });
@@ -399,9 +402,10 @@ describe('Claude resident lane', () => {
       seenEnv = env;
       return { code: 0, stdout: 'ok\n', stderr: '' };
     };
+    let result;
 
     try {
-      await runLaneRequest(options, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, { runner });
+      result = await preflightClaudeLaneAuth(options, { preflightRunner: runner });
     } finally {
       if (savedHome !== undefined) process.env.HOME = savedHome;
       else delete process.env.HOME;
@@ -411,13 +415,11 @@ describe('Claude resident lane', () => {
       if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
     }
 
-    const expectedConfigDir = resolve(dir, '.guardrail', 'claude-runtime', 'oauth-lane');
-    const slug = resolve(dir).replace(/[\\/]/g, '-');
-    const hostProjectDir = join(homeDir, 'projects', slug);
-    const localProjectDir = resolve(expectedConfigDir, 'projects', slug);
-    assert.equal(seenEnv.CLAUDE_CONFIG_DIR, expectedConfigDir);
-    assert.ok(lstatSync(hostProjectDir).isSymbolicLink());
-    assert.equal(resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir)), localProjectDir);
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'env_token');
+    assert.equal(classifyClaudeAuthSource({ HOME: homeDir, CLAUDE_CODE_OAUTH_TOKEN: 'test-oauth-token' }).source, 'env_token');
+    assert.equal(seenEnv, process.env);
+    assert.equal(seenEnv.CLAUDE_CONFIG_DIR, undefined);
   });
 
   it('D0z: passes env through unchanged when operator has already set CLAUDE_CONFIG_DIR', async () => {
@@ -467,6 +469,56 @@ describe('Claude resident lane', () => {
     assert.equal(seenConfigDir, '/operator/chosen/config');
   });
 
+  it('auth preflight: returns structured auth_preflight_failed for Claude login errors', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'math-live',
+      sessionName: 'math-live-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+
+    const savedHome = process.env.HOME;
+    const savedApiKey = process.env.ANTHROPIC_API_KEY;
+    const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.HOME = homeDir;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete process.env.CLAUDE_CONFIG_DIR;
+
+    let result;
+    try {
+      result = await preflightClaudeLaneAuth(options, {
+        preflightRunner: async () => ({
+          code: 1,
+          stdout: '',
+          stderr: 'claude --print failed with exit code 1: Not logged in · Please run /login',
+        }),
+      });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+      if (savedApiKey !== undefined) process.env.ANTHROPIC_API_KEY = savedApiKey;
+      else delete process.env.ANTHROPIC_API_KEY;
+      if (savedToken !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken;
+      else delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+      else delete process.env.CLAUDE_CONFIG_DIR;
+    }
+
+    assert.equal(result.ok, false);
+    assert.equal(result.source, 'keychain');
+    assert.equal(result.reason, 'auth_preflight_failed');
+    assert.match(result.message, /Claude auth preflight failed/);
+  });
+
   it('D0z: fails closed when the host Claude project path already exists as a non-empty directory', async () => {
     const dir = tmpLaneDir();
     const homeDir = join(dir, 'home');
@@ -512,6 +564,160 @@ describe('Claude resident lane', () => {
     }
 
     assert.deepEqual(readdirSync(hostProjectDir), ['existing.txt']);
+  });
+
+  it('D0z: reuses the same repo-scoped Claude project bridge across lane ids in the same repo', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const firstOptions = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/first',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'first-lane',
+      sessionName: 'first-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+    const secondOptions = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/second',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'second-lane',
+      sessionName: 'second-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+
+    const savedHome = process.env.HOME;
+    const savedApiKey = process.env.ANTHROPIC_API_KEY;
+    const savedOAuthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.HOME = homeDir;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete process.env.CLAUDE_CONFIG_DIR;
+
+    try {
+      await runLaneRequest(firstOptions, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, {
+        runner: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
+      });
+      await runLaneRequest(secondOptions, { id: 'req-2', prompt: 'status?' }, { startedConversation: false }, {
+        runner: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
+      });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+      if (savedApiKey !== undefined) process.env.ANTHROPIC_API_KEY = savedApiKey;
+      if (savedOAuthToken !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedOAuthToken;
+      if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+    }
+
+    const slug = resolve(dir).replace(/[\\/]/g, '-');
+    const hostProjectDir = join(homeDir, 'projects', slug);
+    const localProjectDir = resolve(dir, '.guardrail', 'claude-runtime', 'projects', slug);
+    assert.ok(lstatSync(hostProjectDir).isSymbolicLink());
+    assert.equal(resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir)), localProjectDir);
+  });
+
+  it('D0z: reuses a legacy lane-scoped repo-local Claude project bridge without treating it as a conflict', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/current',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'current-lane',
+      sessionName: 'current-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+
+    const slug = resolve(dir).replace(/[\\/]/g, '-');
+    const hostProjectDir = join(homeDir, 'projects', slug);
+    const legacyTarget = resolve(dir, '.guardrail', 'claude-runtime', 'legacy-lane', 'projects', slug);
+    mkdirSync(dirname(legacyTarget), { recursive: true });
+    mkdirSync(legacyTarget, { recursive: true });
+    writeFileSync(join(legacyTarget, 'legacy.txt'), 'migrate-me\n');
+    mkdirSync(dirname(hostProjectDir), { recursive: true });
+    symlinkSync(legacyTarget, hostProjectDir, 'dir');
+
+    const savedHome = process.env.HOME;
+    const savedApiKey = process.env.ANTHROPIC_API_KEY;
+    const savedOAuthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.HOME = homeDir;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete process.env.CLAUDE_CONFIG_DIR;
+
+    try {
+      await runLaneRequest(options, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, {
+        runner: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
+      });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+      if (savedApiKey !== undefined) process.env.ANTHROPIC_API_KEY = savedApiKey;
+      if (savedOAuthToken !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedOAuthToken;
+      if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+    }
+
+    const localProjectDir = legacyTarget;
+    assert.ok(lstatSync(hostProjectDir).isSymbolicLink());
+    assert.equal(resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir)), localProjectDir);
+    assert.equal(readFileSync(join(localProjectDir, 'legacy.txt'), 'utf8'), 'migrate-me\n');
+  });
+
+  it('D0z: recreates a missing repo-local legacy target when the host symlink is broken', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/current',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'current-lane',
+      sessionName: 'current-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+
+    const slug = resolve(dir).replace(/[\\/]/g, '-');
+    const hostProjectDir = join(homeDir, 'projects', slug);
+    const legacyTarget = resolve(dir, '.guardrail', 'claude-runtime', 'legacy-lane', 'projects', slug);
+    mkdirSync(dirname(hostProjectDir), { recursive: true });
+    symlinkSync(legacyTarget, hostProjectDir, 'dir');
+
+    const savedHome = process.env.HOME;
+    const savedApiKey = process.env.ANTHROPIC_API_KEY;
+    const savedOAuthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.HOME = homeDir;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete process.env.CLAUDE_CONFIG_DIR;
+
+    try {
+      await runLaneRequest(options, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, {
+        runner: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
+      });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+      if (savedApiKey !== undefined) process.env.ANTHROPIC_API_KEY = savedApiKey;
+      if (savedOAuthToken !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedOAuthToken;
+      if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+    }
+
+    assert.ok(existsSync(legacyTarget));
+    assert.ok(lstatSync(hostProjectDir).isSymbolicLink());
+    assert.equal(resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir)), legacyTarget);
   });
 
   it('D0z: defaults noSessionPersistence to true for resident Claude lane runs', () => {
@@ -1519,6 +1725,40 @@ describe('Claude resident lane', () => {
     assert.match(status.failureReason, /bootstrap/);
   });
 
+  it('persists auth preflight failure state before the first packet is accepted', async () => {
+    const dir = tmpLaneDir();
+    const options = normalizeResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: dir,
+      workingDir: dir,
+      sessionName: 'math-live-session',
+    }, dir);
+
+    await assert.rejects(
+      runResidentLaneDaemon(options, {
+        adapterId: 'claude',
+        async preflightDaemon() {
+          return {
+            ok: false,
+            source: 'keychain',
+            checkedAt: '2026-04-12T00:00:00.000Z',
+            reason: 'auth_preflight_failed',
+            message: 'Claude auth preflight failed for resident lane (keychain): Not logged in',
+          };
+        },
+      }),
+      (err) => err?.code === 'LANE_BOOT_FAILED' && err?.details?.failureStage === 'auth_preflight',
+    );
+
+    const status = getResidentLaneStatus({ laneDir: options.laneDir, guardrailRepo: dir });
+    assert.equal(status.status, 'failed');
+    assert.equal(status.failureStage, 'auth_preflight');
+    assert.equal(status.authSource, 'keychain');
+    assert.equal(status.authPreflightStatus, 'failed');
+    assert.equal(status.authPreflightReason, 'auth_preflight_failed');
+    assert.match(status.authPreflightMessage, /Not logged in/);
+  });
+
   it('fails lane startup when the daemon dies in the immediate post-start window', async () => {
     const dir = tmpLaneDir();
     const laneDir = join(dir, '.guardrail', 'lanes', 'math');
@@ -1565,13 +1805,15 @@ describe('Claude resident lane', () => {
     writeFileSync(keyPath, 'secret\n', 'utf8');
     const keyFd = openSync(keyPath, 'r');
 
-    const summary = await launchResidentLane({
+    const summary = await launchLocalExecLane({
       laneDir,
       guardrailRepo: dir,
       workingDir: dir,
       keyPath,
       authFd: keyFd,
       sessionName: 'math-live-session',
+      command: 'node',
+      commandArgs: ['-e', 'process.stdin.resume()'],
     });
 
     try {

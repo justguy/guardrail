@@ -326,6 +326,7 @@ AI execution recipes:
 - `node src/cli.js lane prune [--include-failed] [--dry-run] [--json]`
 - `node src/cli.js lane adapters`
 - `lane start` is the one-time host-runtime step. It launches the resident daemon through a short-lived helper in the authenticated runtime, creates owner-only request/response FIFOs (`0600`), generates an ephemeral per-lane key under the repo-local host root (`.guardrail/host-lanes/...`) by default, writes an explicit `.guardrail/lanes/<id>/identity.json` record plus a fresh boot nonce, records the selected tool, writes the live-lane registry entry, and fixes the executable boundary for later messages.
+- Claude-backed resident lanes now classify auth source before the first packet is accepted and run an in-daemon auth preflight using the same bounded wrapper path the lane will use for real work. If that probe fails, the lane moves to `failed/auth_preflight` with structured `authSource`, `authPreflightStatus`, `authPreflightReason`, `authPreflightMessage`, and `authPreflightCheckedAt` fields in `lane status` / `lane inspect`. Treat that as a runtime/auth problem to fix before sending packets, not as a packet failure.
 - Unknown `--tool` values now fail closed. Treat that as a contract error, not as an invitation to guess or let Guardrail silently fall back to another adapter.
 - Lanes can also declare optional work ownership up front:
   - `--scope-type repo|worktree|paths`

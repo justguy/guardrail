@@ -191,6 +191,8 @@ Minimum shape:
 - This gap was initially tracked as `D0z` and marked closed too early.
 - The fire trial proved the original D0z scope was incomplete: repo-local Guardrail lane state was not enough while Claude still wrote a host-global per-project path before packet work started.
 - `D0z` is now closed with the follow-up packet in `docs/plans/PLAN_d0z_true_repo_local_autonomous_tool_state.md` and the implemented bridge documented in `docs/plans/REPORT_d0z_true_repo_local_autonomous_tool_state.md`.
+- A second follow-up was required after that closure: resident Claude lanes now run an explicit in-daemon auth preflight and surface `auth_preflight_failed` / `auth_probe_failed` in lane state before the first packet is accepted. That closes the remaining blind spot where a lane could boot and only discover Claude auth drift on the first packet.
+- Live proof after that fix is explicit: a repo-local `lane start --tool claude` in the current runtime now fails early with `lane_boot_failed` / `auth_preflight_failed` and a captured `Not logged in · Please run /login` reason. That is the correct Guardrail behavior, but it means `P0g` and `P0h` remain blocked in this runtime until Claude auth is repaired for the daemon context.
 
 ### Operator Rule: Approved Lane Prefix Reuse
 

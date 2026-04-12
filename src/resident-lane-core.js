@@ -620,6 +620,11 @@ function buildState(options, pid, startedConversation = false, extra = {}) {
     ownerRepoId: stableRepoOwnerId(options.guardrailRepo),
     noSessionPersistence: options.noSessionPersistence,
     authMode: options.authFd ? 'hmac_fd' : 'none',
+    authSource: extra.authSource || null,
+    authPreflightStatus: extra.authPreflightStatus || null,
+    authPreflightReason: extra.authPreflightReason || null,
+    authPreflightMessage: extra.authPreflightMessage || null,
+    authPreflightCheckedAt: extra.authPreflightCheckedAt || null,
     logPath: paths.logPath,
     startedConversation,
     pid,
@@ -963,6 +968,7 @@ export async function waitForResidentLaneBootstrap(options, child, deps = {}) {
       state
       && state.pid === expectedPid
       && alive
+      && state.status !== 'bootstrapping'
       && state.status !== 'failed'
       && state.status !== 'expired'
       && state.status !== 'stopped'
@@ -1627,6 +1633,11 @@ function collectResidentLaneStatusBase(rawOptions) {
     responseFifoPresent,
     startedConversation: state?.startedConversation ?? false,
     authMode: state?.authMode ?? null,
+    authSource: state?.authSource ?? null,
+    authPreflightStatus: state?.authPreflightStatus ?? null,
+    authPreflightReason: state?.authPreflightReason ?? null,
+    authPreflightMessage: state?.authPreflightMessage ?? null,
+    authPreflightCheckedAt: state?.authPreflightCheckedAt ?? null,
     failureReason: state?.failureReason ?? derived.failureReason ?? null,
     failureStage: state?.failureStage ?? derived.failureStage ?? null,
     recommendedAction: derived.recommendedAction,
@@ -2036,9 +2047,44 @@ export async function runResidentLaneDaemon(options, adapter, deps = {}) {
   ensureLaneLayout(options.laneDir);
   const paths = lanePaths(options.laneDir);
 
-  let state = buildState(options, process.pid, false);
+  let state = buildState(options, process.pid, false, { status: 'bootstrapping' });
   const authSecret = options.authFd ? readSecretFromFd(options.authFd) : '';
   updateStateFile(options.laneDir, state);
+
+  if (adapter && typeof adapter.preflightDaemon === 'function') {
+    const preflight = await adapter.preflightDaemon(options, deps);
+    state = {
+      ...state,
+      authSource: preflight?.source || null,
+      authPreflightStatus: preflight?.ok ? 'passed' : 'failed',
+      authPreflightReason: preflight?.reason || null,
+      authPreflightMessage: preflight?.message || null,
+      authPreflightCheckedAt: preflight?.checkedAt || new Date().toISOString(),
+      lastActivityAt: preflight?.checkedAt || new Date().toISOString(),
+    };
+    if (!preflight?.ok) {
+      state = {
+        ...state,
+        status: 'failed',
+        failureReason: preflight?.message || preflight?.reason || 'Resident lane auth preflight failed.',
+        failureStage: 'auth_preflight',
+      };
+      updateStateFile(options.laneDir, state);
+      throw createLaneBootError(state.failureReason, {
+        failureStage: 'auth_preflight',
+        authSource: state.authSource,
+        authPreflightStatus: state.authPreflightStatus,
+        authPreflightReason: state.authPreflightReason,
+        authPreflightMessage: state.authPreflightMessage,
+        authPreflightCheckedAt: state.authPreflightCheckedAt,
+      });
+    }
+    state = { ...state, status: 'ready' };
+    updateStateFile(options.laneDir, state);
+  } else {
+    state = { ...state, status: 'ready' };
+    updateStateFile(options.laneDir, state);
+  }
 
   const requestFd = openSync(paths.requestFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK);
   const responseFd = openSync(paths.responseFifo, fsConstants.O_RDWR);

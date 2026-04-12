@@ -5,7 +5,6 @@ import { existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, rmSync, sy
 import { homedir } from 'node:os';
 import { parseAiProgressLine } from './progress-events.js';
 import {
-  resolveAIWrapperFile,
   buildAIToolArgs,
   toolSupportsNoSessionPersistence,
 } from './model-gateway.js';
@@ -42,6 +41,8 @@ import {
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_HEALTH_TIMEOUT_MS = 5 * 60 * 1000;
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const CLAUDE_WRAPPER_PATH = resolve(MODULE_DIR, 'claude-exec-wrapper.js');
 
 export const residentLaneAdapterMetadata = {
   id: 'claude',
@@ -356,8 +357,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
 }
 
 function buildWrapperArgs(options, request, lifecycle) {
-  const wrapperPath = resolveAIWrapperFile(options.tool, options.guardrailRepo);
-  const args = [wrapperPath, '--prompt', request.prompt];
+  const args = [CLAUDE_WRAPPER_PATH, '--prompt', request.prompt];
   if (options.inputFiles.length > 0) args.push('--input-files', options.inputFiles.join(','));
   if (options.model) args.push('--model', options.model);
   args.push('--working-dir', options.workingDir);
@@ -384,17 +384,34 @@ function runtimeHomeDir(options) {
   return resolve(options.guardrailRepo, '.guardrail', 'claude-runtime', slot);
 }
 
+function defaultClaudeConfigDir(env = process.env) {
+  const home = env.HOME || homedir();
+  return resolve(home, '.claude');
+}
+
 function encodeClaudeProjectSlug(workingDir) {
   return resolve(workingDir).replace(/[\\/]/g, '-');
 }
 
+function runtimeProjectRoot(options) {
+  return resolve(options.guardrailRepo, '.guardrail', 'claude-runtime', 'projects');
+}
+
 function runtimeProjectDir(options) {
-  return resolve(runtimeHomeDir(options), 'projects', encodeClaudeProjectSlug(options.workingDir));
+  return resolve(runtimeProjectRoot(options), encodeClaudeProjectSlug(options.workingDir));
 }
 
 function hostClaudeProjectDir(options) {
   const home = process.env.HOME || homedir();
   return resolve(home, 'projects', encodeClaudeProjectSlug(options.workingDir));
+}
+
+function isLegacyRepoLocalClaudeProjectTarget(target, options) {
+  const slug = encodeClaudeProjectSlug(options.workingDir);
+  const legacyBase = resolve(options.guardrailRepo, '.guardrail', 'claude-runtime');
+  return target !== runtimeProjectDir(options)
+    && target.startsWith(`${legacyBase}/`)
+    && target.endsWith(`/projects/${slug}`);
 }
 
 function ensureClaudeProjectBridge(options) {
@@ -404,6 +421,18 @@ function ensureClaudeProjectBridge(options) {
   mkdirSync(dirname(hostProjectDir), { recursive: true });
 
   if (!existsSync(hostProjectDir)) {
+    try {
+      const stat = lstatSync(hostProjectDir);
+      if (stat.isSymbolicLink()) {
+        const target = resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir));
+        if (target === localProjectDir || isLegacyRepoLocalClaudeProjectTarget(target, options)) {
+          mkdirSync(target, { recursive: true });
+          return;
+        }
+      }
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+    }
     symlinkSync(localProjectDir, hostProjectDir, 'dir');
     return;
   }
@@ -412,6 +441,12 @@ function ensureClaudeProjectBridge(options) {
   if (stat.isSymbolicLink()) {
     const target = resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir));
     if (target !== localProjectDir) {
+      if (isLegacyRepoLocalClaudeProjectTarget(target, options)) {
+        // Backward compatibility: older D0z builds stored this repo-local
+        // project state under a lane-scoped target. Reuse it instead of
+        // rewriting a host-global symlink outside the repo boundary.
+        return;
+      }
       throw new Error(
         `Claude project bridge conflict: ${hostProjectDir} already points to ${target}, expected ${localProjectDir}`,
       );
@@ -458,15 +493,95 @@ function buildClaudeRuntimeEnv(options) {
     return process.env;
   }
   if (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN) {
-    // API-key / token auth: credentials are env-sourced, not keychain-dependent.
-    // Safe to redirect Claude's project/session state to a repo-local dir.
-    const localStateDir = runtimeHomeDir(options);
-    mkdirSync(localStateDir, { recursive: true });
-    return { ...process.env, CLAUDE_CONFIG_DIR: localStateDir };
+    // Token auth: preserve the operator/runtime config path exactly. Redirecting
+    // CLAUDE_CONFIG_DIR can make Claude fall back to a different keychain hash.
+    return process.env;
   }
   // Keychain auth: cannot change CLAUDE_CONFIG_DIR without breaking the keychain
   // service name hash. Pass env through; --no-session-persistence limits writes.
   return process.env;
+}
+
+export function classifyClaudeAuthSource(env = process.env) {
+  if (env.CLAUDE_CONFIG_DIR) {
+    return {
+      source: 'operator_config_dir',
+      claudeConfigDir: env.CLAUDE_CONFIG_DIR,
+    };
+  }
+  if (env.ANTHROPIC_API_KEY || env.CLAUDE_CODE_OAUTH_TOKEN) {
+    return {
+      source: 'env_token',
+      claudeConfigDir: defaultClaudeConfigDir(env),
+    };
+  }
+  return {
+    source: 'keychain',
+    claudeConfigDir: defaultClaudeConfigDir(env),
+  };
+}
+
+function isClaudeLoginFailure(stderr = '') {
+  const text = String(stderr || '');
+  return /Not logged in/i.test(text) || /Please run \/login/i.test(text);
+}
+
+function buildClaudePreflightArgs(options) {
+  const args = [
+    CLAUDE_WRAPPER_PATH,
+    '--prompt', 'Reply with OK.',
+    '--working-dir', options.workingDir,
+  ];
+  args.push(...buildAIToolArgs(options.tool, options, {}));
+  args.push('--session-name', options.sessionName);
+  if (options.noSessionPersistence && toolSupportsNoSessionPersistence(options.tool)) {
+    args.push('--no-session-persistence', 'true');
+  }
+  args.push('--lifecycle', 'start');
+  if (options.sessionId) args.push('--session-id', options.sessionId);
+  return args;
+}
+
+export async function preflightClaudeLaneAuth(options, deps = {}) {
+  const env = buildClaudeRuntimeEnv(options);
+  const auth = classifyClaudeAuthSource(env);
+  const checkedAt = new Date().toISOString();
+  const runner = deps.preflightRunner || deps.runner || spawnClaudeWrapper;
+  const result = await runner(
+    buildClaudePreflightArgs(options),
+    options.guardrailRepo,
+    env,
+    {},
+  );
+  if (result.code === 0) {
+    return {
+      ok: true,
+      source: auth.source,
+      checkedAt,
+      reason: null,
+      message: null,
+    };
+  }
+  if (isClaudeLoginFailure(result.stderr)) {
+    return {
+      ok: false,
+      source: auth.source,
+      checkedAt,
+      reason: 'auth_preflight_failed',
+      message: `Claude auth preflight failed for resident lane (${auth.source}): ${String(result.stderr).trim()}`,
+      stderr: result.stderr,
+      exitCode: result.code,
+    };
+  }
+  return {
+    ok: false,
+    source: auth.source,
+    checkedAt,
+    reason: 'auth_probe_failed',
+    message: `Claude auth preflight probe failed before packet execution: ${String(result.stderr || `exit code ${result.code}`).trim()}`,
+    stderr: result.stderr,
+    exitCode: result.code,
+  };
 }
 
 async function spawnClaudeWrapper(args, cwd, env = process.env, hooks = {}) {
@@ -518,6 +633,9 @@ const selfPath = fileURLToPath(import.meta.url);
 
 const CLAUDE_LANE_ADAPTER = {
   adapterId: 'claude',
+  async preflightDaemon(options, deps = {}) {
+    return preflightClaudeLaneAuth(options, deps);
+  },
   buildHelperArgs(options, helperAuthFd) {
     const args = [
       selfPath,
@@ -648,7 +766,10 @@ export async function runLaneRequest(options, request, state, deps = {}) {
 
 export async function launchResidentLane(rawOptions, deps = {}) {
   const options = normalizeResidentLaneOptions(rawOptions);
-  return launchResidentLaneWithAdapter(options, CLAUDE_LANE_ADAPTER, deps);
+  const adapter = typeof deps.preflightDaemon === 'function'
+    ? { ...CLAUDE_LANE_ADAPTER, preflightDaemon: deps.preflightDaemon }
+    : CLAUDE_LANE_ADAPTER;
+  return launchResidentLaneWithAdapter(options, adapter, deps);
 }
 
 export function launchResidentLaneDaemonHelper(rawOptions) {
