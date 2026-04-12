@@ -32,6 +32,7 @@ import {
 
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_HEALTH_TIMEOUT_MS = 5 * 60 * 1000;
 
 export const residentLaneAdapterMetadata = {
   id: 'codex',
@@ -73,6 +74,7 @@ export function parseResidentLaneArgs(argv) {
     authFd: '',
     pollIntervalMs: '',
     idleTimeoutMs: '',
+    healthTimeoutMs: '',
     launchDaemonHelper: false,
     daemon: false,
   };
@@ -203,6 +205,10 @@ export function parseResidentLaneArgs(argv) {
         options.idleTimeoutMs = value;
         i += 1;
         break;
+      case '--health-timeout-ms':
+        options.healthTimeoutMs = value;
+        i += 1;
+        break;
       case '--launch-daemon-helper':
         options.launchDaemonHelper = true;
         break;
@@ -269,6 +275,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     authFd: parseInteger(rawOptions.authFd, null, 'auth_fd', 3),
     pollIntervalMs: parseInteger(rawOptions.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, 'poll_interval_ms', 50),
     idleTimeoutMs: parseInteger(rawOptions.idleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS, 'idle_timeout_ms', 1000),
+    healthTimeoutMs: parseInteger(rawOptions.healthTimeoutMs, DEFAULT_HEALTH_TIMEOUT_MS, 'health_timeout_ms', 1000),
     launchDaemonHelper: rawOptions.launchDaemonHelper === true,
     daemon: rawOptions.daemon === true,
     transportSummary: {
@@ -350,6 +357,7 @@ const CODEX_LANE_ADAPTER = {
       '--session-id', options.sessionId || '',
       '--poll-interval-ms', String(options.pollIntervalMs),
       '--idle-timeout-ms', String(options.idleTimeoutMs),
+      '--health-timeout-ms', String(options.healthTimeoutMs),
       '--model', options.model,
       '--profile', options.profile,
       '--sandbox', options.sandbox,
@@ -389,6 +397,7 @@ const CODEX_LANE_ADAPTER = {
       '--session-id', options.sessionId || '',
       '--poll-interval-ms', String(options.pollIntervalMs),
       '--idle-timeout-ms', String(options.idleTimeoutMs),
+      '--health-timeout-ms', String(options.healthTimeoutMs),
       '--model', options.model,
       '--profile', options.profile,
       '--sandbox', options.sandbox,

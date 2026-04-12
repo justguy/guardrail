@@ -273,9 +273,10 @@ AI execution recipes:
   - `lane start`: one-time host-runtime startup for a resident interactive lane.
   - `lane send`: later turn/message traffic through an existing resident lane.
   - `lane result`: read the stored output for the latest or named resident-lane request.
-  - `lane status`: inspect whether the lane is ready, busy, failed, expired, stale, or stopped before sending again.
+  - `lane status`: inspect whether the lane is ready, busy, stalled, failed, expired, stale, or stopped before sending again. `stalled` is a soft state: no meaningful activity for `healthTimeoutMs` (default 5 min) but the lane is still alive and will not be torn down until `idleTimeoutMs` (default 15 min).
   - `lane cleanup`: remove one failed/dead lane directly once diagnosis is complete.
   - `lane stop`: explicit teardown of the resident lane.
+  - `lane extend --id <id> [--idle-timeout-ms N] [--health-timeout-ms N] [--heartbeat]`: update a live lane's timeouts or push a bounded heartbeat. The running daemon observes the updated values on its next poll tick (via `control.json`) without restart, and a heartbeat clears a `stalled` state without faking a completed request.
 - Fast decision sequence for AI runtimes:
   - resolve the intended recipe source first; if Guardrail reports a duplicate-source collision, fix `cwd` or remove the duplicate source before doing anything else
   - prove whether the current shell/runtime can run the downstream CLI directly with the subprocess test

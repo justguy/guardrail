@@ -401,6 +401,7 @@ Commands:
   lane portfolio [flags]                Query the portfolio-wide resident-lane timeline
   lane logs [flags]                     Read the bounded resident lane log tail
   lane stop [flags]                     Stop a resident interactive lane
+  lane extend [flags]                   Extend a live lane: --idle-timeout-ms, --health-timeout-ms, --heartbeat
   lane cleanup [flags]                  Remove one resident lane's local artifacts
   lane batch [flags]                    Preview or apply stop/cleanup actions across filtered lanes
   lane list [flags]                     List resident lanes in this Guardrail repo
@@ -954,7 +955,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'chat', 'result', 'wait', 'status', 'inspect', 'history', 'portfolio', 'logs', 'stop', 'cleanup', 'batch', 'list', 'prune', 'adapters'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'chat', 'result', 'wait', 'status', 'inspect', 'history', 'portfolio', 'logs', 'stop', 'cleanup', 'batch', 'list', 'prune', 'adapters', 'extend'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -1008,6 +1009,8 @@ export function parseArgs(argv) {
       '--auth-fd': 'authFd',
       '--poll-interval-ms': 'pollIntervalMs',
       '--idle-timeout-ms': 'idleTimeoutMs',
+      '--health-timeout-ms': 'healthTimeoutMs',
+      '--heartbeat': { key: 'heartbeat', boolean: true },
       '--request-id': 'requestId',
       '--prompt': 'prompt',
       '--action': 'action',
@@ -1878,6 +1881,44 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     } else {
       console.log(`Lane stopped: ${laneOpts.laneId || laneOpts.laneDir}`);
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-extend') {
+    const { extendResidentLane, getResidentLaneStatus } = await import('./resident-lane-core.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane extend');
+      process.exit(1);
+    }
+    const updates = {
+      idleTimeoutMs: laneOpts.idleTimeoutMs,
+      healthTimeoutMs: laneOpts.healthTimeoutMs,
+      heartbeat: laneOpts.heartbeat === true,
+    };
+    let control;
+    try {
+      control = extendResidentLane(laneOpts.laneDir, updates);
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+    await appendLaneAuditEntry(laneOpts, 'lane_extend', {
+      status: 'success',
+      idle_timeout_ms: control.idleTimeoutMs ?? null,
+      health_timeout_ms: control.healthTimeoutMs ?? null,
+      heartbeat_at: control.heartbeatAt ?? null,
+    });
+    const status = getResidentLaneStatus(laneOpts);
+    const payload = { laneId: laneOpts.laneId, laneDir: laneOpts.laneDir, control, status: status?.status || null };
+    if (parsed.json) {
+      console.log(JSON.stringify(payload, null, 2));
+    } else {
+      console.log(`Lane extended: ${laneOpts.laneId || laneOpts.laneDir}`);
+      if (control.idleTimeoutMs != null) console.log(`  idleTimeoutMs:   ${control.idleTimeoutMs}`);
+      if (control.healthTimeoutMs != null) console.log(`  healthTimeoutMs: ${control.healthTimeoutMs}`);
+      if (control.heartbeatAt) console.log(`  heartbeatAt:     ${control.heartbeatAt}`);
     }
     process.exit(0);
   }

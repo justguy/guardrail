@@ -194,6 +194,7 @@ Minimum shape:
 
 - If the supervising environment has already approved the `node src/cli.js lane` command prefix, later lane operations inside that same boundary must reuse the approved prefix directly.
 - Do not reissue routine `lane send`, `lane status`, `lane inspect`, `lane wait`, or `lane result` calls as new escalated requests once that prefix is already approved.
+- When the next run already knows it needs multiple prompt files on the same lane, prefer one `node src/cli.js lane run-sequence ...` invocation instead of hand-driving repeated `send` / `wait` calls from the supervising shell.
 - Ask for a fresh approval only when the boundary truly changes:
   - widened scope
   - different runtime/tool/model/system prompt/budget in an approval-bound way
