@@ -42,7 +42,11 @@ import {
   validateLaneRequest,
   waitForResidentLaneBootstrap,
 } from '../src/claude-resident-lane.js';
-import { runResidentLaneDaemon } from '../src/resident-lane-core.js';
+import {
+  runResidentLaneDaemon,
+  revokeResidentLane,
+  killResidentLane,
+} from '../src/resident-lane-core.js';
 // Exercise the generic lane entrypoint, which now dispatches to Claude/Codex adapters.
 import {
   listResidentLaneAdapters,
@@ -89,6 +93,12 @@ function makeFakeLaunchHelper(daemonPid, options = {}) {
     child.emit('close', options.closeCode ?? 0);
   }, 0);
   return child;
+}
+
+function getFlagValue(args, flag) {
+  const idx = args.indexOf(flag);
+  if (idx < 0) return null;
+  return args[idx + 1] ?? null;
 }
 
 describe('Claude resident lane', () => {
@@ -221,15 +231,39 @@ describe('Claude resident lane', () => {
 
     assert.equal(first.lifecycle, 'start');
     assert.equal(second.lifecycle, 'continue');
+    assert.equal(first.runtimeSessionId, options.sessionId);
+    assert.notEqual(second.runtimeSessionId, first.runtimeSessionId);
+    assert.match(
+      second.runtimeSessionId,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
     assert.equal(first.stdout, '12\n');
+    assert.ok(calls[0].args[0].endsWith('src/claude-prompt-wrapper.js'));
     assert.ok(calls[0].args.includes('--lifecycle'));
     assert.ok(calls[0].args.includes('start'));
     assert.ok(calls[1].args.includes('continue'));
+    assert.equal(getFlagValue(calls[0].args, '--session-id'), first.runtimeSessionId);
+    assert.equal(getFlagValue(calls[1].args, '--session-id'), second.runtimeSessionId);
     assert.ok(calls[0].args.includes('--session-name'));
     assert.ok(calls[0].args.includes('math-live-session'));
     assert.equal(typeof calls[0].hooks, 'object');
     assert.equal(calls[0].hooks.onProgress, undefined);
     assert.equal(calls[0].hooks.onStderrLine, undefined);
+  });
+
+  it('generates a UUID session id for Claude lanes when none is provided', () => {
+    const dir = tmpLaneDir();
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      sessionName: 'math-live-session',
+    }, dir);
+
+    assert.match(
+      options.sessionId,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
   });
 
   it('passes Guardrail progress file flags to the Claude wrapper', async () => {
@@ -348,7 +382,7 @@ describe('Claude resident lane', () => {
 
     let seenEnv = null;
     let seenApiKey = null;
-    const runner = async (_args, _cwd, env) => {
+    const runner = async (_options, env) => {
       seenEnv = env;
       seenApiKey = env.ANTHROPIC_API_KEY;
       return { code: 0, stdout: 'ok\n', stderr: '' };
@@ -398,7 +432,7 @@ describe('Claude resident lane', () => {
     delete process.env.CLAUDE_CONFIG_DIR;
 
     let seenEnv = null;
-    const runner = async (_args, _cwd, env) => {
+    const runner = async (_options, env) => {
       seenEnv = env;
       return { code: 0, stdout: 'ok\n', stderr: '' };
     };
@@ -515,6 +549,43 @@ describe('Claude resident lane', () => {
 
     assert.equal(result.ok, false);
     assert.equal(result.source, 'keychain');
+    assert.equal(result.reason, 'auth_preflight_failed');
+    assert.match(result.message, /Claude auth preflight failed/);
+  });
+
+  it('auth preflight: treats logged-out auth status output as auth_preflight_failed', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'math-live',
+      sessionName: 'math-live-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+
+    const savedHome = process.env.HOME;
+    process.env.HOME = homeDir;
+
+    let result;
+    try {
+      result = await preflightClaudeLaneAuth(options, {
+        preflightRunner: async () => ({
+          code: 1,
+          stdout: '{\n  "loggedIn": false,\n  "authMethod": "none"\n}\n',
+          stderr: '',
+        }),
+      });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+    }
+
+    assert.equal(result.ok, false);
     assert.equal(result.reason, 'auth_preflight_failed');
     assert.match(result.message, /Claude auth preflight failed/);
   });
@@ -2095,6 +2166,42 @@ describe('Claude resident lane', () => {
     assert.equal(result.resultPath, resultPath);
   });
 
+  it('rehydrates stale lane status from a newer completed result artifact', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    mkdirSync(laneDir, { recursive: true });
+    const paths = lanePaths(laneDir);
+    const resultPath = laneResultPath(laneDir, 'req-5');
+    mkdirSync(paths.resultsDir, { recursive: true });
+    writeFileSync(resultPath, JSON.stringify({
+      requestId: 'req-5',
+      ok: true,
+      exitCode: 0,
+      stdout: 'done\n',
+      completedAt: '2026-04-12T07:16:10.727Z',
+    }), 'utf8');
+    writeFileSync(paths.statePath, JSON.stringify({
+      pid: process.pid,
+      status: 'stalled',
+      laneId: 'math',
+      sessionName: 'math-live-session',
+      lastRequestId: 'req-5',
+      currentRequestId: 'req-5',
+      currentRequestStartedAt: '2026-04-12T07:01:21.393Z',
+      lastActivityAt: '2026-04-12T07:01:21.517Z',
+      currentAiPhase: 'started',
+      currentAiMessage: 'Resident lane request accepted.',
+    }), 'utf8');
+
+    const status = getResidentLaneStatus({ laneDir, guardrailRepo: dir, laneId: 'math' });
+    assert.equal(status.status, 'ready');
+    assert.equal(status.currentRequestId, null);
+    assert.equal(status.lastCompletedRequestId, 'req-5');
+    assert.equal(status.lastResultPath, resultPath);
+    assert.equal(status.lastExitCode, 0);
+    assert.equal(status.currentAiPhase, null);
+  });
+
   it('returns pending resident lane results while a request is still running', () => {
     const dir = tmpLaneDir();
     const laneDir = join(dir, '.guardrail', 'lanes', 'math');
@@ -2179,5 +2286,113 @@ describe('Claude resident lane', () => {
     assert.equal(status.status, 'failed');
     assert.equal(status.failureStage, 'post_start');
     assert.match(status.failureReason, /first request/i);
+  });
+});
+
+// ===========================================================================
+// Lane Emergency Controls (P0h)
+// ===========================================================================
+
+describe('Lane emergency controls: revokeResidentLane', () => {
+  it('writes status=revoked to state file and creates REVOKED sentinel', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'test-lane');
+    mkdirSync(laneDir, { recursive: true });
+    const paths = lanePaths(laneDir);
+    writeFileSync(paths.statePath, JSON.stringify({
+      pid: 99999,
+      status: 'ready',
+      laneId: 'test-lane',
+      bootNonce: 'abc',
+      identityNonce: 'def',
+      createdAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const result = revokeResidentLane({ laneDir, guardrailRepo: dir, actor: 'ops', reason: 'test-revoke' });
+    assert.equal(result.revoked, true);
+
+    const state = JSON.parse(readFileSync(paths.statePath, 'utf8'));
+    assert.equal(state.status, 'revoked');
+    assert.ok(existsSync(join(laneDir, 'REVOKED')));
+  });
+
+  it('revokeResidentLane sentinel prevents runResidentLaneDaemon from starting', async () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'blocked-lane');
+    mkdirSync(laneDir, { recursive: true });
+
+    // Write sentinel manually to simulate a prior revocation
+    writeFileSync(join(laneDir, 'REVOKED'), JSON.stringify({ revokedAt: new Date().toISOString() }) + '\n', 'utf8');
+
+    const options = {
+      adapterId: 'test',
+      laneDir,
+      keyPath: '',
+      guardrailRepo: dir,
+      workingDir: dir,
+      laneId: 'blocked-lane',
+      scopeType: 'none',
+      scopeMode: 'warn',
+      scopePaths: [],
+      resourceMode: 'warn',
+      resources: [],
+      sessionName: '',
+      sessionId: '',
+      noSessionPersistence: false,
+      authFd: null,
+      bootNonce: '',
+      identityNonce: '',
+    };
+
+    await assert.rejects(
+      () => runResidentLaneDaemon(options, null),
+      /revoked/i,
+    );
+  });
+});
+
+describe('Lane emergency controls: killResidentLane', () => {
+  it('writes status=revoked + failureStage=killed and creates REVOKED sentinel', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'kill-lane');
+    mkdirSync(laneDir, { recursive: true });
+    const paths = lanePaths(laneDir);
+    writeFileSync(paths.statePath, JSON.stringify({
+      pid: 99998,
+      status: 'ready',
+      laneId: 'kill-lane',
+      bootNonce: 'abc',
+      identityNonce: 'def',
+      createdAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const result = killResidentLane({ laneDir, guardrailRepo: dir, actor: 'admin', reason: 'break-glass-test' });
+    assert.equal(result.killed, true);
+    assert.equal(result.revoked, true);
+
+    const state = JSON.parse(readFileSync(paths.statePath, 'utf8'));
+    assert.equal(state.status, 'revoked');
+    assert.equal(state.failureStage, 'killed');
+    assert.ok(existsSync(join(laneDir, 'REVOKED')));
+  });
+
+  it('kill is distinct from stop — killed state is not "stopped"', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'kill-distinct');
+    mkdirSync(laneDir, { recursive: true });
+    const paths = lanePaths(laneDir);
+    writeFileSync(paths.statePath, JSON.stringify({
+      pid: 99997,
+      status: 'ready',
+      laneId: 'kill-distinct',
+      bootNonce: 'x',
+      identityNonce: 'y',
+      createdAt: new Date().toISOString(),
+    }), 'utf8');
+
+    killResidentLane({ laneDir, guardrailRepo: dir });
+    const state = JSON.parse(readFileSync(paths.statePath, 'utf8'));
+    assert.notEqual(state.status, 'stopped');
+    assert.equal(state.status, 'revoked');
   });
 });

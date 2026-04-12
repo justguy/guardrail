@@ -67,6 +67,7 @@ export const INCIDENT_EVENTS = new Set([
   'incident_detected', 'abnormal_activity',
   'audit_chain_broken', 'concurrent_blocked',
   'incident_escalated', 'incident_halted',
+  'lane_revoked', 'lane_emergency_stop', 'session_revoked',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -141,4 +142,7 @@ export const INCIDENT_TRIGGERS = new Set([
   'resource_exceeded',
   'audit_chain_broken',
   'concurrent_blocked',
+  'lane_revoked',
+  'lane_emergency_stop',
+  'session_revoked',
 ]);

@@ -19,6 +19,8 @@ export {
   signLaneRequest,
   stableRepoOwnerId,
   stopResidentLane,
+  revokeResidentLane,
+  killResidentLane,
   trackLaneRequestId,
   validateLaneRequest,
   waitForResidentLaneResult,

@@ -28,7 +28,10 @@ const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_HEALTH_TIMEOUT_MS = 5 * 60 * 1000;
 const STARTUP_POLL_INTERVAL_MS = 25;
-const STARTUP_TIMEOUT_MS = 2_000;
+// Host-runtime auth preflight can exceed a couple seconds, especially in
+// keychain-backed Claude environments. Keep the default long enough for the
+// daemon to finish preflight before launch is marked failed.
+const STARTUP_TIMEOUT_MS = 30_000;
 const STARTUP_SETTLE_MS = 150;
 const POST_START_GRACE_MS = 750;
 const STARTUP_LOCK_TTL_MS = 15_000;
@@ -393,6 +396,73 @@ function readHostLaneRegistryEntries(rawOptions = {}) {
     });
   }
   return { registryDir, entries };
+}
+
+function hydrateStateFromResultArtifact(laneDir, paths, state) {
+  if (!state) return state;
+  const candidateRequestIds = [
+    state.currentRequestId,
+    state.lastCompletedRequestId,
+    state.lastRequestId,
+  ].filter(Boolean);
+
+  let result = null;
+  let resultPath = null;
+  for (const requestId of candidateRequestIds) {
+    const candidatePath = laneResultPath(laneDir, requestId);
+    const parsed = readJson(candidatePath, null);
+    if (parsed) {
+      result = parsed;
+      resultPath = candidatePath;
+      break;
+    }
+  }
+
+  if (!result || !resultPath) return state;
+
+  const completedAt = result.completedAt || result.startedAt || state.lastCompletedAt || state.lastActivityAt || null;
+  const stateLastActivityMs = state.lastActivityAt ? Date.parse(state.lastActivityAt) : Number.NaN;
+  const completedAtMs = completedAt ? Date.parse(completedAt) : Number.NaN;
+  const resultIsNewer = Number.isFinite(completedAtMs)
+    && (!Number.isFinite(stateLastActivityMs) || completedAtMs >= stateLastActivityMs);
+  const shouldHydrate = resultIsNewer
+    || state.status === 'busy'
+    || state.status === 'stalled'
+    || state.currentRequestId === result.requestId;
+
+  if (!shouldHydrate) return state;
+
+  return {
+    ...state,
+    status: result.ok ? 'ready' : 'failed',
+    lastRequestId: result.requestId || state.lastRequestId || null,
+    currentRequestId: null,
+    currentRequestStartedAt: null,
+    lastCompletedRequestId: result.requestId || state.lastCompletedRequestId || null,
+    lastCompletedAt: completedAt,
+    lastExitCode: result.exitCode ?? state.lastExitCode ?? null,
+    lastResultPath: resultPath,
+    lastActivityAt: completedAt || state.lastActivityAt || null,
+    currentAiState: null,
+    currentAiEvent: null,
+    currentAiPhase: null,
+    currentAiMessage: null,
+    currentAiTimestamp: null,
+    failureReason: result.ok ? null : (state.failureReason || summarizeFailureReasonFromResult(result)),
+    failureStage: result.ok ? null : (state.failureStage || 'runtime'),
+  };
+}
+
+function summarizeFailureReasonFromResult(result) {
+  const stderr = String(result?.stderr || '').trim();
+  if (stderr) {
+    const firstLine = stderr.split('\n').map((line) => line.trim()).filter(Boolean)[0];
+    if (firstLine) return firstLine;
+  }
+  if (typeof result?.exitCode === 'number') {
+    return `Resident lane request exited with code ${result.exitCode}.`;
+  }
+  return 'Resident lane request failed.';
 }
 
 function stableLaneClaimId(laneId) {
@@ -1572,7 +1642,16 @@ function collectResidentLaneStatusBase(rawOptions) {
   const laneDir = resolve(guardrailRepo, rawOptions.laneDir);
   const keyPath = rawOptions.keyPath ? resolve(process.cwd(), rawOptions.keyPath) : '';
   const paths = lanePaths(laneDir);
-  const state = readJson(paths.statePath, null);
+  let state = readJson(paths.statePath, null);
+  const hydratedState = hydrateStateFromResultArtifact(laneDir, paths, state);
+  if (hydratedState !== state) {
+    state = hydratedState;
+    try {
+      writeJson(paths.statePath, state);
+    } catch {
+      // Best effort only.
+    }
+  }
   const identity = readJson(paths.identityPath, null);
   const effectiveKeyPath = identity?.keyPath || state?.keyPath || keyPath || '';
   const keyPresent = !!(effectiveKeyPath && existsSync(effectiveKeyPath));
@@ -1975,12 +2054,13 @@ export async function waitForResidentLaneResult(rawOptions = {}) {
     if (result.status === 'completed') return result;
 
     const status = getResidentLaneStatus(rawOptions);
+    const requestedId = rawOptions.requestId || status.currentRequestId || status.lastRequestId || null;
     if (status.status === 'failed') {
       return {
         status: 'failed',
         reason: 'lane_failed',
         message: 'Resident lane failed before the requested result was produced.',
-        requestId: rawOptions.requestId || status.currentRequestId || status.lastRequestId || null,
+        requestId: requestedId,
         failureReason: status.failureReason || null,
         failureStage: status.failureStage || null,
         logPath: status.logPath || null,
@@ -1991,7 +2071,21 @@ export async function waitForResidentLaneResult(rawOptions = {}) {
         status: 'missing',
         reason: 'lane_unavailable',
         message: 'Resident lane is no longer available.',
-        requestId: rawOptions.requestId || status.currentRequestId || status.lastRequestId || null,
+        requestId: requestedId,
+      };
+    }
+    if (
+      result.status === 'missing'
+      && requestedId
+      && status.status === 'ready'
+      && status.currentRequestId !== requestedId
+    ) {
+      return {
+        status: 'missing',
+        reason: 'result_not_found',
+        message: 'The resident lane returned to ready state without storing a result for the requested id.',
+        requestId: requestedId,
+        resultPath: result.resultPath || null,
       };
     }
 
@@ -2000,7 +2094,7 @@ export async function waitForResidentLaneResult(rawOptions = {}) {
         status: 'pending',
         reason: 'request_still_running',
         message: 'Resident lane request is still running.',
-        requestId: rawOptions.requestId || status.currentRequestId || status.lastRequestId || null,
+        requestId: requestedId,
         currentRequestStartedAt: status.currentRequestStartedAt || null,
         resultPath: result.resultPath || null,
       };
@@ -2046,6 +2140,15 @@ function cleanupLaneArtifacts(options, status, extra = {}) {
 export async function runResidentLaneDaemon(options, adapter, deps = {}) {
   ensureLaneLayout(options.laneDir);
   const paths = lanePaths(options.laneDir);
+
+  // Revocation sentinel check — must run before any state is written.
+  // A revoked lane must never restart, regardless of ordinary cleanup or
+  // re-launch attempts.
+  if (existsSync(join(options.laneDir, 'REVOKED'))) {
+    throw createLaneBootError('Lane has been revoked and cannot be restarted.', {
+      failureStage: 'revocation_check',
+    });
+  }
 
   let state = buildState(options, process.pid, false, { status: 'bootstrapping' });
   const authSecret = options.authFd ? readSecretFromFd(options.authFd) : '';
@@ -2719,5 +2822,138 @@ export function stopResidentLane(rawOptions) {
     statePath: paths.statePath,
     keyPath: options.keyPath || null,
     stopped: true,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Emergency controls — revoke and kill (break-glass)
+// ---------------------------------------------------------------------------
+//
+// These are intentionally distinct from stopResidentLane:
+//   stop  → SIGTERM, state='stopped', no sentinel, restartable
+//   revoke → SIGTERM, state='revoked', REVOKED sentinel written, not restartable
+//   kill  → SIGKILL (break-glass), state='revoked'+'killed', REVOKED sentinel, not restartable
+//
+// Both revoke and kill write a REVOKED sentinel file inside the lane dir.
+// runResidentLaneDaemon checks this sentinel before bootstrap; any restart
+// attempt fails closed with failureStage='revocation_check'.
+
+function writeRevocationSentinel(laneDir) {
+  const sentinelPath = join(laneDir, 'REVOKED');
+  writeFileSync(sentinelPath, JSON.stringify({
+    revokedAt: new Date().toISOString(),
+  }) + '\n', 'utf8');
+}
+
+function resolveEmergencyOptions(rawOptions) {
+  if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
+  const guardrailRepo = rawOptions.guardrailRepo
+    ? resolve(process.cwd(), rawOptions.guardrailRepo)
+    : process.cwd();
+  const laneDir = resolve(guardrailRepo, rawOptions.laneDir);
+  return {
+    adapterId: rawOptions.adapterId || 'unknown',
+    laneDir,
+    keyPath: rawOptions.keyPath ? resolve(process.cwd(), rawOptions.keyPath) : '',
+    guardrailRepo,
+    workingDir: rawOptions.workingDir ? resolve(guardrailRepo, rawOptions.workingDir) : guardrailRepo,
+    laneId: rawOptions.laneId || '',
+    scopeType: 'none',
+    scopeMode: 'warn',
+    scopePaths: [],
+    resourceMode: 'warn',
+    resources: [],
+    sessionName: rawOptions.sessionName || rawOptions.laneId || '',
+    sessionId: rawOptions.sessionId || '',
+    noSessionPersistence: false,
+    authFd: null,
+    actor: rawOptions.actor || 'operator',
+    reason: rawOptions.reason || '',
+  };
+}
+
+/**
+ * Permanently revoke a resident lane. Sends SIGTERM to any running process,
+ * writes state='revoked', and writes a REVOKED sentinel that prevents restart.
+ * Distinct from stopResidentLane: revoked lanes cannot be restarted.
+ */
+export function revokeResidentLane(rawOptions) {
+  const options = resolveEmergencyOptions(rawOptions);
+  const paths = lanePaths(options.laneDir);
+  const state = readJson(paths.statePath, null);
+  options.bootNonce = state?.bootNonce ?? rawOptions.bootNonce ?? '';
+  options.identityNonce = state?.identityNonce ?? rawOptions.identityNonce ?? '';
+
+  if (state?.pid && isPidAlive(state.pid)) {
+    try { process.kill(state.pid, 'SIGTERM'); } catch { /* process already gone */ }
+  }
+
+  cleanupLaneArtifacts(options, 'revoked', {
+    lastRequestId: state?.lastRequestId || null,
+    currentRequestId: state?.currentRequestId || null,
+    currentRequestStartedAt: state?.currentRequestStartedAt || null,
+    lastCompletedRequestId: state?.lastCompletedRequestId || null,
+    lastCompletedAt: state?.lastCompletedAt || null,
+    lastExitCode: state?.lastExitCode ?? null,
+    lastResultPath: state?.lastResultPath || null,
+    createdAt: state?.createdAt,
+    failureReason: options.reason || null,
+    failureStage: 'revoked',
+  });
+
+  writeRevocationSentinel(options.laneDir);
+
+  return {
+    adapterId: state?.adapterId ?? options.adapterId,
+    tool: state?.tool ?? options.adapterId,
+    laneDir: options.laneDir,
+    statePath: paths.statePath,
+    revoked: true,
+    actor: options.actor,
+    reason: options.reason || null,
+  };
+}
+
+/**
+ * Break-glass emergency stop. Sends SIGKILL (not SIGTERM) to immediately
+ * terminate the process without graceful shutdown. Writes state='revoked' +
+ * failureStage='killed', writes REVOKED sentinel. Use only when normal
+ * revocation is insufficient (e.g., process is unresponsive to SIGTERM).
+ */
+export function killResidentLane(rawOptions) {
+  const options = resolveEmergencyOptions(rawOptions);
+  const paths = lanePaths(options.laneDir);
+  const state = readJson(paths.statePath, null);
+  options.bootNonce = state?.bootNonce ?? rawOptions.bootNonce ?? '';
+  options.identityNonce = state?.identityNonce ?? rawOptions.identityNonce ?? '';
+
+  if (state?.pid && isPidAlive(state.pid)) {
+    try { process.kill(state.pid, 'SIGKILL'); } catch { /* process already gone */ }
+  }
+
+  cleanupLaneArtifacts(options, 'revoked', {
+    lastRequestId: state?.lastRequestId || null,
+    currentRequestId: state?.currentRequestId || null,
+    currentRequestStartedAt: state?.currentRequestStartedAt || null,
+    lastCompletedRequestId: state?.lastCompletedRequestId || null,
+    lastCompletedAt: state?.lastCompletedAt || null,
+    lastExitCode: state?.lastExitCode ?? null,
+    lastResultPath: state?.lastResultPath || null,
+    createdAt: state?.createdAt,
+    failureReason: options.reason || 'break-glass emergency kill',
+    failureStage: 'killed',
+  });
+
+  writeRevocationSentinel(options.laneDir);
+
+  return {
+    adapterId: state?.adapterId ?? options.adapterId,
+    tool: state?.tool ?? options.adapterId,
+    laneDir: options.laneDir,
+    statePath: paths.statePath,
+    killed: true,
+    revoked: true,
+    actor: options.actor,
+    reason: options.reason || null,
   };
 }

@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { parseAiProgressLine } from './progress-events.js';
 import {
   buildAIToolArgs,
@@ -42,7 +43,7 @@ const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_HEALTH_TIMEOUT_MS = 5 * 60 * 1000;
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
-const CLAUDE_WRAPPER_PATH = resolve(MODULE_DIR, 'claude-exec-wrapper.js');
+const CLAUDE_WRAPPER_PATH = resolve(MODULE_DIR, 'claude-prompt-wrapper.js');
 
 export const residentLaneAdapterMetadata = {
   id: 'claude',
@@ -338,7 +339,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     identityNonce: rawOptions.identityNonce || '',
     bootNonce: rawOptions.bootNonce || '',
     sessionName: rawOptions.sessionName,
-    sessionId: rawOptions.sessionId || '',
+    sessionId: rawOptions.sessionId || randomUUID(),
     noSessionPersistence: (rawOptions.noSessionPersistence != null && rawOptions.noSessionPersistence !== '') ? shellTruthy(rawOptions.noSessionPersistence) : true,
     transportSummary: {
       mode: 'claude-cli',
@@ -356,7 +357,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
   };
 }
 
-function buildWrapperArgs(options, request, lifecycle) {
+function buildWrapperArgs(options, request, lifecycle, runtimeSessionId = options.sessionId) {
   const args = [CLAUDE_WRAPPER_PATH, '--prompt', request.prompt];
   if (options.inputFiles.length > 0) args.push('--input-files', options.inputFiles.join(','));
   if (options.model) args.push('--model', options.model);
@@ -375,7 +376,7 @@ function buildWrapperArgs(options, request, lifecycle) {
     args.push('--no-session-persistence', 'true');
   }
   args.push('--lifecycle', lifecycle);
-  if (options.sessionId) args.push('--session-id', options.sessionId);
+  if (runtimeSessionId) args.push('--session-id', runtimeSessionId);
   return args;
 }
 
@@ -526,33 +527,17 @@ function isClaudeLoginFailure(stderr = '') {
   return /Not logged in/i.test(text) || /Please run \/login/i.test(text);
 }
 
-function buildClaudePreflightArgs(options) {
-  const args = [
-    CLAUDE_WRAPPER_PATH,
-    '--prompt', 'Reply with OK.',
-    '--working-dir', options.workingDir,
-  ];
-  args.push(...buildAIToolArgs(options.tool, options, {}));
-  args.push('--session-name', options.sessionName);
-  if (options.noSessionPersistence && toolSupportsNoSessionPersistence(options.tool)) {
-    args.push('--no-session-persistence', 'true');
-  }
-  args.push('--lifecycle', 'start');
-  if (options.sessionId) args.push('--session-id', options.sessionId);
-  return args;
+function isClaudeLoggedOutAuthStatus(stdout = '', stderr = '') {
+  const text = `${String(stdout || '')}\n${String(stderr || '')}`;
+  return /"loggedIn"\s*:\s*false/i.test(text) || /"authMethod"\s*:\s*"none"/i.test(text);
 }
 
 export async function preflightClaudeLaneAuth(options, deps = {}) {
   const env = buildClaudeRuntimeEnv(options);
   const auth = classifyClaudeAuthSource(env);
   const checkedAt = new Date().toISOString();
-  const runner = deps.preflightRunner || deps.runner || spawnClaudeWrapper;
-  const result = await runner(
-    buildClaudePreflightArgs(options),
-    options.guardrailRepo,
-    env,
-    {},
-  );
+  const runner = deps.preflightRunner || spawnClaudeAuthStatus;
+  const result = await runner(options, env, deps);
   if (result.code === 0) {
     return {
       ok: true,
@@ -562,13 +547,13 @@ export async function preflightClaudeLaneAuth(options, deps = {}) {
       message: null,
     };
   }
-  if (isClaudeLoginFailure(result.stderr)) {
+  if (isClaudeLoginFailure(result.stderr) || isClaudeLoggedOutAuthStatus(result.stdout, result.stderr)) {
     return {
       ok: false,
       source: auth.source,
       checkedAt,
       reason: 'auth_preflight_failed',
-      message: `Claude auth preflight failed for resident lane (${auth.source}): ${String(result.stderr).trim()}`,
+      message: `Claude auth preflight failed for resident lane (${auth.source}): ${String(result.stderr || result.stdout).trim()}`,
       stderr: result.stderr,
       exitCode: result.code,
     };
@@ -582,6 +567,32 @@ export async function preflightClaudeLaneAuth(options, deps = {}) {
     stderr: result.stderr,
     exitCode: result.code,
   };
+}
+
+async function spawnClaudeAuthStatus(options, env = process.env) {
+  return await new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn('claude', ['auth', 'status'], {
+      cwd: options.guardrailRepo || options.workingDir || process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', rejectPromise);
+    child.on('close', (code, signal) => {
+      if (signal) {
+        resolvePromise({ code: 1, stdout, stderr: `${stderr}\nclaude auth status exited on signal ${signal}`.trim() });
+        return;
+      }
+      resolvePromise({ code: code ?? 1, stdout, stderr });
+    });
+  });
 }
 
 async function spawnClaudeWrapper(args, cwd, env = process.env, hooks = {}) {
@@ -735,10 +746,11 @@ const CLAUDE_LANE_ADAPTER = {
   async runRequest(options, request, state, deps = {}) {
     const runner = deps.runner || spawnClaudeWrapper;
     const lifecycle = state.startedConversation ? 'continue' : 'start';
+    const runtimeSessionId = state.startedConversation ? randomUUID() : options.sessionId;
     const startedAt = new Date().toISOString();
     ensureClaudeProjectBridge(options);
     const result = await runner(
-      buildWrapperArgs(options, request, lifecycle),
+      buildWrapperArgs(options, request, lifecycle, runtimeSessionId),
       options.guardrailRepo,
       buildClaudeRuntimeEnv(options),
       {
@@ -750,6 +762,7 @@ const CLAUDE_LANE_ADAPTER = {
       requestId: request.id,
       prompt: request.prompt,
       lifecycle,
+      runtimeSessionId,
       ok: result.code === 0,
       exitCode: result.code,
       stdout: result.stdout,

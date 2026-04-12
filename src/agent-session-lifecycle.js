@@ -2,6 +2,7 @@ import { pretty } from './shared.js';
 import {
   VALID_SESSION_LIFECYCLES,
   compareSessionContracts,
+  isSessionRevoked,
 } from './agent-session.js';
 
 // ---------------------------------------------------------------------------
@@ -26,6 +27,17 @@ export function evaluateSessionLifecycle(candidate, approved, lifecycle) {
       ok: false,
       code: 'session_missing',
       reason: 'session contract candidate is missing',
+    };
+  }
+
+  // Revocation is checked against the on-disk approved contract before any
+  // lifecycle evaluation. A revoked contract blocks all operations — distinct
+  // from session_missing (no contract) and session_drift (wrong identity).
+  if (isSessionRevoked(approved)) {
+    return {
+      ok: false,
+      code: 'session_revoked',
+      reason: `session has been revoked${approved.revokedBy ? ` by ${approved.revokedBy}` : ''}${approved.revocationReason ? `: ${approved.revocationReason}` : ''}`,
     };
   }
 

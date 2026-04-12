@@ -15,7 +15,22 @@ const POST_PASTE_SUBMIT_SEQUENCE = '\r\r';
 const READY_MARKER_TIMEOUT_MS = 15000;
 const EXIT_GRACE_MS = 5000;
 const HARD_TIMEOUT_MS = 5 * 60 * 1000;
-const EXPECT_INTERACTIVE_SCRIPT = String.raw`
+export const EXPECT_INTERACTIVE_SCRIPT = String.raw`
+proc append_hex_log {file_path label text} {
+  if {$file_path eq ""} {
+    return
+  }
+  binary scan $text H* hex
+  set f [open $file_path a]
+  puts $f "$label $hex"
+  close $f
+}
+
+proc send_logged {file_path label text} {
+  append_hex_log $file_path $label $text
+  send -- $text
+}
+
 proc maybe_send_control {control_file} {
   if {$control_file eq ""} {
     return
@@ -56,10 +71,37 @@ proc ready_beacon_seen {text} {
   return 0
 }
 
+proc turn_completion_seen {text} {
+  set cleaned [strip_ansi $text]
+  if {[string first "Claude is waiting for your input" $cleaned] >= 0} {
+    return 1
+  }
+  return 0
+}
+
+proc assistant_output_seen {text} {
+  set cleaned [strip_ansi $text]
+  if {[regexp {(^|\n)[[:space:]]*[⏺●•]\s+\S+} $cleaned]} {
+    return 1
+  }
+  return 0
+}
+
+proc send_bracketed_paste {log_file text} {
+  send_logged $log_file "stdin" "\033\[200~"
+  send_logged $log_file "stdin" $text
+  send_logged $log_file "stdin" "\033\[201~"
+}
+
 set prompt_file $env(GUARDRAIL_PROMPT_FILE)
 set prompt_handle [open $prompt_file r]
 set prompt_input [read $prompt_handle]
 close $prompt_handle
+if {[info exists env(GUARDRAIL_PTY_SEND_HEX_LOG)]} {
+  set send_hex_log $env(GUARDRAIL_PTY_SEND_HEX_LOG)
+} else {
+  set send_hex_log ""
+}
 set control_file $env(GUARDRAIL_CONTROL_FILE)
 set startup_delay_ms $env(GUARDRAIL_STARTUP_PROMPT_DELAY_MS)
 if {$startup_delay_ms eq ""} {
@@ -69,8 +111,12 @@ set submit_delay_ms $env(GUARDRAIL_SUBMIT_DELAY_MS)
 if {$submit_delay_ms eq ""} {
   set submit_delay_ms 300
 }
-set submit_sequence $env(GUARDRAIL_SUBMIT_SEQUENCE)
-if {$submit_sequence eq ""} {
+if {[info exists env(GUARDRAIL_SUBMIT_SEQUENCE)]} {
+  set submit_sequence $env(GUARDRAIL_SUBMIT_SEQUENCE)
+} else {
+  set submit_sequence ""
+}
+if {![info exists env(GUARDRAIL_SUBMIT_SEQUENCE)]} {
   set submit_sequence "\r\r"
 }
 if {[info exists env(GUARDRAIL_READY_TIMEOUT_MS)]} {
@@ -83,6 +129,9 @@ if {$ready_timeout_ms eq ""} {
 }
 set prompt_sent 0
 set startup_buffer ""
+set recent_buffer ""
+set assistant_response_seen 0
+set post_submit_bytes 0
 set ready_deadline [expr {[clock milliseconds] + $ready_timeout_ms}]
 log_user 1
 set timeout 1
@@ -91,13 +140,35 @@ while {1} {
   maybe_send_control $control_file
   expect {
     -re {.+} {
-      append startup_buffer $expect_out(0,string)
+      set chunk $expect_out(0,string)
+      append startup_buffer $chunk
       if {!$prompt_sent && [ready_beacon_seen $startup_buffer]} {
         after $startup_delay_ms
-        send -- $prompt_input
+        send_bracketed_paste $send_hex_log $prompt_input
         after $submit_delay_ms
-        send -- $submit_sequence
+        send_logged $send_hex_log "stdin" $submit_sequence
         set prompt_sent 1
+        set startup_buffer ""
+        set recent_buffer ""
+        set assistant_response_seen 0
+        set post_submit_bytes 0
+        exp_continue
+      }
+      if {$prompt_sent} {
+        append recent_buffer $chunk
+        if {[string length $recent_buffer] > 12000} {
+          set recent_buffer [string range $recent_buffer end-11999 end]
+        }
+        incr post_submit_bytes [string length $chunk]
+        if {!$assistant_response_seen && [assistant_output_seen $recent_buffer]} {
+          set assistant_response_seen 1
+        }
+        if {[turn_completion_seen $recent_buffer]} {
+          exit 0
+        }
+        if {$assistant_response_seen && [ready_beacon_seen $recent_buffer]} {
+          exit 0
+        }
       }
       exp_continue
     }
@@ -414,6 +485,10 @@ export function resolveInteractiveSubmitSequence(env = process.env) {
   return env.GUARDRAIL_SUBMIT_SEQUENCE_OVERRIDE ?? POST_PASTE_SUBMIT_SEQUENCE;
 }
 
+export function resolveInteractiveSubmitDelayMs(env = process.env) {
+  return env.GUARDRAIL_SUBMIT_DELAY_MS_OVERRIDE ?? String(POST_PASTE_SUBMIT_DELAY_MS);
+}
+
 function reportArtifactRequestsExit(reportArtifact) {
   if (!reportArtifact || !existsSync(reportArtifact)) return false;
   try {
@@ -459,7 +534,9 @@ function normalizeOptions(rawOptions) {
     heartbeatSeconds,
     ptyRawLog: process.env.GUARDRAIL_PTY_RAW_LOG || '',
     ptyHexLog: process.env.GUARDRAIL_PTY_HEX_LOG || '',
+    ptySendHexLog: process.env.GUARDRAIL_PTY_SEND_HEX_LOG || '',
     submitSequence: resolveInteractiveSubmitSequence(process.env),
+    submitDelayMs: resolveInteractiveSubmitDelayMs(process.env),
   };
 }
 
@@ -519,12 +596,14 @@ async function runClaudeInteractive(args, options) {
         GUARDRAIL_PROMPT_FILE: promptFile,
         GUARDRAIL_CONTROL_FILE: controlFile,
         GUARDRAIL_STARTUP_PROMPT_DELAY_MS: String(STARTUP_PROMPT_DELAY_MS),
-        GUARDRAIL_SUBMIT_DELAY_MS: String(POST_PASTE_SUBMIT_DELAY_MS),
+        GUARDRAIL_SUBMIT_DELAY_MS: options.submitDelayMs,
         GUARDRAIL_SUBMIT_SEQUENCE: options.submitSequence,
+        GUARDRAIL_PTY_SEND_HEX_LOG: options.ptySendHexLog,
       },
     });
     prepareDebugLog(options.ptyRawLog);
     prepareDebugLog(options.ptyHexLog);
+    prepareDebugLog(options.ptySendHexLog);
 
     let stdout = '';
     let stderr = '';

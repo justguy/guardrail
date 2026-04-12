@@ -13,6 +13,8 @@ import {
   sanitizeSessionSlot,
   loadSessionContract,
   saveSessionContract,
+  revokeSessionContract,
+  isSessionRevoked,
 } from '../src/agent-session.js';
 import { evaluateSessionLifecycle } from '../src/agent-session-lifecycle.js';
 
@@ -342,5 +344,125 @@ describe('Agent Session: save + load round-trip', () => {
     const path = join(dir, 'wrong-kind.json');
     writeFileSync(path, JSON.stringify({ kind: 'not_a_session' }), 'utf8');
     assert.throws(() => loadSessionContract(path), /Corrupt agent session contract/);
+  });
+});
+
+// ===========================================================================
+// 9. Session revocation (P0h emergency controls)
+// ===========================================================================
+
+describe('Agent Session: revokeSessionContract', () => {
+  it('stamps status=revoked, revokedAt, revokedBy, revocationReason', () => {
+    const dir = tmpDir();
+    const filePath = join(dir, 'agent-sessions/claude-exec/work.json');
+    const candidate = buildSessionContract(baseInput({ workingDir: dir }));
+    saveSessionContract(candidate, filePath);
+
+    const revoked = revokeSessionContract(filePath, { actor: 'admin', reason: 'policy breach' });
+    assert.equal(revoked.status, 'revoked');
+    assert.equal(revoked.revokedBy, 'admin');
+    assert.equal(revoked.revocationReason, 'policy breach');
+    assert.ok(typeof revoked.revokedAt === 'string');
+  });
+
+  it('persists revocation to disk', () => {
+    const dir = tmpDir();
+    const filePath = join(dir, 'agent-sessions/claude-exec/work.json');
+    const candidate = buildSessionContract(baseInput({ workingDir: dir }));
+    saveSessionContract(candidate, filePath);
+    revokeSessionContract(filePath, { actor: 'test' });
+
+    const loaded = loadSessionContract(filePath);
+    assert.equal(loaded.status, 'revoked');
+    assert.equal(loaded.revokedBy, 'test');
+  });
+
+  it('is idempotent — revoking an already-revoked contract returns it unchanged', () => {
+    const dir = tmpDir();
+    const filePath = join(dir, 'agent-sessions/claude-exec/work.json');
+    const candidate = buildSessionContract(baseInput({ workingDir: dir }));
+    saveSessionContract(candidate, filePath);
+    const first = revokeSessionContract(filePath, { actor: 'a' });
+    const second = revokeSessionContract(filePath, { actor: 'b' });
+    assert.equal(second.revokedBy, 'a');
+    assert.equal(second.revokedAt, first.revokedAt);
+  });
+
+  it('throws when no contract exists — cannot revoke unknown state', () => {
+    const dir = tmpDir();
+    const filePath = join(dir, 'agent-sessions/claude-exec/nonexistent.json');
+    assert.throws(
+      () => revokeSessionContract(filePath, { actor: 'test' }),
+      /cannot revoke unknown state/,
+    );
+  });
+});
+
+describe('Agent Session: isSessionRevoked', () => {
+  it('returns true for status=revoked contract', () => {
+    const dir = tmpDir();
+    const filePath = join(dir, 'agent-sessions/claude-exec/work.json');
+    const candidate = buildSessionContract(baseInput({ workingDir: dir }));
+    saveSessionContract(candidate, filePath);
+    revokeSessionContract(filePath, { actor: 'test' });
+    const loaded = loadSessionContract(filePath);
+    assert.equal(isSessionRevoked(loaded), true);
+  });
+
+  it('returns false for a normal (non-revoked) contract', () => {
+    const candidate = buildSessionContract(baseInput());
+    assert.equal(isSessionRevoked(candidate), false);
+  });
+
+  it('returns false for null/undefined', () => {
+    assert.equal(isSessionRevoked(null), false);
+    assert.equal(isSessionRevoked(undefined), false);
+  });
+});
+
+describe('Agent Session: evaluateSessionLifecycle — revoked contract blocks all ops', () => {
+  it('blocks start with session_revoked when approved is revoked', () => {
+    const dir = tmpDir();
+    const filePath = join(dir, 'agent-sessions/claude-exec/work.json');
+    const candidate = buildSessionContract(baseInput({ lifecycle: 'start', workingDir: dir }));
+    saveSessionContract(candidate, filePath);
+    const approved = revokeSessionContract(filePath, { actor: 'admin', reason: 'test' });
+    const result = evaluateSessionLifecycle(candidate, approved, 'start');
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'session_revoked');
+    assert.ok(result.reason.includes('revoked'));
+  });
+
+  it('blocks continue with session_revoked', () => {
+    const dir = tmpDir();
+    const filePath = join(dir, 'agent-sessions/claude-exec/work.json');
+    const base = buildSessionContract(baseInput({ lifecycle: 'start', workingDir: dir }));
+    saveSessionContract(base, filePath);
+    const approved = revokeSessionContract(filePath, { actor: 'admin' });
+    const candidate = buildSessionContract(baseInput({ lifecycle: 'continue', workingDir: dir }));
+    const result = evaluateSessionLifecycle(candidate, approved, 'continue');
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'session_revoked');
+  });
+
+  it('blocks attach with session_revoked', () => {
+    const dir = tmpDir();
+    const filePath = join(dir, 'agent-sessions/claude-exec/work.json');
+    const base = buildSessionContract(baseInput({ lifecycle: 'start', sessionName: 'alpha', workingDir: dir }));
+    saveSessionContract(base, filePath);
+    const approved = revokeSessionContract(filePath, { actor: 'admin' });
+    const candidate = buildSessionContract(baseInput({ lifecycle: 'attach', sessionName: 'alpha', workingDir: dir }));
+    const result = evaluateSessionLifecycle(candidate, approved, 'attach');
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'session_revoked');
+  });
+
+  it('session_revoked code is distinct from session_missing and session_drift', () => {
+    const candidate = buildSessionContract(baseInput({ lifecycle: 'start' }));
+    const fakeRevoked = { ...candidate, status: 'revoked', revokedAt: new Date().toISOString(), revokedBy: 'ops' };
+    const result = evaluateSessionLifecycle(candidate, fakeRevoked, 'start');
+    assert.equal(result.code, 'session_revoked');
+    assert.notEqual(result.code, 'session_missing');
+    assert.notEqual(result.code, 'session_drift');
   });
 });

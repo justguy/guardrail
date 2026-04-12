@@ -27,7 +27,7 @@ const DEFERRED_PROTOCOLS = new Set(['http', 'python-callable', 'node-callable'])
 const ALLOWED_TOP_LEVEL = new Set([
   'version', 'tool', 'description', 'schema_target', 'protocol',
   'intercept', 'response', 'exit_codes', 'defaults',
-  'requires_env', 'requires_auth', 'mcp_transport',
+  'requires_env', 'requires_auth', 'mcp_transport', 'egress_hook',
 ]);
 
 const TOOL_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;

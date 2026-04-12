@@ -190,6 +190,49 @@ export function compareSessionContracts(candidate, approved) {
 }
 
 // ---------------------------------------------------------------------------
+// Public API — revocation
+// ---------------------------------------------------------------------------
+
+/**
+ * Return true if a loaded session contract has been revoked.
+ */
+export function isSessionRevoked(contract) {
+  return contract != null && contract.status === 'revoked';
+}
+
+/**
+ * Permanently revoke a session contract on disk. Sets status to 'revoked',
+ * stamps revokedAt, revokedBy, and revocationReason. Fails closed: throws if
+ * the contract does not exist (cannot revoke unknown state). Idempotent if
+ * already revoked.
+ */
+export function revokeSessionContract(filePath, { actor = 'operator', reason = '' } = {}) {
+  if (!filePath || typeof filePath !== 'string') {
+    throw new Error('agent-session: revokeSessionContract requires a filePath');
+  }
+  const existing = loadSessionContract(filePath);
+  if (!existing) {
+    throw new Error(`agent-session: no session contract at ${filePath}; cannot revoke unknown state`);
+  }
+  if (isSessionRevoked(existing)) return existing;
+  const now = new Date().toISOString();
+  const revoked = {
+    ...existing,
+    status: 'revoked',
+    revokedAt: now,
+    revokedBy: actor,
+    revocationReason: reason || null,
+    updatedAt: now,
+  };
+  const dir = dirname(filePath);
+  mkdirSync(dir, { recursive: true });
+  const tmpPath = join(dir, `.tmp-revoke-${randomBytes(8).toString('hex')}.json`);
+  writeFileSync(tmpPath, JSON.stringify(revoked, null, 2) + '\n', 'utf8');
+  renameSync(tmpPath, filePath);
+  return revoked;
+}
+
+// ---------------------------------------------------------------------------
 // Public API — load / save (the only I/O surface)
 // ---------------------------------------------------------------------------
 

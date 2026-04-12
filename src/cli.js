@@ -839,7 +839,7 @@ export function parseArgs(argv) {
     return result;
   }
 
-  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify' && sub !== 'adapter' && sub !== 'lane' && sub !== 'repo') {
+  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify' && sub !== 'adapter' && sub !== 'lane' && sub !== 'repo' && sub !== 'session') {
     return { error: 'usage' };
   }
 
@@ -962,7 +962,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'run-sequence', 'chat', 'result', 'wait', 'status', 'inspect', 'history', 'portfolio', 'logs', 'stop', 'cleanup', 'batch', 'list', 'prune', 'adapters', 'extend'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'run-sequence', 'chat', 'result', 'wait', 'status', 'inspect', 'history', 'portfolio', 'logs', 'stop', 'cleanup', 'batch', 'list', 'prune', 'adapters', 'extend', 'revoke', 'kill'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -1044,10 +1044,32 @@ export function parseArgs(argv) {
       '--lanes-dir': 'lanesDir',
       '--include-failed': { key: 'includeFailed', boolean: true },
       '--dry-run': { key: 'dryRun', boolean: true },
+      '--actor': 'actor',
+      '--reason': 'reason',
     });
     if (result.laneOpts.dryRun === true) {
       result.dryRun = true;
     }
+    return error || result;
+  }
+
+  // --- session subcommand ---------------------------------------------------
+
+  if (sub === 'session') {
+    if (i >= argv.length || !['revoke'].includes(argv[i])) {
+      return { error: 'usage' };
+    }
+    const action = argv[i++];
+    result.subcommand = `session-${action}`;
+    result.sessionOpts = {};
+    const error = parseMappedFlags(result.sessionOpts, {
+      '--recipe': 'recipe',
+      '--session-name': 'sessionName',
+      '--actor': 'actor',
+      '--reason': 'reason',
+      '--guardrail-repo': 'guardrailRepo',
+      '--state-dir': 'stateDir',
+    });
     return error || result;
   }
 
@@ -2055,6 +2077,95 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     } else {
       console.log(`Lane stopped: ${laneOpts.laneId || laneOpts.laneDir}`);
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-revoke') {
+    const { revokeResidentLane } = await import('./resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane revoke');
+      process.exit(1);
+    }
+    const result = revokeResidentLane(laneOpts);
+    await appendLaneAuditEntry(laneOpts, 'lane_revoked', {
+      status: 'revoked',
+      revoked: true,
+      actor: laneOpts.actor || 'operator',
+      reason: laneOpts.reason || null,
+    });
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`Lane revoked: ${laneOpts.laneId || laneOpts.laneDir}`);
+      if (laneOpts.reason) console.log(`  Reason: ${laneOpts.reason}`);
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'lane-kill') {
+    const { killResidentLane } = await import('./resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane kill');
+      process.exit(1);
+    }
+    const result = killResidentLane(laneOpts);
+    await appendLaneAuditEntry(laneOpts, 'lane_emergency_stop', {
+      status: 'killed',
+      killed: true,
+      revoked: true,
+      actor: laneOpts.actor || 'operator',
+      reason: laneOpts.reason || null,
+    });
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`Lane killed (break-glass): ${laneOpts.laneId || laneOpts.laneDir}`);
+      if (laneOpts.reason) console.log(`  Reason: ${laneOpts.reason}`);
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'session-revoke') {
+    const { defaultSessionContractPath, revokeSessionContract } = await import('./agent-session.js');
+    const { createAuditLog } = await import('./audit.js');
+    const sessionOpts = parsed.sessionOpts || {};
+    if (!sessionOpts.recipe) {
+      console.error('Error: --recipe <id> is required for session revoke');
+      process.exit(1);
+    }
+    const guardrailRepo = resolve(sessionOpts.guardrailRepo || process.cwd());
+    const stateDir = sessionOpts.stateDir
+      ? resolve(guardrailRepo, sessionOpts.stateDir)
+      : resolve(guardrailRepo, '.guardrail');
+    const contractPath = defaultSessionContractPath(stateDir, sessionOpts.recipe, sessionOpts.sessionName || null);
+    let revoked;
+    try {
+      revoked = revokeSessionContract(contractPath, {
+        actor: sessionOpts.actor || 'operator',
+        reason: sessionOpts.reason || '',
+      });
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+    const auditLog = createAuditLog(resolve(guardrailRepo, '.guardrail', 'audit.jsonl'));
+    auditLog.append({
+      event: 'session_revoked',
+      trace_id: `session:${sessionOpts.recipe}:${sessionOpts.sessionName || 'default'}`,
+      recipe: sessionOpts.recipe,
+      session_name: sessionOpts.sessionName || null,
+      actor: sessionOpts.actor || 'operator',
+      reason: sessionOpts.reason || null,
+      contract_path: contractPath,
+    });
+    if (parsed.json) {
+      console.log(JSON.stringify({ revoked: true, contractPath, revokedAt: revoked.revokedAt }, null, 2));
+    } else {
+      console.log(`Session revoked: ${sessionOpts.recipe}/${sessionOpts.sessionName || 'default'}`);
+      if (sessionOpts.reason) console.log(`  Reason: ${sessionOpts.reason}`);
     }
     process.exit(0);
   }

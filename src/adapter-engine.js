@@ -24,6 +24,7 @@ import {
   validateAdapterResult,
   extractFromIntercept,
 } from './adapter-result.js';
+import { runEgressHook, EGRESS_OUTCOMES } from './egress-hooks.js';
 
 export { ADAPTER_REASON_CODES, validateAdapterResult };
 
@@ -218,6 +219,46 @@ export function renderResponse(profile, adapterResult) {
   return resolveJsonTemplate(template, adapterResult);
 }
 
+function buildEgressInspectionPayload(adapterResult) {
+  const stdout = adapterResult?.process?.stdout ?? '';
+  if (typeof stdout === 'string' && stdout.trim()) {
+    try {
+      const parsed = JSON.parse(stdout);
+      if (parsed && typeof parsed === 'object') {
+        return { payload: parsed, source: 'process.stdout.json' };
+      }
+    } catch {
+      // Fall back to the raw stdout envelope below.
+    }
+  }
+  return {
+    payload: { stdout },
+    source: 'process.stdout.raw',
+  };
+}
+
+function applyEgressSanitization(adapterResult, inspection, egressResult) {
+  const sanitizedStdout = inspection.source === 'process.stdout.json'
+    ? JSON.stringify(egressResult.sanitized)
+    : String(egressResult.sanitized?.stdout ?? adapterResult.process.stdout);
+  return {
+    ...adapterResult,
+    process: {
+      ...adapterResult.process,
+      stdout: sanitizedStdout,
+    },
+    egress: {
+      outcome: egressResult.outcome,
+      label: egressResult.label,
+      reason: egressResult.reason,
+      source: inspection.source,
+      sanitized_keys: egressResult.sanitized
+        ? Object.keys(egressResult.sanitized).filter(k => egressResult.sanitized[k] === '[REDACTED]')
+        : [],
+    },
+  };
+}
+
 function resolveJsonTemplate(node, source) {
   if (node == null) return node;
   if (typeof node === 'string') return node.startsWith('$.') ? extractValue(source, node) : node;
@@ -373,6 +414,37 @@ export async function runAdapter(opts = {}) {
       `adapter-result/v1 shape invariant broken: ${check.errors.join('; ')}`,
     );
   }
+
+  // 7a. Pre-egress classification and scrubbing hook.
+  // Only runs when profile declares an egress_hook config.
+  // Audit callback receives outcome/label/reason and matched field names only —
+  // never the payload or sanitized payload content.
+  if (profile.egress_hook?.enabled) {
+    const inspection = buildEgressInspectionPayload(adapterResult);
+    const egressResult = runEgressHook(
+      inspection.payload,
+      profile.egress_hook,
+      opts.egressAuditFn ?? null,
+    );
+    if (egressResult.outcome === EGRESS_OUTCOMES.BLOCK) {
+      return wrapBlocked(
+        ADAPTER_REASON_CODES.EGRESS_BLOCKED,
+        `Egress blocked: ${egressResult.reason} (label=${egressResult.label}, fields=${egressResult.matchedFields.join(',')})`,
+        profile,
+      );
+    }
+    if (egressResult.outcome === EGRESS_OUTCOMES.REDACT && egressResult.sanitized) {
+      // Replace the actual outgoing payload surface, not a nonexistent synthetic field.
+      const sanitizedResult = applyEgressSanitization(adapterResult, inspection, egressResult);
+      const category = sanitizedResult.guardrail.category;
+      return {
+        adapterResult: sanitizedResult,
+        renderedResponse: renderResponse(profile, sanitizedResult),
+        exitCode: resolveProfileExitCode(profile, category, sanitizedResult.guardrail.exitCode),
+      };
+    }
+  }
+
   const category = adapterResult.guardrail.category;
   return {
     adapterResult,

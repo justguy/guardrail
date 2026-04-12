@@ -5,9 +5,9 @@ Status: In progress
 ## Run Summary
 
 - Start time: 2026-04-11
-- Current packet: `P0e` next
-- Current status: `P0a through P0d closed after review/fix`
-- Operator follow-on: `D0y closed after review/fix`
+- Current packet: `P0h / D0za follow-on`
+- Current status: `P0a through P0g closed after review/fix; P0h implementation exists and tests pass locally, but live direct-lane proof is still blocked by the remaining D0za completion-detection gap`
+- Operator follow-on: `D0y and D0z closed after review/fix; D0za still open`
 
 ## Packet Timeline
 
@@ -200,6 +200,17 @@ Minimum shape:
   - paste plus single `\n` does not execute
 - In all three cases the PTY trace stops at Claude's `[Pasted text …]` acknowledgement with no later processing marker, no report progress, and no assistant output. That means the current blocker is the Claude interactive submit contract, not Guardrail lane transport, auth preflight, D0z repo-local state, or prompt delivery.
 - This follow-on is now tracked explicitly as `D0za` in `docs/technical-status.md`, with the live evidence bundle in `docs/plans/REPORT_claude_tui_paste_submit_semantics.md`.
+- Subsequent host-runtime probes narrowed that gap further:
+  - kitty keyboard protocol is active in Claude's TUI
+  - explicit kitty Enter (`ESC[13u]`) is the working submit sequence for a tiny direct prompt
+  - a real resident-lane proof turn (`Reply with exactly: PONG`) now executes on the host Claude runtime
+- The remaining live blocker is no longer submit/auth/transport. It is completion detection for longer file-pointer turns:
+  - short direct turns can execute
+  - longer pointer-prompt packet turns can still be misclassified at the wrapper boundary unless completion is tied to stronger assistant-output/report/progress signals
+- `P0g` is now closed after review/fix on that lane-first path.
+  - The initial implementation wired the hook against a dead synthetic field.
+  - Review/fix moved inspection to parsed `process.stdout` JSON and rewrote the actual outgoing payload surface.
+  - Focused proof after the fix: `108/108` pass across `tests/test-human-domain-routing.js`, `tests/test-adapter-runtime.js`, and `tests/test-bucket5.js`.
 
 ### Operator Rule: Approved Lane Prefix Reuse
 

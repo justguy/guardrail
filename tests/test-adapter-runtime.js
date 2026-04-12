@@ -847,3 +847,235 @@ describe('parseStdinInput protocol limits', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Egress hook wiring in adapter-engine runAdapter
+// ---------------------------------------------------------------------------
+
+function makeNonMcpProfile(dir, overrides = {}) {
+  const profile = {
+    version: '1.0.0',
+    tool: 'test-tool',
+    description: 'Minimal non-MCP profile for egress hook tests.',
+    schema_target: 'adapter-result/v1',
+    protocol: 'stdin-json',
+    intercept: {
+      command: '$.command',
+      args: '$.args',
+    },
+    response: {
+      format: 'json',
+      success: { status: 'success', stdout: '$.process.stdout' },
+      blocked: { status: 'blocked', reason: '$.guardrail.reason' },
+      failed: { status: 'failed', reason: '$.guardrail.reason' },
+    },
+    exit_codes: { success: 0, blocked: 12, failed: 1 },
+    defaults: { non_interactive: true, json_output: true },
+    ...overrides,
+  };
+  const profilePath = join(dir, 'test-tool.json');
+  writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+  return profilePath;
+}
+
+function makeSuccessSupervisorFn() {
+  return async () => ({
+    runId: 'egress-test',
+    status: 'success',
+    reason: 'ok',
+    exitCode: 0,
+    worker: {
+      launched: true,
+      exitCode: 0,
+      stdout: '{"output":"clean text","token":"secret123"}',
+      stderr: '',
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      interactivePromptDetected: false,
+      timedOut: false,
+    },
+    telemetry: { durationMs: 1 },
+  });
+}
+
+describe('egress hook wiring in runAdapter', () => {
+  it('allows payload when no egress_hook is configured (default path)', async () => {
+    const dir = makeTempDir('gr-egress-');
+    const profilePath = makeNonMcpProfile(dir);
+    const result = await runAdapter({
+      profilePath,
+      command: 'echo',
+      args: ['hi'],
+      supervisorFn: makeSuccessSupervisorFn(),
+    });
+    assert.equal(result.adapterResult.guardrail.category, 'success');
+  });
+
+  it('blocks egress when hook matches a field in parsed stdout JSON', async () => {
+    const dir = makeTempDir('gr-egress-block-');
+    const profilePath = makeNonMcpProfile(dir, {
+      egress_hook: {
+        enabled: true,
+        rules: [
+          { label: 'restricted', match_fields: ['token'], outcome: 'block', reason: 'Credential field detected' },
+        ],
+        default_label: 'public',
+        default_outcome: 'allow',
+      },
+    });
+
+    let supervisorCalled = false;
+    const result = await runAdapter({
+      profilePath,
+      command: 'echo',
+      args: ['hi'],
+      supervisorFn: async () => {
+        supervisorCalled = true;
+        return {
+          runId: 'egress-block-test',
+          status: 'success',
+          reason: 'ok',
+          exitCode: 0,
+          worker: {
+            launched: true,
+            exitCode: 0,
+            stdout: '{"output":"safe","token":"secret123"}',
+            stderr: '',
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            interactivePromptDetected: false,
+            timedOut: false,
+          },
+          telemetry: { durationMs: 1 },
+        };
+      },
+    });
+
+    assert.equal(supervisorCalled, true);
+    assert.equal(result.adapterResult.guardrail.category, 'blocked');
+    assert.equal(result.adapterResult.guardrail.code, 'EGRESS_BLOCKED');
+    assert.ok(result.adapterResult.guardrail.reason.includes('Credential field detected'));
+    assert.ok(result.adapterResult.guardrail.reason.includes('label=restricted'));
+  });
+
+  it('calls audit function with structured hook outcome, no payload leak', async () => {
+    const dir = makeTempDir('gr-egress-audit-');
+    const profilePath = makeNonMcpProfile(dir, {
+      egress_hook: {
+        enabled: true,
+        rules: [
+          { label: 'restricted', match_fields: ['token'], outcome: 'block', reason: 'Output blocked' },
+        ],
+        default_label: 'public',
+        default_outcome: 'allow',
+      },
+    });
+
+    const auditEntries = [];
+    await runAdapter({
+      profilePath,
+      command: 'echo',
+      args: ['hi'],
+      egressAuditFn: (entry) => auditEntries.push(entry),
+      supervisorFn: async () => ({
+        runId: 'audit-test',
+        status: 'success',
+        reason: 'ok',
+        exitCode: 0,
+        worker: { launched: true, exitCode: 0, stdout: '{"token":"classified-content-xyz"}', stderr: '', stdoutTruncated: false, stderrTruncated: false, interactivePromptDetected: false, timedOut: false },
+        telemetry: { durationMs: 1 },
+      }),
+    });
+
+    assert.equal(auditEntries.length, 1);
+    assert.equal(auditEntries[0].event, 'egress_hook_result');
+    assert.equal(auditEntries[0].outcome, 'block');
+    assert.ok(typeof auditEntries[0].payload_hash === 'string');
+    // Must not leak original payload value
+    const auditStr = JSON.stringify(auditEntries[0]);
+    assert.ok(!auditStr.includes('classified-content-xyz'), 'audit must not leak payload content');
+  });
+
+  it('redacts matching fields in parsed stdout JSON and the rendered response', async () => {
+    const dir = makeTempDir('gr-egress-redact-');
+    const profilePath = makeNonMcpProfile(dir, {
+      egress_hook: {
+        enabled: true,
+        rules: [
+          { label: 'confidential', match_fields: ['token'], outcome: 'redact', reason: 'Credential field detected' },
+        ],
+        default_label: 'public',
+        default_outcome: 'allow',
+      },
+    });
+
+    const result = await runAdapter({
+      profilePath,
+      command: 'echo',
+      args: ['hi'],
+      supervisorFn: async () => ({
+        runId: 'redact-test',
+        status: 'success',
+        reason: 'ok',
+        exitCode: 0,
+        worker: {
+          launched: true,
+          exitCode: 0,
+          stdout: '{"output":"safe","token":"secret123"}',
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          interactivePromptDetected: false,
+          timedOut: false,
+        },
+        telemetry: { durationMs: 1 },
+      }),
+    });
+
+    assert.equal(result.adapterResult.guardrail.category, 'success');
+    assert.equal(result.adapterResult.process.stdout, '{"output":"safe","token":"[REDACTED]"}');
+    assert.deepEqual(result.renderedResponse, {
+      status: 'success',
+      stdout: '{"output":"safe","token":"[REDACTED]"}',
+    });
+    assert.deepEqual(result.adapterResult.egress, {
+      outcome: 'redact',
+      label: 'confidential',
+      reason: 'Credential field detected',
+      source: 'process.stdout.json',
+      sanitized_keys: ['token'],
+    });
+  });
+
+  it('hook disabled when egress_hook.enabled is false', async () => {
+    const dir = makeTempDir('gr-egress-disabled-');
+    const profilePath = makeNonMcpProfile(dir, {
+      egress_hook: {
+        enabled: false,
+        rules: [
+          { label: 'restricted', match_fields: ['ssn'], outcome: 'block', reason: 'PII detected' },
+        ],
+        default_label: 'public',
+        default_outcome: 'allow',
+      },
+    });
+
+    const result = await runAdapter({
+      profilePath,
+      command: 'echo',
+      args: ['hi'],
+      supervisorFn: async () => ({
+        runId: 'disabled-test',
+        status: 'success',
+        reason: 'ok',
+        exitCode: 0,
+        worker: { launched: true, exitCode: 0, stdout: 'ok', stderr: '', stdoutTruncated: false, stderrTruncated: false, interactivePromptDetected: false, timedOut: false },
+        telemetry: { durationMs: 1 },
+        ssn: 'would-be-blocked-if-enabled',
+      }),
+    });
+
+    // Hook disabled — supervisor success passes through
+    assert.equal(result.adapterResult.guardrail.category, 'success');
+  });
+});
