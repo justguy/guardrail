@@ -2,10 +2,7 @@
 // Notifications and Integrations — event-driven alerts
 // ---------------------------------------------------------------------------
 
-const NOTIFY_EVENTS = new Set([
-  'approval_required', 'execution_success', 'execution_failure',
-  'policy_violation', 'incident_detected',
-]);
+import { NOTIFY_EVENTS, SCHEMA_VERSION, eventFamily } from './event-schema.js';
 
 /**
  * Create a notification dispatcher.
@@ -18,12 +15,14 @@ export function createNotifier(integrations = []) {
 
   async function notify(event) {
     const entry = {
-      event: event.type,
-      message: event.message ?? '',
-      actor: event.actor ?? null,
+      schema_version: SCHEMA_VERSION,
+      family:    eventFamily(event.type),
+      event:     event.type,
+      message:   event.message ?? '',
+      actor:     event.actor ?? null,
       recipe_id: event.recipeId ?? null,
       timestamp: new Date().toISOString(),
-      details: event.details ?? {},
+      details:   event.details ?? {},
     };
 
     for (const integration of integrations) {

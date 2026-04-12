@@ -7,6 +7,7 @@ import { dirname } from 'node:path';
 import { serializeStable } from './contract.js';
 import { captureFingerprint } from './fingerprint.js';
 import { sovereignMeta, computePayloadHash } from './shared.js';
+import { SCHEMA_VERSION, eventFamily } from './event-schema.js';
 
 // ---------------------------------------------------------------------------
 // Hash computation
@@ -67,6 +68,8 @@ export function appendEntry(auditPath, entry, provenance) {
 
   // Build the entry without chain hashes first so payload_hash can cover it
   const base = {
+    schema_version:   SCHEMA_VERSION,
+    family:           entry.family ?? eventFamily(entry.event),
     timestamp:        new Date().toISOString(),
     ...entry,
     fingerprint:      captureFingerprint(),

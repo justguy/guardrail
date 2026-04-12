@@ -392,6 +392,7 @@ Commands:
   run --template <path> --input k=v     Run a template under Guardrail
   lane start [flags]                    Start a resident interactive lane
   lane send [flags]                     Send one message through a resident lane
+  lane run-sequence [flags]             Send prompt files sequentially through one resident lane
   lane chat [flags]                     Send one message and wait like a guarded chat turn
   lane result [flags]                   Read the latest or named resident lane result
   lane wait [flags]                     Wait for a resident lane request to complete
@@ -479,6 +480,7 @@ Examples:
   guardrail lane start --id lint-live --tool local-exec --command node --arg scripts/lint-worker.js
   guardrail lane start --id wrapper-live --tool prompt-wrapper --wrapper-command ./scripts/my-wrapper.js --wrapper-arg mode=review
   guardrail lane send --id claude-live --prompt "2x3=?"
+  guardrail lane run-sequence --id claude-live --prompt-file docs/references/p1.md --prompt-file docs/references/p2.md
   guardrail lane chat --id claude-live --prompt "hello"
   guardrail lane result --id claude-live
   guardrail lane wait --id claude-live --request-id req-123
@@ -955,7 +957,7 @@ export function parseArgs(argv) {
   // --- lane subcommand ------------------------------------------------------
 
   if (sub === 'lane') {
-    if (i >= argv.length || !['start', 'send', 'chat', 'result', 'wait', 'status', 'inspect', 'history', 'portfolio', 'logs', 'stop', 'cleanup', 'batch', 'list', 'prune', 'adapters', 'extend'].includes(argv[i])) {
+    if (i >= argv.length || !['start', 'send', 'run-sequence', 'chat', 'result', 'wait', 'status', 'inspect', 'history', 'portfolio', 'logs', 'stop', 'cleanup', 'batch', 'list', 'prune', 'adapters', 'extend'].includes(argv[i])) {
       return { error: 'usage' };
     }
     const action = argv[i++];
@@ -1013,6 +1015,7 @@ export function parseArgs(argv) {
       '--heartbeat': { key: 'heartbeat', boolean: true },
       '--request-id': 'requestId',
       '--prompt': 'prompt',
+      '--prompt-file': 'promptFiles',
       '--action': 'action',
       '--all': { key: 'all', boolean: true },
       '--wait': { key: 'wait', boolean: true },
@@ -1799,6 +1802,158 @@ async function main() {
     }
 
     process.exit(response.ok || response.status === 'pending' || response.status === 'completed' ? 0 : (response.exitCode || 1));
+  }
+
+  if (parsed.subcommand === 'lane-run-sequence') {
+    const { sendResidentLaneMessage } = await import('./resident-lane-client.js');
+    const {
+      assertValidResidentLaneTool,
+      getResidentLaneResult,
+      getResidentLaneStatus,
+      waitForResidentLaneResult,
+    } = await import('./resident-lane.js');
+    const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    const promptFiles = Array.isArray(laneOpts.promptFiles) ? laneOpts.promptFiles : [];
+    if (!laneOpts.laneId && !laneOpts.laneDir) {
+      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane run-sequence');
+      process.exit(1);
+    }
+    if (promptFiles.length === 0) {
+      console.error('Error: lane run-sequence requires at least one --prompt-file <path>');
+      process.exit(1);
+    }
+    try {
+      assertValidResidentLaneTool(laneOpts);
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+    const outputs = [];
+    for (let index = 0; index < promptFiles.length; index += 1) {
+      const promptFile = resolve(promptFiles[index]);
+      const prompt = readFileSync(promptFile, 'utf8');
+      const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const preflightStatus = getResidentLaneStatus(laneOpts);
+      if (preflightStatus.status === 'failed') {
+        const failed = buildLaneFailedResponse(preflightStatus);
+        await appendLaneAuditEntry(laneOpts, 'lane_run_sequence', {
+          request_id: requestId,
+          status: 'error',
+          reason: failed.reason,
+          step_index: index,
+          prompt_file: promptFile,
+        });
+        if (parsed.json) {
+          process.stdout.write(`${JSON.stringify({ ok: false, step: index, promptFile, error: failed }, null, 2)}\n`);
+        } else {
+          console.error(`Lane sequence failed before step ${index + 1}: ${failed.reason}`);
+        }
+        process.exit(1);
+      }
+      if (laneOpts.keyPath && !existsSync(laneOpts.keyPath)) {
+        const expired = buildLaneExpiredResponse();
+        await appendLaneAuditEntry(laneOpts, 'lane_run_sequence', {
+          request_id: requestId,
+          status: 'error',
+          reason: expired.reason,
+          step_index: index,
+          prompt_file: promptFile,
+        });
+        if (parsed.json) {
+          process.stdout.write(`${JSON.stringify({ ok: false, step: index, promptFile, error: expired }, null, 2)}\n`);
+        } else {
+          console.error(`Lane sequence expired before step ${index + 1}`);
+        }
+        process.exit(1);
+      }
+
+      const keyFd = laneOpts.keyPath ? openSync(laneOpts.keyPath, 'r') : null;
+      let response;
+      try {
+        response = await sendResidentLaneMessage([
+          '--lane-dir', laneOpts.laneDir,
+          '--request-id', requestId,
+          '--prompt', prompt,
+          '--timeout-ms', laneOpts.timeoutMs || '30000',
+          ...(keyFd !== null ? ['--auth-fd', String(keyFd)] : []),
+        ]);
+      } catch (err) {
+        if (err?.code === 'LANE_TIMEOUT') {
+          const status = getResidentLaneStatus(laneOpts);
+          const result = getResidentLaneResult({ ...laneOpts, requestId });
+          if (result.status === 'completed') {
+            response = result.result;
+          } else if (!status.alive && status.status !== 'busy' && status.status !== 'stalled') {
+            response = buildLaneExpiredResponse();
+          } else {
+            response = {
+              ok: false,
+              status: 'pending',
+              requestId,
+              resultPath: result.resultPath || null,
+            };
+          }
+        } else {
+          throw err;
+        }
+      } finally {
+        if (keyFd !== null) closeSync(keyFd);
+      }
+
+      if (response?.status === 'pending') {
+        response = await waitForResidentLaneResult({
+          ...laneOpts,
+          requestId,
+        });
+      }
+
+      await appendLaneAuditEntry(laneOpts, 'lane_run_sequence', {
+        request_id: requestId,
+        status: (response.ok || response.status === 'completed') ? 'success' : 'error',
+        reason: response.reason || response.error || null,
+        exit_code: response.exitCode ?? null,
+        step_index: index,
+        prompt_file: promptFile,
+      });
+
+      if (!(response.ok || response.status === 'completed')) {
+        const failurePayload = {
+          ok: false,
+          step: index,
+          promptFile,
+          requestId,
+          response,
+          outputs,
+        };
+        if (parsed.json) {
+          process.stdout.write(`${JSON.stringify(failurePayload, null, 2)}\n`);
+        } else {
+          console.error(`Lane sequence failed at step ${index + 1}: ${promptFile}`);
+          if (response.reason) console.error(`Reason: ${response.reason}`);
+        }
+        process.exit(response.exitCode || 1);
+      }
+
+      outputs.push({
+        step: index,
+        promptFile,
+        requestId: response.requestId ?? response.result?.requestId ?? requestId,
+        stdout: response.stdout ?? response.result?.stdout ?? '',
+        resultPath: response.resultPath ?? response.result?.resultPath ?? null,
+      });
+    }
+
+    const payload = { ok: true, count: outputs.length, outputs };
+    if (parsed.json) {
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    } else {
+      for (const output of outputs) {
+        process.stdout.write(output.stdout || '');
+        if (output.requestId) console.log(`Request id: ${output.requestId}`);
+        if (output.resultPath) console.log(`Result path: ${output.resultPath}`);
+      }
+    }
+    process.exit(0);
   }
 
   if (parsed.subcommand === 'lane-result') {

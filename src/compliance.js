@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { eventFamily } from './event-schema.js';
 
 // ---------------------------------------------------------------------------
 // Compliance Exports — JSON + CSV reporting
@@ -44,9 +45,9 @@ export function generateReport(auditPath, opts = {}) {
     generated_at: new Date().toISOString(),
     period: { from: opts.after ?? null, to: opts.before ?? null },
     total_events: entries.length,
-    executions: entries.filter(e => e.event?.includes('execution')).length,
-    approvals: entries.filter(e => e.event?.includes('approv')).length,
-    violations: entries.filter(e => e.event?.includes('violation') || e.event?.includes('blocked')).length,
+    executions: entries.filter(e => (e.family ?? eventFamily(e.event)) === 'execution').length,
+    approvals: entries.filter(e => e.event?.startsWith('approval')).length,
+    violations: entries.filter(e => (e.family ?? eventFamily(e.event)) === 'policy').length,
     unique_actors: [...new Set(entries.map(e => e.actor).filter(Boolean))],
     risk_summary: {
       high: entries.filter(e => e.details?.risk_level === 'high').length,

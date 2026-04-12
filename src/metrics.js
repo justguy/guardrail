@@ -1,21 +1,13 @@
 import { existsSync, readFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { sovereignMeta } from './shared.js';
+import { ALL_EVENTS, SCHEMA_VERSION, eventFamily } from './event-schema.js';
 
 // ---------------------------------------------------------------------------
-// Event types
+// Event types — derived from shared schema vocabulary
 // ---------------------------------------------------------------------------
 
-export const EVENT_TYPES = new Set([
-  'execution_start', 'execution_end', 'execution_failed', 'execution_aborted',
-  'approval_granted', 'approval_denied', 'approval_required',
-  'violation_detected', 'policy_violation', 'resource_exceeded',
-  'recipe_blocked', 'recipe_executed',
-  'drift_detected', 'manifest_saved',
-  'step_completed', 'step_failed', 'step_blocked',
-  'rollback_start', 'rollback_end',
-  'lock_acquired', 'lock_released', 'lock_blocked',
-]);
+export const EVENT_TYPES = ALL_EVENTS;
 
 // ---------------------------------------------------------------------------
 // Event emission
@@ -33,6 +25,8 @@ export function createMetricsCollector(logDir) {
 
   function emit(event) {
     const entry = {
+      schema_version: SCHEMA_VERSION,
+      family:    eventFamily(event.type),
       timestamp: new Date().toISOString(),
       event:     event.type,
       actor:     event.actor ?? null,

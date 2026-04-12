@@ -1000,6 +1000,112 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(laneChatEntry.status, 'success');
   });
 
+  it('guardrail lane run-sequence executes prompt files sequentially through one resident lane', async () => {
+    const dir = tmpDir();
+    const guardrailRepo = join(dir, 'repo');
+    const laneDir = join(dir, 'lane');
+    mkdirSync(join(guardrailRepo, '.guardrail'), { recursive: true });
+    mkdirSync(laneDir, { recursive: true });
+    const requestFifo = join(laneDir, 'requests.fifo');
+    const responseFifo = join(laneDir, 'responses.fifo');
+    assert.equal(spawnSync('mkfifo', [requestFifo]).status, 0);
+    assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
+    const promptA = join(dir, 'p1.md');
+    const promptB = join(dir, 'p2.md');
+    writeFileSync(promptA, 'first prompt', 'utf8');
+    writeFileSync(promptB, 'second prompt', 'utf8');
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'seq-live',
+      sessionName: 'seq-live',
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const laneServer = (async () => {
+      const requestFd = openSync(requestFifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+      let responseFd = null;
+      const chunk = Buffer.alloc(4096);
+      let buffer = '';
+      const seenPrompts = [];
+      const startedAt = Date.now();
+      try {
+        for (;;) {
+          if ((Date.now() - startedAt) > 5000) {
+            throw new Error('Timed out waiting for lane sequence requests');
+          }
+          try {
+            const bytesRead = readSync(requestFd, chunk, 0, chunk.length, null);
+            if (bytesRead > 0) {
+              buffer += chunk.toString('utf8', 0, bytesRead);
+              let newlineIndex = buffer.indexOf('\n');
+              while (newlineIndex >= 0) {
+                const request = JSON.parse(buffer.slice(0, newlineIndex));
+                buffer = buffer.slice(newlineIndex + 1);
+                seenPrompts.push(request.prompt);
+                responseFd = openSync(responseFifo, fsConstants.O_WRONLY);
+                writeSync(responseFd, `${JSON.stringify({ requestId: request.id, ok: true, stdout: `${seenPrompts.length}\n` })}\n`, undefined, 'utf8');
+                closeSync(responseFd);
+                responseFd = null;
+                if (seenPrompts.length === 2) {
+                  assert.deepEqual(seenPrompts, ['first prompt', 'second prompt']);
+                  return;
+                }
+                newlineIndex = buffer.indexOf('\n');
+              }
+            }
+          } catch (err) {
+            if (err?.code !== 'EAGAIN') throw err;
+          }
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+        }
+      } finally {
+        closeSync(requestFd);
+        if (responseFd !== null) closeSync(responseFd);
+      }
+    })();
+
+    const laneSequence = new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn('node', [
+        join(process.cwd(), 'src', 'cli.js'),
+        'lane', 'run-sequence',
+        '--guardrail-repo', guardrailRepo,
+        '--lane-dir', laneDir,
+        '--prompt-file', promptA,
+        '--prompt-file', promptB,
+        '--json',
+      ], {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', rejectPromise);
+      child.on('close', (code) => {
+        resolvePromise({ exitCode: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
+      });
+    });
+
+    const [result] = await Promise.all([laneSequence, laneServer]);
+    assert.equal(result.exitCode, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.count, 2);
+    assert.equal(parsed.outputs.length, 2);
+    assert.equal(parsed.outputs[0].stdout, '1\n');
+    assert.equal(parsed.outputs[1].stdout, '2\n');
+    const entries = queryAuditLog(join(guardrailRepo, '.guardrail', 'audit.jsonl'), {});
+    const sequenceEntries = entries.filter((entry) => entry.event === 'lane_run_sequence');
+    assert.equal(sequenceEntries.length, 2);
+    assert.equal(sequenceEntries.every((entry) => entry.status === 'success'), true);
+  });
+
   it('guardrail lane send returns lane_expired when the host key is missing', () => {
     const dir = tmpDir();
     const laneDir = join(dir, 'lane');

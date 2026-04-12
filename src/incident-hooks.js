@@ -2,6 +2,8 @@
 // Incident Response Hooks — triggers on violations and abnormal activity
 // ---------------------------------------------------------------------------
 
+import { INCIDENT_TRIGGERS, SCHEMA_VERSION, eventFamily } from './event-schema.js';
+
 /**
  * @typedef {object} IncidentHook
  * @property {string} trigger  - Event pattern: policy_violation, execution_failed, abnormal_activity.
@@ -9,10 +11,7 @@
  * @property {object} [config] - Action-specific config (webhook url, escalation target, etc.).
  */
 
-const VALID_TRIGGERS = new Set([
-  'policy_violation', 'execution_failed', 'abnormal_activity',
-  'resource_exceeded', 'audit_chain_broken', 'concurrent_blocked',
-]);
+const VALID_TRIGGERS = INCIDENT_TRIGGERS;
 
 const VALID_ACTIONS = new Set(['alert', 'halt', 'escalate', 'log']);
 
@@ -54,6 +53,8 @@ export function createIncidentResponder(hooks = [], notifier = null) {
 
     for (const hook of matching) {
       const incident = {
+        schema_version: SCHEMA_VERSION,
+        family:    eventFamily(eventType),
         trigger:    eventType,
         action:     hook.action,
         context,
