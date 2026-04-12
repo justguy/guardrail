@@ -5,16 +5,20 @@ import {
   closeSync,
   constants as fsConstants,
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   openSync,
+  readlinkSync,
+  readdirSync,
   readSync,
+  rmSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
@@ -174,6 +178,8 @@ describe('Claude resident lane', () => {
 
   it('uses lifecycle start for the first request and continue after success', async () => {
     const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
     const options = normalizeGenericResidentLaneOptions({
       laneDir: '.guardrail/lanes/math',
       guardrailRepo: '.',
@@ -190,22 +196,375 @@ describe('Claude resident lane', () => {
     }, dir);
 
     const calls = [];
-    const runner = async (args) => {
-      calls.push(args);
+    const runner = async (args, _cwd, _env, hooks) => {
+      calls.push({ args, hooks });
       return { code: 0, stdout: '12\n', stderr: '' };
     };
 
-    const first = await runLaneRequest(options, { id: 'req-1', prompt: '4x3=?' }, { startedConversation: false }, { runner });
-    const second = await runLaneRequest(options, { id: 'req-2', prompt: '4x4=?' }, { startedConversation: true }, { runner });
+    const savedHome = process.env.HOME;
+    process.env.HOME = homeDir;
+    let first;
+    let second;
+    try {
+      first = await runLaneRequest(options, { id: 'req-1', prompt: '4x3=?' }, { startedConversation: false }, { runner });
+      second = await runLaneRequest(options, { id: 'req-2', prompt: '4x4=?' }, { startedConversation: true }, { runner });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+    }
 
     assert.equal(first.lifecycle, 'start');
     assert.equal(second.lifecycle, 'continue');
     assert.equal(first.stdout, '12\n');
-    assert.ok(calls[0].includes('--lifecycle'));
-    assert.ok(calls[0].includes('start'));
-    assert.ok(calls[1].includes('continue'));
-    assert.ok(calls[0].includes('--session-name'));
-    assert.ok(calls[0].includes('math-live-session'));
+    assert.ok(calls[0].args.includes('--lifecycle'));
+    assert.ok(calls[0].args.includes('start'));
+    assert.ok(calls[1].args.includes('continue'));
+    assert.ok(calls[0].args.includes('--session-name'));
+    assert.ok(calls[0].args.includes('math-live-session'));
+    assert.equal(typeof calls[0].hooks, 'object');
+    assert.equal(calls[0].hooks.onProgress, undefined);
+    assert.equal(calls[0].hooks.onStderrLine, undefined);
+  });
+
+  it('passes Guardrail progress file flags to the Claude wrapper', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'math-live',
+      sessionName: 'math-live-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+
+    let seenArgs = null;
+    const runner = async (args) => {
+      seenArgs = args;
+      return { code: 0, stdout: 'ok\n', stderr: '' };
+    };
+
+    const savedHome = process.env.HOME;
+    process.env.HOME = homeDir;
+    try {
+      await runLaneRequest(options, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, { runner });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+    }
+
+    assert.ok(seenArgs.includes('--guardrail-progress-file'));
+    assert.ok(seenArgs.includes(resolve(dir, '.guardrail', 'lanes', 'math', 'progress', 'req-1.ndjson')));
+    assert.ok(seenArgs.includes('--guardrail-progress-state-file'));
+    assert.ok(seenArgs.includes(resolve(dir, '.guardrail', 'lanes', 'math', 'progress', 'req-1.json')));
+    assert.ok(seenArgs.includes('--guardrail-heartbeat-seconds'));
+    assert.ok(seenArgs.includes('60'));
+  });
+
+  it('runs Claude lanes with the unmodified host environment when no API key or operator CLAUDE_CONFIG_DIR is present', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'math-live',
+      sessionName: 'math-live-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+
+    // Simulate keychain-auth context: no API key, no operator CLAUDE_CONFIG_DIR.
+    const savedHome = process.env.HOME;
+    const savedApiKey = process.env.ANTHROPIC_API_KEY;
+    const savedOAuthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.HOME = homeDir;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete process.env.CLAUDE_CONFIG_DIR;
+
+    let seenEnvRef = null;
+    let seenConfigDir = 'sentinel';
+    const runner = async (_args, _cwd, env) => {
+      seenEnvRef = env;
+      seenConfigDir = env.CLAUDE_CONFIG_DIR;
+      return { code: 0, stdout: 'ok\n', stderr: '' };
+    };
+
+    try {
+      await runLaneRequest(options, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, { runner });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+      if (savedApiKey !== undefined) process.env.ANTHROPIC_API_KEY = savedApiKey;
+      if (savedOAuthToken !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedOAuthToken;
+      if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+    }
+
+    // D0z: keychain auth path must NOT inject CLAUDE_CONFIG_DIR — doing so would
+    // break the keychain service name hash and lose credentials.
+    const slug = resolve(dir).replace(/[\\/]/g, '-');
+    const hostProjectDir = join(homeDir, 'projects', slug);
+    const localProjectDir = resolve(dir, '.guardrail', 'claude-runtime', 'math-live', 'projects', slug);
+    assert.equal(seenEnvRef, process.env);
+    assert.equal(seenConfigDir, undefined);
+    assert.ok(lstatSync(hostProjectDir).isSymbolicLink());
+    assert.equal(resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir)), localProjectDir);
+  });
+
+  it('D0z: injects repo-local CLAUDE_CONFIG_DIR when ANTHROPIC_API_KEY is present', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'math-live',
+      sessionName: 'math-live-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+
+    const savedHome = process.env.HOME;
+    const savedApiKey = process.env.ANTHROPIC_API_KEY;
+    const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.HOME = homeDir;
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
+    delete process.env.CLAUDE_CONFIG_DIR;
+
+    let seenEnv = null;
+    const runner = async (_args, _cwd, env) => {
+      seenEnv = env;
+      return { code: 0, stdout: 'ok\n', stderr: '' };
+    };
+
+    try {
+      await runLaneRequest(options, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, { runner });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+      if (savedApiKey !== undefined) process.env.ANTHROPIC_API_KEY = savedApiKey;
+      else delete process.env.ANTHROPIC_API_KEY;
+      if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+    }
+
+    // D0z: API key auth → CLAUDE_CONFIG_DIR redirected to repo-local runtime dir.
+    const expectedConfigDir = resolve(dir, '.guardrail', 'claude-runtime', 'math-live');
+    const slug = resolve(dir).replace(/[\\/]/g, '-');
+    const hostProjectDir = join(homeDir, 'projects', slug);
+    const localProjectDir = resolve(expectedConfigDir, 'projects', slug);
+    assert.ok(seenEnv !== process.env, 'env should be a new object when CLAUDE_CONFIG_DIR is injected');
+    assert.equal(seenEnv.CLAUDE_CONFIG_DIR, expectedConfigDir);
+    assert.equal(seenEnv.ANTHROPIC_API_KEY, 'sk-ant-test-key');
+    // The repo-local dir must exist after injection.
+    assert.ok(existsSync(expectedConfigDir), 'repo-local claude-runtime dir must be created');
+    assert.ok(lstatSync(hostProjectDir).isSymbolicLink());
+    assert.equal(resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir)), localProjectDir);
+  });
+
+  it('D0z: injects repo-local CLAUDE_CONFIG_DIR when CLAUDE_CODE_OAUTH_TOKEN is present', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'oauth-lane',
+      sessionName: 'oauth-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+
+    const savedHome = process.env.HOME;
+    const savedApiKey = process.env.ANTHROPIC_API_KEY;
+    const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.HOME = homeDir;
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'test-oauth-token';
+    delete process.env.CLAUDE_CONFIG_DIR;
+
+    let seenEnv = null;
+    const runner = async (_args, _cwd, env) => {
+      seenEnv = env;
+      return { code: 0, stdout: 'ok\n', stderr: '' };
+    };
+
+    try {
+      await runLaneRequest(options, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, { runner });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+      if (savedApiKey !== undefined) process.env.ANTHROPIC_API_KEY = savedApiKey;
+      if (savedToken !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken;
+      else delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+    }
+
+    const expectedConfigDir = resolve(dir, '.guardrail', 'claude-runtime', 'oauth-lane');
+    const slug = resolve(dir).replace(/[\\/]/g, '-');
+    const hostProjectDir = join(homeDir, 'projects', slug);
+    const localProjectDir = resolve(expectedConfigDir, 'projects', slug);
+    assert.equal(seenEnv.CLAUDE_CONFIG_DIR, expectedConfigDir);
+    assert.ok(lstatSync(hostProjectDir).isSymbolicLink());
+    assert.equal(resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir)), localProjectDir);
+  });
+
+  it('D0z: passes env through unchanged when operator has already set CLAUDE_CONFIG_DIR', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'math-live',
+      sessionName: 'math-live-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+
+    const savedHome = process.env.HOME;
+    const savedApiKey = process.env.ANTHROPIC_API_KEY;
+    const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.HOME = homeDir;
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
+    process.env.CLAUDE_CONFIG_DIR = '/operator/chosen/config';
+
+    let seenEnvRef = null;
+    let seenConfigDir = null;
+    const runner = async (_args, _cwd, env) => {
+      // Capture values at call time, before finally-block restores the env.
+      seenEnvRef = env;
+      seenConfigDir = env.CLAUDE_CONFIG_DIR;
+      return { code: 0, stdout: 'ok\n', stderr: '' };
+    };
+
+    try {
+      await runLaneRequest(options, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, { runner });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+      if (savedApiKey !== undefined) process.env.ANTHROPIC_API_KEY = savedApiKey;
+      else delete process.env.ANTHROPIC_API_KEY;
+      if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+      else delete process.env.CLAUDE_CONFIG_DIR;
+    }
+
+    // Operator override takes precedence; env object is the same reference.
+    assert.equal(seenEnvRef, process.env);
+    assert.equal(seenConfigDir, '/operator/chosen/config');
+  });
+
+  it('D0z: fails closed when the host Claude project path already exists as a non-empty directory', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      laneId: 'math-live',
+      sessionName: 'math-live-session',
+      model: 'sonnet',
+      permissionMode: 'dontAsk',
+      maxBudgetUsd: '10.00',
+    }, dir);
+
+    const slug = resolve(dir).replace(/[\\/]/g, '-');
+    const hostProjectDir = join(homeDir, 'projects', slug);
+    mkdirSync(hostProjectDir, { recursive: true });
+    writeFileSync(join(hostProjectDir, 'existing.txt'), 'occupied\n');
+
+    const savedHome = process.env.HOME;
+    const savedApiKey = process.env.ANTHROPIC_API_KEY;
+    const savedOAuthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.HOME = homeDir;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete process.env.CLAUDE_CONFIG_DIR;
+
+    try {
+      await assert.rejects(
+        () => runLaneRequest(options, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, {
+          runner: async () => ({ code: 0, stdout: 'ok\n', stderr: '' }),
+        }),
+        /Claude project bridge conflict/,
+      );
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+      if (savedApiKey !== undefined) process.env.ANTHROPIC_API_KEY = savedApiKey;
+      if (savedOAuthToken !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedOAuthToken;
+      if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+    }
+
+    assert.deepEqual(readdirSync(hostProjectDir), ['existing.txt']);
+  });
+
+  it('D0z: defaults noSessionPersistence to true for resident Claude lane runs', () => {
+    const dir = tmpLaneDir();
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      sessionName: 'math-live-session',
+    }, dir);
+    assert.equal(options.noSessionPersistence, true);
+  });
+
+  it('D0z: noSessionPersistence can be explicitly disabled with false', () => {
+    const dir = tmpLaneDir();
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      sessionName: 'math-live-session',
+      noSessionPersistence: 'false',
+    }, dir);
+    assert.equal(options.noSessionPersistence, false);
+  });
+
+  it('D0z: noSessionPersistence true causes --no-session-persistence flag in wrapper args', async () => {
+    const dir = tmpLaneDir();
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir, { recursive: true });
+    const options = normalizeGenericResidentLaneOptions({
+      laneDir: '.guardrail/lanes/math',
+      guardrailRepo: '.',
+      workingDir: '.',
+      sessionName: 'math-live-session',
+      // noSessionPersistence omitted → defaults to true
+    }, dir);
+
+    let seenArgs = null;
+    const runner = async (args) => {
+      seenArgs = args;
+      return { code: 0, stdout: 'ok\n', stderr: '' };
+    };
+
+    const savedHome = process.env.HOME;
+    process.env.HOME = homeDir;
+    try {
+      await runLaneRequest(options, { id: 'req-1', prompt: 'status?' }, { startedConversation: false }, { runner });
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      else delete process.env.HOME;
+    }
+
+    assert.ok(seenArgs.includes('--no-session-persistence'), '--no-session-persistence must be in wrapper args when noSessionPersistence=true');
   });
 
   it('builds codex lane wrapper args when tool=codex', async () => {

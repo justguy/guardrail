@@ -1,6 +1,14 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { parseAiProgressLine } from './progress-events.js';
+import {
+  resolveAIWrapperFile,
+  buildAIToolArgs,
+  toolSupportsNoSessionPersistence,
+} from './model-gateway.js';
 
 import {
   createLaneBootError,
@@ -330,7 +338,7 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
     bootNonce: rawOptions.bootNonce || '',
     sessionName: rawOptions.sessionName,
     sessionId: rawOptions.sessionId || '',
-    noSessionPersistence: shellTruthy(rawOptions.noSessionPersistence),
+    noSessionPersistence: (rawOptions.noSessionPersistence != null && rawOptions.noSessionPersistence !== '') ? shellTruthy(rawOptions.noSessionPersistence) : true,
     transportSummary: {
       mode: 'claude-cli',
       model: rawOptions.model || '',
@@ -348,55 +356,155 @@ export function normalizeResidentLaneOptions(rawOptions, baseCwd = process.cwd()
 }
 
 function buildWrapperArgs(options, request, lifecycle) {
-  const wrapperName = options.tool === 'codex' ? 'src/codex-exec-wrapper.js' : 'src/claude-exec-wrapper.js';
-  const wrapperPath = resolve(options.guardrailRepo, wrapperName);
+  const wrapperPath = resolveAIWrapperFile(options.tool, options.guardrailRepo);
   const args = [wrapperPath, '--prompt', request.prompt];
   if (options.inputFiles.length > 0) args.push('--input-files', options.inputFiles.join(','));
   if (options.model) args.push('--model', options.model);
   args.push('--working-dir', options.workingDir);
   if (options.addDirs.length > 0) args.push('--add-dirs', options.addDirs.join(','));
-  if (options.tool === 'codex') {
-    if (options.profile) args.push('--profile', options.profile);
-    if (options.sandbox) args.push('--sandbox', options.sandbox);
-    if (options.imageFiles.length > 0) args.push('--image-files', options.imageFiles.join(','));
-    if (options.color) args.push('--color', options.color);
-    if (options.oss) args.push('--oss', 'true');
-    if (options.localProvider) args.push('--local-provider', options.localProvider);
-    if (options.skipGitRepoCheck) args.push('--skip-git-repo-check', 'true');
-    if (options.ephemeral) args.push('--ephemeral', 'true');
-    if (options.fullAuto) args.push('--full-auto', 'true');
-  } else {
-    if (options.effort) args.push('--effort', options.effort);
-    if (options.permissionMode) args.push('--permission-mode', options.permissionMode);
-    if (options.outputFormat) args.push('--output-format', options.outputFormat);
-    if (options.maxBudgetUsd) args.push('--max-budget-usd', options.maxBudgetUsd);
-    if (options.allowedTools) args.push('--allowed-tools', options.allowedTools);
-    if (options.systemPrompt) args.push('--system-prompt', options.systemPrompt);
-  }
+
+  // Tool-specific flags (provider routing via model-gateway seam)
+  const toolArgs = buildAIToolArgs(options.tool, options, {
+    progressLaneDir: options.laneDir,
+    requestId: request.id,
+  });
+  args.push(...toolArgs);
+
   args.push('--session-name', options.sessionName);
-  if (options.noSessionPersistence && options.tool !== 'codex') args.push('--no-session-persistence', 'true');
+  if (options.noSessionPersistence && toolSupportsNoSessionPersistence(options.tool)) {
+    args.push('--no-session-persistence', 'true');
+  }
   args.push('--lifecycle', lifecycle);
   if (options.sessionId) args.push('--session-id', options.sessionId);
   return args;
 }
 
-async function spawnClaudeWrapper(args, cwd) {
+function runtimeHomeDir(options) {
+  const slot = options.laneId || options.sessionName || 'default';
+  return resolve(options.guardrailRepo, '.guardrail', 'claude-runtime', slot);
+}
+
+function encodeClaudeProjectSlug(workingDir) {
+  return resolve(workingDir).replace(/[\\/]/g, '-');
+}
+
+function runtimeProjectDir(options) {
+  return resolve(runtimeHomeDir(options), 'projects', encodeClaudeProjectSlug(options.workingDir));
+}
+
+function hostClaudeProjectDir(options) {
+  const home = process.env.HOME || homedir();
+  return resolve(home, 'projects', encodeClaudeProjectSlug(options.workingDir));
+}
+
+function ensureClaudeProjectBridge(options) {
+  const localProjectDir = runtimeProjectDir(options);
+  const hostProjectDir = hostClaudeProjectDir(options);
+  mkdirSync(localProjectDir, { recursive: true });
+  mkdirSync(dirname(hostProjectDir), { recursive: true });
+
+  if (!existsSync(hostProjectDir)) {
+    symlinkSync(localProjectDir, hostProjectDir, 'dir');
+    return;
+  }
+
+  const stat = lstatSync(hostProjectDir);
+  if (stat.isSymbolicLink()) {
+    const target = resolve(dirname(hostProjectDir), readlinkSync(hostProjectDir));
+    if (target !== localProjectDir) {
+      throw new Error(
+        `Claude project bridge conflict: ${hostProjectDir} already points to ${target}, expected ${localProjectDir}`,
+      );
+    }
+    return;
+  }
+
+  if (stat.isDirectory()) {
+    if (readdirSync(hostProjectDir).length === 0) {
+      rmSync(hostProjectDir, { recursive: true, force: false });
+      symlinkSync(localProjectDir, hostProjectDir, 'dir');
+      return;
+    }
+    throw new Error(`Claude project bridge conflict: ${hostProjectDir} exists as a non-empty directory`);
+  }
+
+  throw new Error(`Claude project bridge conflict: ${hostProjectDir} exists and is not a directory symlink`);
+}
+
+/**
+ * Build the environment for a Claude subprocess.
+ *
+ * D0z: Inject CLAUDE_CONFIG_DIR pointing to a repo-local runtime directory when
+ * auth comes from env vars. Claude also attempts to create a separate host-global
+ * per-project directory under ~/projects/<encoded-cwd>, so Guardrail bridges that
+ * path back into the same repo-local runtime dir before spawn.
+ *
+ * This is only safe when the auth credential does NOT depend on the
+ * CLAUDE_CONFIG_DIR value being exactly ~/.claude:
+ *   - ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN — credentials come from the
+ *     environment; the keychain is not consulted.
+ *   - Operator-set CLAUDE_CONFIG_DIR — already points where the operator wants
+ *     it; pass through unchanged.
+ *
+ * For macOS keychain auth (no API key, no operator override): the Claude
+ * binary derives the keychain service name from a hash of CLAUDE_CONFIG_DIR.
+ * Changing the value breaks the service name lookup and loses credentials.
+ * Guardrail falls back to process.env in that case so keychain lookup stays intact.
+ * The per-project write surface is still redirected through the project bridge.
+ */
+function buildClaudeRuntimeEnv(options) {
+  if (process.env.CLAUDE_CONFIG_DIR) {
+    // Operator already configured a state directory; respect it unconditionally.
+    return process.env;
+  }
+  if (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    // API-key / token auth: credentials are env-sourced, not keychain-dependent.
+    // Safe to redirect Claude's project/session state to a repo-local dir.
+    const localStateDir = runtimeHomeDir(options);
+    mkdirSync(localStateDir, { recursive: true });
+    return { ...process.env, CLAUDE_CONFIG_DIR: localStateDir };
+  }
+  // Keychain auth: cannot change CLAUDE_CONFIG_DIR without breaking the keychain
+  // service name hash. Pass env through; --no-session-persistence limits writes.
+  return process.env;
+}
+
+async function spawnClaudeWrapper(args, cwd, env = process.env, hooks = {}) {
   return await new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(process.execPath, args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: process.env,
+      env,
     });
     let stdout = '';
     let stderr = '';
+    let stderrLineBuffer = '';
     child.stdout.on('data', (chunk) => {
       stdout += chunk.toString();
     });
     child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
+      const text = chunk.toString();
+      stderr += text;
+      stderrLineBuffer += text;
+      while (stderrLineBuffer.includes('\n')) {
+        const newlineIndex = stderrLineBuffer.indexOf('\n');
+        const line = stderrLineBuffer.slice(0, newlineIndex).trimEnd();
+        stderrLineBuffer = stderrLineBuffer.slice(newlineIndex + 1);
+        if (line) {
+          hooks.onStderrLine?.(line);
+          const event = parseAiProgressLine(line);
+          if (event) hooks.onProgress?.(event);
+        }
+      }
     });
     child.on('error', rejectPromise);
     child.on('close', (code, signal) => {
+      const finalLine = stderrLineBuffer.trim();
+      if (finalLine) {
+        hooks.onStderrLine?.(finalLine);
+        const event = parseAiProgressLine(finalLine);
+        if (event) hooks.onProgress?.(event);
+      }
       if (signal) {
         resolvePromise({ code: 1, stdout, stderr: `${stderr}\nclaude wrapper exited on signal ${signal}`.trim() });
         return;
@@ -510,7 +618,16 @@ const CLAUDE_LANE_ADAPTER = {
     const runner = deps.runner || spawnClaudeWrapper;
     const lifecycle = state.startedConversation ? 'continue' : 'start';
     const startedAt = new Date().toISOString();
-    const result = await runner(buildWrapperArgs(options, request, lifecycle), options.guardrailRepo);
+    ensureClaudeProjectBridge(options);
+    const result = await runner(
+      buildWrapperArgs(options, request, lifecycle),
+      options.guardrailRepo,
+      buildClaudeRuntimeEnv(options),
+      {
+        onProgress: deps.onProgress,
+        onStderrLine: deps.onStderrLine,
+      },
+    );
     return {
       requestId: request.id,
       prompt: request.prompt,

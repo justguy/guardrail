@@ -188,13 +188,16 @@ Minimum shape:
 - Guardrail now defaults resident-lane key and host-state paths to repo-local `.guardrail/host-lanes/...` for autonomous repo-scoped runs.
 - That removes the repeated outer-sandbox approval churn for ordinary `lane start`, `lane send`, `lane status`, `lane inspect`, `lane wait`, and `lane result` traffic in this repo-scoped fire-trial mode.
 - Broader host-wide portfolio views remain an explicit widening step rather than the default.
-- This gap was tracked as `D0z` and is now closed in the roadmap.
+- This gap was initially tracked as `D0z` and marked closed too early.
+- The fire trial proved the original D0z scope was incomplete: repo-local Guardrail lane state was not enough while Claude still wrote a host-global per-project path before packet work started.
+- `D0z` is now closed with the follow-up packet in `docs/plans/PLAN_d0z_true_repo_local_autonomous_tool_state.md` and the implemented bridge documented in `docs/plans/REPORT_d0z_true_repo_local_autonomous_tool_state.md`.
 
 ### Operator Rule: Approved Lane Prefix Reuse
 
 - If the supervising environment has already approved the `node src/cli.js lane` command prefix, later lane operations inside that same boundary must reuse the approved prefix directly.
 - Do not reissue routine `lane send`, `lane status`, `lane inspect`, `lane wait`, or `lane result` calls as new escalated requests once that prefix is already approved.
 - When the next run already knows it needs multiple prompt files on the same lane, prefer one `node src/cli.js lane run-sequence ...` invocation instead of hand-driving repeated `send` / `wait` calls from the supervising shell.
+- `lane run-sequence` was initially too weak for long-running packets because it could return early on `request_still_running` and leave a completed request without explicit lane closeout. That gap is now fixed: the sequence runner stays attached until each step resolves, and `--stop-when-done` closes the lane after the final successful packet when the operator wants strict session closeout instead of later idle expiry.
 - Ask for a fresh approval only when the boundary truly changes:
   - widened scope
   - different runtime/tool/model/system prompt/budget in an approval-bound way

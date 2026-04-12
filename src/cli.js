@@ -53,6 +53,9 @@ function normalizeLaneCliOptions(raw = {}) {
   const guardrailRepo = raw.guardrailRepo || '.';
   const keyPath = raw.keyPath || (laneId ? defaultLaneKeyPath(laneId, guardrailRepo) : '');
   const hostStateDir = raw.hostStateDir || defaultLaneHostStateDir(guardrailRepo);
+  const promptFiles = Array.isArray(raw.promptFiles)
+    ? raw.promptFiles
+    : (typeof raw.promptFiles === 'string' && raw.promptFiles.trim() ? [raw.promptFiles] : []);
   return {
     ...raw,
     laneId,
@@ -67,6 +70,7 @@ function normalizeLaneCliOptions(raw = {}) {
     scopePaths: raw.scopePaths || [],
     resourceMode: raw.resourceMode || raw.scopeMode || 'warn',
     resources: raw.resources || [],
+    promptFiles,
     hostStateDir,
   };
 }
@@ -392,7 +396,7 @@ Commands:
   run --template <path> --input k=v     Run a template under Guardrail
   lane start [flags]                    Start a resident interactive lane
   lane send [flags]                     Send one message through a resident lane
-  lane run-sequence [flags]             Send prompt files sequentially through one resident lane
+  lane run-sequence [flags]             Supervise prompt files sequentially through one resident lane
   lane chat [flags]                     Send one message and wait like a guarded chat turn
   lane result [flags]                   Read the latest or named resident lane result
   lane wait [flags]                     Wait for a resident lane request to complete
@@ -481,6 +485,7 @@ Examples:
   guardrail lane start --id wrapper-live --tool prompt-wrapper --wrapper-command ./scripts/my-wrapper.js --wrapper-arg mode=review
   guardrail lane send --id claude-live --prompt "2x3=?"
   guardrail lane run-sequence --id claude-live --prompt-file docs/references/p1.md --prompt-file docs/references/p2.md
+  guardrail lane run-sequence --id claude-live --prompt-file docs/references/p1.md --stop-when-done
   guardrail lane chat --id claude-live --prompt "hello"
   guardrail lane result --id claude-live
   guardrail lane wait --id claude-live --request-id req-123
@@ -1016,6 +1021,7 @@ export function parseArgs(argv) {
       '--request-id': 'requestId',
       '--prompt': 'prompt',
       '--prompt-file': 'promptFiles',
+      '--stop-when-done': { key: 'stopWhenDone', boolean: true },
       '--action': 'action',
       '--all': { key: 'all', boolean: true },
       '--wait': { key: 'wait', boolean: true },
@@ -1810,6 +1816,7 @@ async function main() {
       assertValidResidentLaneTool,
       getResidentLaneResult,
       getResidentLaneStatus,
+      stopResidentLane,
       waitForResidentLaneResult,
     } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
@@ -1829,6 +1836,16 @@ async function main() {
       process.exit(1);
     }
     const outputs = [];
+    const waitForSequenceStep = async (requestId) => {
+      for (;;) {
+        const waited = await waitForResidentLaneResult({
+          ...laneOpts,
+          requestId,
+          timeoutMs: laneOpts.timeoutMs || '5000',
+        });
+        if (waited.status !== 'pending') return waited;
+      }
+    };
     for (let index = 0; index < promptFiles.length; index += 1) {
       const promptFile = resolve(promptFiles[index]);
       const prompt = readFileSync(promptFile, 'utf8');
@@ -1901,10 +1918,7 @@ async function main() {
       }
 
       if (response?.status === 'pending') {
-        response = await waitForResidentLaneResult({
-          ...laneOpts,
-          requestId,
-        });
+        response = await waitForSequenceStep(requestId);
       }
 
       await appendLaneAuditEntry(laneOpts, 'lane_run_sequence', {
@@ -1944,6 +1958,11 @@ async function main() {
     }
 
     const payload = { ok: true, count: outputs.length, outputs };
+    if (laneOpts.stopWhenDone === true || laneOpts.stopWhenDone === 'true') {
+      const stopped = stopResidentLane(laneOpts);
+      payload.stoppedLane = true;
+      payload.stop = stopped;
+    }
     if (parsed.json) {
       process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     } else {

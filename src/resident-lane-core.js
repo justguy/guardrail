@@ -1,4 +1,5 @@
 import {
+  appendFileSync,
   chmodSync,
   closeSync,
   constants as fsConstants,
@@ -832,6 +833,17 @@ function updateStateFile(laneDir, state) {
   writeJson(lanePaths(laneDir).statePath, state);
 }
 
+function appendLaneLogLine(logPath, line) {
+  if (!logPath || typeof line !== 'string') return;
+  const text = line.trimEnd();
+  if (!text) return;
+  try {
+    appendFileSync(logPath, `${text}\n`);
+  } catch {
+    // Best effort.
+  }
+}
+
 function writeLaneResult(laneDir, response) {
   const resultPath = laneResultPath(laneDir, response.requestId);
   writeJson(resultPath, response);
@@ -1602,6 +1614,11 @@ function collectResidentLaneStatusBase(rawOptions) {
     pollIntervalMs: state?.pollIntervalMs ?? null,
     idleTimeoutMs: state?.idleTimeoutMs ?? null,
     healthTimeoutMs: state?.healthTimeoutMs ?? null,
+    currentAiState: state?.currentAiState ?? null,
+    currentAiEvent: state?.currentAiEvent ?? null,
+    currentAiPhase: state?.currentAiPhase ?? null,
+    currentAiMessage: state?.currentAiMessage ?? null,
+    currentAiTimestamp: state?.currentAiTimestamp ?? null,
     control: readJson(paths.controlPath, null),
     logPath: state?.logPath ?? paths.logPath,
     keyPath: effectiveKeyPath || null,
@@ -2043,10 +2060,37 @@ export async function runResidentLaneDaemon(options, adapter, deps = {}) {
         currentRequestId: request.id,
         currentRequestStartedAt: new Date().toISOString(),
         lastActivityAt: new Date().toISOString(),
+        currentAiState: 'running',
+        currentAiEvent: 'ai_checkpoint',
+        currentAiPhase: 'supervisor_init',
+        currentAiMessage: 'Resident lane request accepted.',
+        currentAiTimestamp: new Date().toISOString(),
       };
       updateStateFile(options.laneDir, state);
 
-      const response = await runResidentLaneRequest(adapter, options, request, state, deps);
+      const response = await runResidentLaneRequest(adapter, options, request, state, {
+        ...deps,
+        onProgress: (event) => {
+          const nowIso = event?.timestamp || new Date().toISOString();
+          lastActivityAtMs = Date.now();
+          if (state.status === 'stalled') {
+            state = { ...state, status: 'busy' };
+          }
+          state = {
+            ...state,
+            lastActivityAt: nowIso,
+            currentAiState: event?.status || 'running',
+            currentAiEvent: event?.event || null,
+            currentAiPhase: event?.phase || null,
+            currentAiMessage: event?.message || null,
+            currentAiTimestamp: nowIso,
+          };
+          updateStateFile(options.laneDir, state);
+        },
+        onStderrLine: (line) => {
+          appendLaneLogLine(paths.logPath, line);
+        },
+      });
       const resultPath = writeLaneResult(options.laneDir, response);
       state = {
         ...state,
@@ -2060,6 +2104,11 @@ export async function runResidentLaneDaemon(options, adapter, deps = {}) {
         lastExitCode: response.exitCode,
         lastResultPath: resultPath,
         lastActivityAt: response.completedAt,
+        currentAiState: null,
+        currentAiEvent: null,
+        currentAiPhase: null,
+        currentAiMessage: null,
+        currentAiTimestamp: null,
       };
       updateStateFile(options.laneDir, state);
       writeResponse(responseFd, response);
@@ -2084,6 +2133,11 @@ export async function runResidentLaneDaemon(options, adapter, deps = {}) {
         lastExitCode: failure.exitCode,
         lastResultPath: resultPath,
         lastActivityAt: failure.completedAt,
+        currentAiState: null,
+        currentAiEvent: null,
+        currentAiPhase: null,
+        currentAiMessage: null,
+        currentAiTimestamp: null,
       };
       updateStateFile(options.laneDir, state);
       writeResponse(responseFd, failure);

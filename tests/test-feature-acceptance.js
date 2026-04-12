@@ -1106,6 +1106,328 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(sequenceEntries.every((entry) => entry.status === 'success'), true);
   });
 
+  it('guardrail lane run-sequence waits through a pending step and returns the completed result', async () => {
+    const dir = tmpDir();
+    const guardrailRepo = join(dir, 'repo');
+    const laneDir = join(dir, 'lane');
+    mkdirSync(join(guardrailRepo, '.guardrail'), { recursive: true });
+    mkdirSync(join(laneDir, 'results'), { recursive: true });
+    const requestFifo = join(laneDir, 'requests.fifo');
+    const responseFifo = join(laneDir, 'responses.fifo');
+    assert.equal(spawnSync('mkfifo', [requestFifo]).status, 0);
+    assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
+    const promptA = join(dir, 'p1.md');
+    writeFileSync(promptA, 'slow prompt', 'utf8');
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'seq-pending',
+      sessionName: 'seq-pending',
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const laneServer = (async () => {
+      const requestFd = openSync(requestFifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+      const chunk = Buffer.alloc(4096);
+      let buffer = '';
+      const startedAt = Date.now();
+      try {
+        for (;;) {
+          if ((Date.now() - startedAt) > 5000) {
+            throw new Error('Timed out waiting for pending lane sequence request');
+          }
+          try {
+            const bytesRead = readSync(requestFd, chunk, 0, chunk.length, null);
+            if (bytesRead > 0) {
+              buffer += chunk.toString('utf8', 0, bytesRead);
+              const newlineIndex = buffer.indexOf('\n');
+              if (newlineIndex >= 0) {
+                const request = JSON.parse(buffer.slice(0, newlineIndex));
+                writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+                  pid: process.pid,
+                  status: 'busy',
+                  laneId: 'seq-pending',
+                  sessionName: 'seq-pending',
+                  currentRequestId: request.id,
+                  currentRequestStartedAt: new Date().toISOString(),
+                  lastRequestId: request.id,
+                  lastActivityAt: new Date().toISOString(),
+                }), 'utf8');
+                await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+                writeFileSync(join(laneDir, 'results', `${request.id}.json`), JSON.stringify({
+                  requestId: request.id,
+                  ok: true,
+                  stdout: 'done\n',
+                  resultPath: join(laneDir, 'results', `${request.id}.json`),
+                }), 'utf8');
+                writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+                  pid: process.pid,
+                  status: 'ready',
+                  laneId: 'seq-pending',
+                  sessionName: 'seq-pending',
+                  lastRequestId: request.id,
+                  lastCompletedRequestId: request.id,
+                  lastCompletedAt: new Date().toISOString(),
+                  lastExitCode: 0,
+                  lastResultPath: join(laneDir, 'results', `${request.id}.json`),
+                  lastActivityAt: new Date().toISOString(),
+                }), 'utf8');
+                return;
+              }
+            }
+          } catch (err) {
+            if (err?.code !== 'EAGAIN') throw err;
+          }
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+        }
+      } finally {
+        closeSync(requestFd);
+      }
+    })();
+
+    const laneSequence = new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn('node', [
+        join(process.cwd(), 'src', 'cli.js'),
+        'lane', 'run-sequence',
+        '--guardrail-repo', guardrailRepo,
+        '--lane-dir', laneDir,
+        '--prompt-file', promptA,
+        '--timeout-ms', '5',
+        '--json',
+      ], {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', rejectPromise);
+      child.on('close', (code) => {
+        resolvePromise({ exitCode: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
+      });
+    });
+
+    const [result] = await Promise.all([laneSequence, laneServer]);
+    assert.equal(result.exitCode, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.count, 1);
+    assert.equal(parsed.outputs[0].stdout, 'done\n');
+  });
+
+  it('guardrail lane run-sequence --stop-when-done stops the lane after the final successful step', async () => {
+    const dir = tmpDir();
+    const guardrailRepo = join(dir, 'repo');
+    const laneDir = join(dir, 'lane');
+    mkdirSync(join(guardrailRepo, '.guardrail'), { recursive: true });
+    mkdirSync(laneDir, { recursive: true });
+    const requestFifo = join(laneDir, 'requests.fifo');
+    const responseFifo = join(laneDir, 'responses.fifo');
+    assert.equal(spawnSync('mkfifo', [requestFifo]).status, 0);
+    assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
+    const promptA = join(dir, 'p1.md');
+    writeFileSync(promptA, 'stop prompt', 'utf8');
+    const keepalive = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], {
+      stdio: 'ignore',
+    });
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: keepalive.pid,
+      status: 'ready',
+      laneId: 'seq-stop',
+      sessionName: 'seq-stop',
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const laneServer = (async () => {
+      const requestFd = openSync(requestFifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+      let responseFd = null;
+      const chunk = Buffer.alloc(4096);
+      let buffer = '';
+      const startedAt = Date.now();
+      try {
+        for (;;) {
+          if ((Date.now() - startedAt) > 5000) {
+            throw new Error('Timed out waiting for stop-when-done request');
+          }
+          try {
+            const bytesRead = readSync(requestFd, chunk, 0, chunk.length, null);
+            if (bytesRead > 0) {
+              buffer += chunk.toString('utf8', 0, bytesRead);
+              const newlineIndex = buffer.indexOf('\n');
+              if (newlineIndex >= 0) {
+                const request = JSON.parse(buffer.slice(0, newlineIndex));
+                responseFd = openSync(responseFifo, fsConstants.O_WRONLY);
+                writeSync(responseFd, `${JSON.stringify({ requestId: request.id, ok: true, stdout: 'done\n' })}\n`, undefined, 'utf8');
+                closeSync(responseFd);
+                responseFd = null;
+                return;
+              }
+            }
+          } catch (err) {
+            if (err?.code !== 'EAGAIN') throw err;
+          }
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+        }
+      } finally {
+        closeSync(requestFd);
+        if (responseFd !== null) closeSync(responseFd);
+      }
+    })();
+
+    const laneSequence = new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn('node', [
+        join(process.cwd(), 'src', 'cli.js'),
+        'lane', 'run-sequence',
+        '--guardrail-repo', guardrailRepo,
+        '--lane-dir', laneDir,
+        '--prompt-file', promptA,
+        '--stop-when-done',
+        '--json',
+      ], {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', rejectPromise);
+      child.on('close', (code) => {
+        resolvePromise({ exitCode: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
+      });
+    });
+
+    try {
+      const [result] = await Promise.all([laneSequence, laneServer]);
+      assert.equal(result.exitCode, 0, result.stderr);
+      const parsed = JSON.parse(result.stdout);
+      assert.equal(parsed.ok, true);
+      assert.equal(parsed.stoppedLane, true);
+      assert.equal(parsed.stop?.stopped, true);
+      const stoppedState = JSON.parse(readFileSync(join(laneDir, 'state.json'), 'utf8'));
+      assert.equal(stoppedState.status, 'stopped');
+    } finally {
+      keepalive.kill('SIGTERM');
+    }
+  });
+
+  it('guardrail lane run-sequence preserves the real failure reason after a pending step fails', async () => {
+    const dir = tmpDir();
+    const guardrailRepo = join(dir, 'repo');
+    const laneDir = join(dir, 'lane');
+    mkdirSync(join(guardrailRepo, '.guardrail'), { recursive: true });
+    mkdirSync(join(laneDir, 'results'), { recursive: true });
+    const requestFifo = join(laneDir, 'requests.fifo');
+    const responseFifo = join(laneDir, 'responses.fifo');
+    assert.equal(spawnSync('mkfifo', [requestFifo]).status, 0);
+    assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
+    const promptA = join(dir, 'p1.md');
+    writeFileSync(promptA, 'fail prompt', 'utf8');
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'seq-fail',
+      sessionName: 'seq-fail',
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const laneServer = (async () => {
+      const requestFd = openSync(requestFifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+      const chunk = Buffer.alloc(4096);
+      let buffer = '';
+      const startedAt = Date.now();
+      try {
+        for (;;) {
+          if ((Date.now() - startedAt) > 5000) {
+            throw new Error('Timed out waiting for failing lane sequence request');
+          }
+          try {
+            const bytesRead = readSync(requestFd, chunk, 0, chunk.length, null);
+            if (bytesRead > 0) {
+              buffer += chunk.toString('utf8', 0, bytesRead);
+              const newlineIndex = buffer.indexOf('\n');
+              if (newlineIndex >= 0) {
+                const request = JSON.parse(buffer.slice(0, newlineIndex));
+                writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+                  pid: process.pid,
+                  status: 'busy',
+                  laneId: 'seq-fail',
+                  sessionName: 'seq-fail',
+                  currentRequestId: request.id,
+                  currentRequestStartedAt: new Date().toISOString(),
+                  lastRequestId: request.id,
+                  lastActivityAt: new Date().toISOString(),
+                }), 'utf8');
+                await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+                writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+                  pid: process.pid,
+                  status: 'failed',
+                  laneId: 'seq-fail',
+                  sessionName: 'seq-fail',
+                  currentRequestId: request.id,
+                  lastRequestId: request.id,
+                  failureReason: 'synthetic_failure',
+                  failureStage: 'test',
+                  lastActivityAt: new Date().toISOString(),
+                }), 'utf8');
+                return;
+              }
+            }
+          } catch (err) {
+            if (err?.code !== 'EAGAIN') throw err;
+          }
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+        }
+      } finally {
+        closeSync(requestFd);
+      }
+    })();
+
+    const laneSequence = new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn('node', [
+        join(process.cwd(), 'src', 'cli.js'),
+        'lane', 'run-sequence',
+        '--guardrail-repo', guardrailRepo,
+        '--lane-dir', laneDir,
+        '--prompt-file', promptA,
+        '--timeout-ms', '5',
+        '--json',
+      ], {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', rejectPromise);
+      child.on('close', (code) => {
+        resolvePromise({ exitCode: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
+      });
+    });
+
+    const [result] = await Promise.all([laneSequence, laneServer]);
+    assert.equal(result.exitCode, 1, result.stdout);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.response.status, 'failed');
+    assert.equal(parsed.response.reason, 'lane_failed');
+    assert.equal(parsed.response.failureReason, 'synthetic_failure');
+  });
+
   it('guardrail lane send returns lane_expired when the host key is missing', () => {
     const dir = tmpDir();
     const laneDir = join(dir, 'lane');
