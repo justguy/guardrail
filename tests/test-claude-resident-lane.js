@@ -222,8 +222,18 @@ describe('Claude resident lane', () => {
     let first;
     let second;
     try {
-      first = await runLaneRequest(options, { id: 'req-1', prompt: '4x3=?' }, { startedConversation: false }, { runner });
-      second = await runLaneRequest(options, { id: 'req-2', prompt: '4x4=?' }, { startedConversation: true }, { runner });
+      first = await runLaneRequest(options, {
+        id: 'req-1',
+        prompt: '4x3=?',
+        reportArtifact: 'docs/plans/REPORT_req1.md',
+        completionMode: 'artifact',
+      }, { startedConversation: false }, { runner });
+      second = await runLaneRequest(options, {
+        id: 'req-2',
+        prompt: '4x4=?',
+        reportArtifact: 'docs/plans/REPORT_req2.md',
+        completionMode: 'artifact',
+      }, { startedConversation: true }, { runner });
     } finally {
       if (savedHome !== undefined) process.env.HOME = savedHome;
       else delete process.env.HOME;
@@ -246,6 +256,10 @@ describe('Claude resident lane', () => {
     assert.equal(getFlagValue(calls[1].args, '--session-id'), second.runtimeSessionId);
     assert.ok(calls[0].args.includes('--session-name'));
     assert.ok(calls[0].args.includes('math-live-session'));
+    assert.equal(getFlagValue(calls[0].args, '--guardrail-report-artifact'), 'docs/plans/REPORT_req1.md');
+    assert.equal(getFlagValue(calls[0].args, '--guardrail-completion-mode'), 'artifact');
+    assert.equal(getFlagValue(calls[1].args, '--guardrail-report-artifact'), 'docs/plans/REPORT_req2.md');
+    assert.equal(getFlagValue(calls[1].args, '--guardrail-completion-mode'), 'artifact');
     assert.equal(typeof calls[0].hooks, 'object');
     assert.equal(calls[0].hooks.onProgress, undefined);
     assert.equal(calls[0].hooks.onStderrLine, undefined);
@@ -1951,6 +1965,61 @@ describe('Claude resident lane', () => {
     }
   });
 
+  it('sends report-artifact and completion-mode metadata over the resident lane FIFOs', async () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'math');
+    mkdirSync(laneDir, { recursive: true });
+    const paths = lanePaths(laneDir);
+    mkfifo(paths.requestFifo);
+    mkfifo(paths.responseFifo);
+
+    const requestFd = openSync(paths.requestFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK);
+    const responseFd = openSync(paths.responseFifo, fsConstants.O_RDWR);
+    const serverDone = (async () => {
+      const chunk = Buffer.alloc(4096);
+      let buffer = '';
+      const startedAt = Date.now();
+      for (;;) {
+        if ((Date.now() - startedAt) > 5000) {
+          throw new Error('Timed out waiting for FIFO request metadata');
+        }
+        try {
+          const bytesRead = readSync(requestFd, chunk, 0, chunk.length, null);
+          if (bytesRead > 0) {
+            buffer += chunk.toString('utf8', 0, bytesRead);
+            const newlineIndex = buffer.indexOf('\n');
+            if (newlineIndex >= 0) {
+              const request = JSON.parse(buffer.slice(0, newlineIndex));
+              assert.equal(request.reportArtifact, 'docs/plans/REPORT_demo.md');
+              assert.equal(request.completionMode, 'artifact');
+              writeSync(responseFd, `${JSON.stringify({ requestId: request.id, ok: true, stdout: 'ok\n' })}\n`, undefined, 'utf8');
+              return;
+            }
+          }
+        } catch (err) {
+          if (err?.code !== 'EAGAIN') throw err;
+        }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+      }
+    })();
+
+    try {
+      const responsePromise = sendResidentLaneMessage([
+        '--lane-dir', laneDir,
+        '--request-id', 'req-meta',
+        '--prompt', 'do work',
+        '--report-artifact', 'docs/plans/REPORT_demo.md',
+        '--completion-mode', 'artifact',
+      ]);
+      const [response] = await Promise.all([responsePromise, serverDone]);
+      assert.equal(response.ok, true);
+      assert.equal(response.stdout, 'ok\n');
+    } finally {
+      closeSync(requestFd);
+      closeSync(responseFd);
+    }
+  });
+
   it('signs and validates requests with an inherited auth fd secret', async () => {
     const dir = tmpLaneDir();
     const laneDir = join(dir, '.guardrail', 'lanes', 'math');
@@ -1982,7 +2051,12 @@ describe('Claude resident lane', () => {
               const request = JSON.parse(buffer.slice(0, newlineIndex));
               assert.equal(
                 request.signature,
-                signLaneRequest({ id: request.id, prompt: request.prompt }, 'resident-secret'),
+                signLaneRequest({
+                  id: request.id,
+                  prompt: request.prompt,
+                  reportArtifact: request.reportArtifact || '',
+                  completionMode: request.completionMode || '',
+                }, 'resident-secret'),
               );
               assert.doesNotThrow(() => validateLaneRequest(request, 'resident-secret'));
               writeSync(responseFd, `${JSON.stringify({ requestId: request.id, ok: true, stdout: '25\n' })}\n`, undefined, 'utf8');
@@ -2001,6 +2075,8 @@ describe('Claude resident lane', () => {
         '--lane-dir', laneDir,
         '--request-id', 'req-signed',
         '--prompt', '5x5=?',
+        '--report-artifact', 'docs/plans/REPORT_signed.md',
+        '--completion-mode', 'artifact',
         '--auth-fd', String(secretFd),
       ]);
       const [response] = await Promise.all([responsePromise, serverDone]);

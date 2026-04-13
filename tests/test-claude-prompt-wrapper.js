@@ -8,6 +8,7 @@ import {
   progressEventRequestsExit,
   resolveInteractiveSubmitDelayMs,
   resolveInteractiveSubmitSequence,
+  stderrLooksLikeInteractiveWrapperFailure,
 } from '../src/claude-prompt-wrapper.js';
 
 describe('Claude prompt wrapper', () => {
@@ -67,9 +68,26 @@ describe('Claude prompt wrapper', () => {
 
   it('can log outbound paste and submit bytes for interactive PTY forensics', () => {
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /proc append_hex_log \{file_path label text\} \{/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /proc append_event_log \{file_path label\} \{/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /proc send_logged \{file_path label text\} \{/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /GUARDRAIL_PTY_SEND_HEX_LOG/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /GUARDRAIL_PTY_EVENT_LOG/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /send_logged \$send_hex_log "stdin" \$submit_sequence/);
+  });
+
+  it('waits for a post-paste submit-ready beacon before sending the submit sequence', () => {
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /proc submit_ready_beacon_seen \{text\} \{/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /string first \{\[Pasted text\} \$cleaned/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /set submit_sent 0/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /append post_paste_buffer \$chunk/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\[submit_ready_beacon_seen \$post_paste_buffer\]\} \{/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /send_logged \$send_hex_log "stdin" \$submit_sequence/);
+  });
+
+  it('fails closed on internal expect or Tcl wrapper errors', () => {
+    assert.equal(stderrLooksLikeInteractiveWrapperFailure('missing "\nin expression "foo"\ninvoked from within'), true);
+    assert.equal(stderrLooksLikeInteractiveWrapperFailure('while executing\n"bad command"'), true);
+    assert.equal(stderrLooksLikeInteractiveWrapperFailure('[guardrail-ai-progress] {"event":"ai_checkpoint"}'), false);
   });
 
   it('only allows prompt-repaint completion after assistant output has appeared', () => {
@@ -81,8 +99,15 @@ describe('Claude prompt wrapper', () => {
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\!\$assistant_response_seen && \[assistant_output_seen \$recent_buffer\]\} \{/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\[turn_completion_seen \$recent_buffer\]\} \{/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /Claude is waiting for your input/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /Thinking\|Beaming\|Schlepping\|Planning\|Searching\|Reading\|Writing/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\$assistant_response_seen && \[ready_beacon_seen \$recent_buffer\]\} \{/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /exit 0/);
+  });
+
+  it('only uses terminal completion heuristics for direct completion mode', () => {
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\$env\(GUARDRAIL_COMPLETION_MODE\) eq "direct"\} \{/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\[turn_completion_seen \$recent_buffer\]\} \{/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\$assistant_response_seen && \[ready_beacon_seen \$recent_buffer\]\} \{/);
   });
 
   it('requests interactive exit on completion and soft-state progress sentinels', () => {

@@ -75,6 +75,12 @@ function normalizeLaneCliOptions(raw = {}) {
   };
 }
 
+function derivePromptFileReportArtifact(promptText = '') {
+  if (typeof promptText !== 'string' || !promptText.trim()) return '';
+  const match = promptText.match(/Declared report artifact:\s*\n-\s*`([^`]+)`/m);
+  return match ? match[1].trim() : '';
+}
+
 function formatLaneScope(status = {}) {
   const scopeType = status.scopeType || 'none';
   if (scopeType === 'none') return 'none';
@@ -1021,6 +1027,8 @@ export function parseArgs(argv) {
       '--request-id': 'requestId',
       '--prompt': 'prompt',
       '--prompt-file': 'promptFiles',
+      '--report-artifact': 'reportArtifact',
+      '--completion-mode': 'completionMode',
       '--stop-when-done': { key: 'stopWhenDone', boolean: true },
       '--action': 'action',
       '--all': { key: 'all', boolean: true },
@@ -1756,6 +1764,8 @@ async function main() {
         '--lane-dir', laneOpts.laneDir,
         '--request-id', requestId,
         '--prompt', laneOpts.prompt,
+        ...(laneOpts.reportArtifact ? ['--report-artifact', laneOpts.reportArtifact] : []),
+        ...(laneOpts.completionMode ? ['--completion-mode', laneOpts.completionMode] : []),
         '--timeout-ms', laneOpts.timeoutMs || '30000',
         ...(keyFd !== null ? ['--auth-fd', String(keyFd)] : []),
       ]);
@@ -1871,6 +1881,8 @@ async function main() {
     for (let index = 0; index < promptFiles.length; index += 1) {
       const promptFile = resolve(promptFiles[index]);
       const prompt = readFileSync(promptFile, 'utf8');
+      const reportArtifact = derivePromptFileReportArtifact(prompt);
+      const completionMode = reportArtifact ? 'artifact' : 'direct';
       const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const preflightStatus = getResidentLaneStatus(laneOpts);
       if (preflightStatus.status === 'failed') {
@@ -1913,6 +1925,8 @@ async function main() {
           '--lane-dir', laneOpts.laneDir,
           '--request-id', requestId,
           '--prompt', prompt,
+          ...(reportArtifact ? ['--report-artifact', reportArtifact] : []),
+          '--completion-mode', completionMode,
           '--timeout-ms', laneOpts.timeoutMs || '30000',
           ...(keyFd !== null ? ['--auth-fd', String(keyFd)] : []),
         ]);

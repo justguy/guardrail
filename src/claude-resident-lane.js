@@ -368,6 +368,8 @@ function buildWrapperArgs(options, request, lifecycle, runtimeSessionId = option
   const toolArgs = buildAIToolArgs(options.tool, options, {
     progressLaneDir: options.laneDir,
     requestId: request.id,
+    reportArtifact: request.reportArtifact || '',
+    completionMode: request.completionMode || '',
   });
   args.push(...toolArgs);
 

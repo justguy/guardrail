@@ -6,7 +6,7 @@ Status: In progress
 
 - Start time: 2026-04-11
 - Current packet: `P0h / D0za follow-on`
-- Current status: `P0a through P0g closed after review/fix; P0h implementation exists and tests pass locally, but live direct-lane proof is still blocked by the remaining D0za completion-detection gap`
+- Current status: `P0a through P0h implementation exists and tests pass locally; live resident-Claude direct-turn proof is now working, but the remaining D0za gap still blocks longer packet-style prompt-file execution`
 - Operator follow-on: `D0y and D0z closed after review/fix; D0za still open`
 
 ## Packet Timeline

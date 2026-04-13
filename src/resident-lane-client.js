@@ -19,6 +19,8 @@ function parseArgs(argv) {
     responseFifo: '',
     requestId: '',
     prompt: '',
+    reportArtifact: '',
+    completionMode: '',
     authFd: '',
     timeoutMs: '30000',
   };
@@ -45,6 +47,14 @@ function parseArgs(argv) {
         break;
       case '--prompt':
         options.prompt = value;
+        i += 1;
+        break;
+      case '--report-artifact':
+        options.reportArtifact = value;
+        i += 1;
+        break;
+      case '--completion-mode':
+        options.completionMode = value;
         i += 1;
         break;
       case '--auth-fd':
@@ -104,7 +114,12 @@ function readSecretFromFd(fd) {
 
 function signLaneRequest(request, secret) {
   return createHmac('sha256', secret)
-    .update(JSON.stringify({ id: request.id, prompt: request.prompt }))
+    .update(JSON.stringify({
+      id: request.id,
+      prompt: request.prompt,
+      reportArtifact: request.reportArtifact || '',
+      completionMode: request.completionMode || '',
+    }))
     .digest('hex');
 }
 
@@ -140,6 +155,8 @@ export async function sendResidentLaneMessage(rawOptions) {
     id: parsed.requestId,
     prompt: parsed.prompt,
   };
+  if (parsed.reportArtifact) requestPayload.reportArtifact = parsed.reportArtifact;
+  if (parsed.completionMode) requestPayload.completionMode = parsed.completionMode;
   if (authSecret) {
     requestPayload.signature = signLaneRequest(requestPayload, authSecret);
   }

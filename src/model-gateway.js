@@ -60,7 +60,7 @@ export function resolveAIWrapperFile(tool, guardrailRepo) {
  *
  * @param {string} tool
  * @param {object} options — normalised lane options
- * @param {object} extra — { lifecycle, progressLaneDir, requestId }
+ * @param {object} extra — { lifecycle, progressLaneDir, requestId, reportArtifact, completionMode }
  * @returns {string[]} args to splice into the full wrapper argv
  */
 export function buildAIToolArgs(tool, options, extra = {}) {
@@ -99,7 +99,12 @@ function buildClaudeToolArgs(options, extra = {}) {
   if (options.systemPrompt) args.push('--system-prompt', options.systemPrompt);
 
   // Progress contract — D0y channel (Claude-only)
-  const { progressLaneDir, requestId } = extra;
+  const {
+    progressLaneDir,
+    requestId,
+    reportArtifact,
+    completionMode,
+  } = extra;
   if (progressLaneDir && requestId) {
     const progressDir = resolve(progressLaneDir, 'progress');
     mkdirSync(progressDir, { recursive: true });
@@ -109,6 +114,8 @@ function buildClaudeToolArgs(options, extra = {}) {
     args.push('--guardrail-progress-state-file', progressStateFile);
     args.push('--guardrail-heartbeat-seconds', '60');
   }
+  if (reportArtifact) args.push('--guardrail-report-artifact', reportArtifact);
+  if (completionMode) args.push('--guardrail-completion-mode', completionMode);
   return args;
 }
 

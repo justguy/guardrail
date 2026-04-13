@@ -1012,8 +1012,8 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.equal(spawnSync('mkfifo', [responseFifo]).status, 0);
     const promptA = join(dir, 'p1.md');
     const promptB = join(dir, 'p2.md');
-    writeFileSync(promptA, 'first prompt', 'utf8');
-    writeFileSync(promptB, 'second prompt', 'utf8');
+    writeFileSync(promptA, 'Declared report artifact:\n- `docs/plans/REPORT_first.md`\n\nfirst prompt', 'utf8');
+    writeFileSync(promptB, 'Declared report artifact:\n- `docs/plans/REPORT_second.md`\n\nsecond prompt', 'utf8');
     writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
       pid: process.pid,
       status: 'ready',
@@ -1028,6 +1028,8 @@ describe('README Feature: Resident Lane Mode', () => {
       const chunk = Buffer.alloc(4096);
       let buffer = '';
       const seenPrompts = [];
+      const seenArtifacts = [];
+      const seenModes = [];
       const startedAt = Date.now();
       try {
         for (;;) {
@@ -1043,12 +1045,22 @@ describe('README Feature: Resident Lane Mode', () => {
                 const request = JSON.parse(buffer.slice(0, newlineIndex));
                 buffer = buffer.slice(newlineIndex + 1);
                 seenPrompts.push(request.prompt);
+                seenArtifacts.push(request.reportArtifact || null);
+                seenModes.push(request.completionMode || null);
                 responseFd = openSync(responseFifo, fsConstants.O_WRONLY);
                 writeSync(responseFd, `${JSON.stringify({ requestId: request.id, ok: true, stdout: `${seenPrompts.length}\n` })}\n`, undefined, 'utf8');
                 closeSync(responseFd);
                 responseFd = null;
                 if (seenPrompts.length === 2) {
-                  assert.deepEqual(seenPrompts, ['first prompt', 'second prompt']);
+                  assert.deepEqual(seenPrompts, [
+                    'Declared report artifact:\n- `docs/plans/REPORT_first.md`\n\nfirst prompt',
+                    'Declared report artifact:\n- `docs/plans/REPORT_second.md`\n\nsecond prompt',
+                  ]);
+                  assert.deepEqual(seenArtifacts, [
+                    'docs/plans/REPORT_first.md',
+                    'docs/plans/REPORT_second.md',
+                  ]);
+                  assert.deepEqual(seenModes, ['artifact', 'artifact']);
                   return;
                 }
                 newlineIndex = buffer.indexOf('\n');

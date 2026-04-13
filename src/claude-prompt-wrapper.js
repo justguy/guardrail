@@ -26,6 +26,15 @@ proc append_hex_log {file_path label text} {
   close $f
 }
 
+proc append_event_log {file_path label} {
+  if {$file_path eq ""} {
+    return
+  }
+  set f [open $file_path a]
+  puts $f $label
+  close $f
+}
+
 proc send_logged {file_path label text} {
   append_hex_log $file_path $label $text
   send -- $text
@@ -63,8 +72,7 @@ proc ready_beacon_seen {text} {
   if {[regexp {(^|\n)[[:space:]]*([>❯›»\?])[[:space:]]*$} $cleaned]} {
     return 1
   }
-  if {[string first "ClaudeCode" $compact] >= 0
-      && [string first "shift+tab" $compact] >= 0
+  if {[string first "shift+tab" $compact] >= 0
       && [string first "/effort" $compact] >= 0} {
     return 1
   }
@@ -81,7 +89,27 @@ proc turn_completion_seen {text} {
 
 proc assistant_output_seen {text} {
   set cleaned [strip_ansi $text]
-  if {[regexp {(^|\n)[[:space:]]*[⏺●•]\s+\S+} $cleaned]} {
+  if {[regexp {(^|\n)[[:space:]]*[⏺●•]\s*\S+} $cleaned]} {
+    return 1
+  }
+  if {[regexp {(Thinking|Beaming|Schlepping|Planning|Searching|Reading|Writing)} $cleaned]} {
+    return 1
+  }
+  return 0
+}
+
+proc submit_ready_beacon_seen {text} {
+  set cleaned [strip_ansi $text]
+  if {[string first "Pasting text" $cleaned] >= 0} {
+    return 1
+  }
+  if {[string first {[Pasted text} $cleaned] >= 0} {
+    return 1
+  }
+  if {[string first "Press return to submit" $cleaned] >= 0} {
+    return 1
+  }
+  if {[string first "return" $cleaned] >= 0} {
     return 1
   }
   return 0
@@ -101,6 +129,11 @@ if {[info exists env(GUARDRAIL_PTY_SEND_HEX_LOG)]} {
   set send_hex_log $env(GUARDRAIL_PTY_SEND_HEX_LOG)
 } else {
   set send_hex_log ""
+}
+if {[info exists env(GUARDRAIL_PTY_EVENT_LOG)]} {
+  set event_log $env(GUARDRAIL_PTY_EVENT_LOG)
+} else {
+  set event_log ""
 }
 set control_file $env(GUARDRAIL_CONTROL_FILE)
 set startup_delay_ms $env(GUARDRAIL_STARTUP_PROMPT_DELAY_MS)
@@ -128,7 +161,9 @@ if {$ready_timeout_ms eq ""} {
   set ready_timeout_ms 15000
 }
 set prompt_sent 0
+set submit_sent 0
 set startup_buffer ""
+set post_paste_buffer ""
 set recent_buffer ""
 set assistant_response_seen 0
 set post_submit_bytes 0
@@ -143,31 +178,55 @@ while {1} {
       set chunk $expect_out(0,string)
       append startup_buffer $chunk
       if {!$prompt_sent && [ready_beacon_seen $startup_buffer]} {
+        append_event_log $event_log "ready_beacon startup"
         after $startup_delay_ms
         send_bracketed_paste $send_hex_log $prompt_input
-        after $submit_delay_ms
-        send_logged $send_hex_log "stdin" $submit_sequence
+        append_event_log $event_log "prompt_pasted"
         set prompt_sent 1
+        set submit_sent 0
         set startup_buffer ""
+        set post_paste_buffer ""
         set recent_buffer ""
         set assistant_response_seen 0
         set post_submit_bytes 0
         exp_continue
       }
       if {$prompt_sent} {
+        if {!$submit_sent} {
+          append post_paste_buffer $chunk
+          if {[string length $post_paste_buffer] > 12000} {
+            set post_paste_buffer [string range $post_paste_buffer end-11999 end]
+          }
+          if {[submit_ready_beacon_seen $post_paste_buffer]} {
+            append_event_log $event_log "submit_ready"
+            after $submit_delay_ms
+            send_logged $send_hex_log "stdin" $submit_sequence
+            append_event_log $event_log "submit_sent"
+            set submit_sent 1
+            set recent_buffer ""
+            set assistant_response_seen 0
+            set post_submit_bytes 0
+          }
+          exp_continue
+        }
         append recent_buffer $chunk
         if {[string length $recent_buffer] > 12000} {
           set recent_buffer [string range $recent_buffer end-11999 end]
         }
         incr post_submit_bytes [string length $chunk]
         if {!$assistant_response_seen && [assistant_output_seen $recent_buffer]} {
+          append_event_log $event_log "assistant_output_seen"
           set assistant_response_seen 1
         }
-        if {[turn_completion_seen $recent_buffer]} {
-          exit 0
-        }
-        if {$assistant_response_seen && [ready_beacon_seen $recent_buffer]} {
-          exit 0
+        if {$env(GUARDRAIL_COMPLETION_MODE) eq "direct"} {
+          if {[turn_completion_seen $recent_buffer]} {
+            append_event_log $event_log "turn_completion_seen"
+            exit 0
+          }
+          if {$assistant_response_seen && [ready_beacon_seen $recent_buffer]} {
+            append_event_log $event_log "ready_beacon after_assistant"
+            exit 0
+          }
         }
       }
       exp_continue
@@ -325,6 +384,10 @@ export function parseWrapperArgs(argv) {
         options.guardrailReportArtifact = value;
         i += 1;
         break;
+      case '--guardrail-completion-mode':
+        options.guardrailCompletionMode = value;
+        i += 1;
+        break;
       case '--guardrail-heartbeat-seconds':
         options.guardrailHeartbeatSeconds = value;
         i += 1;
@@ -467,6 +530,11 @@ export function buildClaudeFailureMessage({ code, stderr = '', stdout = '' }) {
   return `claude interactive failed with exit code ${code}`;
 }
 
+export function stderrLooksLikeInteractiveWrapperFailure(stderr = '') {
+  if (!stderr || typeof stderr !== 'string') return false;
+  return /invoked from within|while executing|extra characters after close-brace|missing ["'}]|can't read\s|invalid command name/i.test(stderr);
+}
+
 export function buildInteractivePromptInput(promptPayload = '') {
   return `${promptPayload}`;
 }
@@ -510,6 +578,14 @@ function normalizeOptions(rawOptions) {
   const progressAppendix = progressFile
     ? buildProgressSystemAppendix({ progressFile, reportArtifact, heartbeatSeconds })
     : '';
+  const completionModeRaw = rawOptions.guardrailCompletionMode || process.env.GUARDRAIL_COMPLETION_MODE || '';
+  const completionMode = completionModeRaw === 'artifact'
+    ? 'artifact'
+    : completionModeRaw === 'direct'
+      ? 'direct'
+      : reportArtifact
+        ? 'artifact'
+        : 'direct';
 
   return {
     prompt: rawOptions.prompt || '',
@@ -531,10 +607,12 @@ function normalizeOptions(rawOptions) {
     progressFile,
     progressStateFile,
     reportArtifact,
+    completionMode,
     heartbeatSeconds,
     ptyRawLog: process.env.GUARDRAIL_PTY_RAW_LOG || '',
     ptyHexLog: process.env.GUARDRAIL_PTY_HEX_LOG || '',
     ptySendHexLog: process.env.GUARDRAIL_PTY_SEND_HEX_LOG || '',
+    ptyEventLog: process.env.GUARDRAIL_PTY_EVENT_LOG || '',
     submitSequence: resolveInteractiveSubmitSequence(process.env),
     submitDelayMs: resolveInteractiveSubmitDelayMs(process.env),
   };
@@ -599,16 +677,20 @@ async function runClaudeInteractive(args, options) {
         GUARDRAIL_SUBMIT_DELAY_MS: options.submitDelayMs,
         GUARDRAIL_SUBMIT_SEQUENCE: options.submitSequence,
         GUARDRAIL_PTY_SEND_HEX_LOG: options.ptySendHexLog,
+        GUARDRAIL_PTY_EVENT_LOG: options.ptyEventLog,
+        GUARDRAIL_COMPLETION_MODE: options.completionMode,
       },
     });
     prepareDebugLog(options.ptyRawLog);
     prepareDebugLog(options.ptyHexLog);
     prepareDebugLog(options.ptySendHexLog);
+    prepareDebugLog(options.ptyEventLog);
 
     let stdout = '';
     let stderr = '';
     let closeSeen = false;
     let exitRequested = false;
+    let exitRequestReason = '';
     let forcedExitTimer = null;
     let hardTimeoutTimer = null;
     let progressPollTimer = null;
@@ -637,6 +719,7 @@ async function runClaudeInteractive(args, options) {
     const requestExit = (reason, forceAfterMs = EXIT_GRACE_MS) => {
       if (exitRequested || closeSeen) return;
       exitRequested = true;
+      exitRequestReason = reason || '';
       sendControlInput('/exit\r');
       forcedExitTimer = setTimeout(() => {
         if (!closeSeen) {
@@ -702,8 +785,13 @@ async function runClaudeInteractive(args, options) {
       closeSeen = true;
       cleanup();
       flushProgress();
-      if (signal) {
+      const sentinelDrivenExit = exitRequested && /progress sentinel|report-artifact sentinel/.test(exitRequestReason);
+      if (signal && !sentinelDrivenExit) {
         rejectPromise(new Error(`claude interactive exited on signal ${signal}`));
+        return;
+      }
+      if (sentinelDrivenExit && (signal || code === 143)) {
+        resolvePromise({ code: 0, stdout, stderr });
         return;
       }
       resolvePromise({ code: code ?? 1, stdout, stderr });
@@ -782,6 +870,40 @@ export async function runClaudeInteractiveExec(rawOptions) {
 
   const existingState = readProgressState(progressStateFile) || {};
   const currentSoftState = deriveSoftStateFromProgressFile(progressFile);
+  const artifactCompletionSatisfied = options.completionMode !== 'artifact'
+    || reportArtifactRequestsExit(reportArtifact)
+    || typeof currentSoftState === 'string';
+
+  if (result.code === 0 && stderrLooksLikeInteractiveWrapperFailure(result.stderr)) {
+    emitWrapperProgressLine(progressFile, {
+      event: 'ai_checkpoint',
+      phase: 'failed',
+      message: 'Claude interactive wrapper hit an internal expect/Tcl error before honest completion',
+      severity: 'error',
+      runId,
+      tool: 'claude',
+      reportArtifact: reportArtifact || null,
+      progressArtifact: progressFile || null,
+      timestamp: new Date().toISOString(),
+    });
+    throw new Error('claude interactive wrapper hit an internal expect/Tcl error before honest completion');
+  }
+
+  if (result.code === 0 && !artifactCompletionSatisfied) {
+    emitWrapperProgressLine(progressFile, {
+      event: 'ai_checkpoint',
+      phase: 'failed',
+      message: 'Claude interactive subprocess exited before the declared report artifact reached COMPLETE or NEEDS_REVIEW',
+      severity: 'error',
+      runId,
+      tool: 'claude',
+      reportArtifact: reportArtifact || null,
+      progressArtifact: progressFile || null,
+      timestamp: new Date().toISOString(),
+    });
+    throw new Error('claude interactive exited before the declared report artifact reached COMPLETE or NEEDS_REVIEW');
+  }
+
   const preserveSoftState = result.code === 0 && typeof currentSoftState === 'string';
   const finalStatus = preserveSoftState ? currentSoftState : result.code === 0 ? 'completed' : 'failed';
   const finalPhase = preserveSoftState ? 'awaiting_operator' : result.code === 0 ? 'completed' : 'failed';

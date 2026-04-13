@@ -801,6 +801,8 @@ function canonicalRequestPayload(request) {
   return JSON.stringify({
     id: request.id,
     prompt: request.prompt,
+    reportArtifact: request.reportArtifact || '',
+    completionMode: request.completionMode || '',
   });
 }
 
@@ -840,9 +842,9 @@ export function validateLaneRequest(parsed, secret = '') {
     throw new Error('invalid_request');
   }
 
+  const allowedKeys = new Set(['id', 'prompt', 'reportArtifact', 'completionMode', ...(secret ? ['signature'] : [])]);
   const keys = Object.keys(parsed).sort();
-  const expectedKeys = secret ? ['id', 'prompt', 'signature'] : ['id', 'prompt'];
-  if (keys.length !== expectedKeys.length || !expectedKeys.every((key, index) => keys[index] === key)) {
+  if (!keys.every((key) => allowedKeys.has(key))) {
     throw new Error('invalid_request');
   }
 
@@ -861,6 +863,18 @@ export function validateLaneRequest(parsed, secret = '') {
     parsed.prompt.length > MAX_PROMPT_CHARS
   ) {
     throw new Error('invalid_prompt');
+  }
+
+  if (parsed.reportArtifact !== undefined) {
+    if (typeof parsed.reportArtifact !== 'string' || parsed.reportArtifact.length < 1 || parsed.reportArtifact.length > 1024) {
+      throw new Error('invalid_request');
+    }
+  }
+
+  if (parsed.completionMode !== undefined) {
+    if (parsed.completionMode !== 'direct' && parsed.completionMode !== 'artifact') {
+      throw new Error('invalid_request');
+    }
   }
 
   verifyLaneRequestSignature(parsed, secret);
