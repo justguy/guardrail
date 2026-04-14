@@ -1,0 +1,155 @@
+{
+  "meta": {
+    "name": "Guardrail Roadmap",
+    "slug": "guardrail-roadmap",
+    "swimlanes": [
+      {
+        "id": "runtime",
+        "label": "Runtime",
+        "description": "Execution-path and orchestration gaps that block reliable agent work."
+      },
+      {
+        "id": "enterprise",
+        "label": "Enterprise",
+        "description": "Open enterprise-facing roadmap seams and partial delivery items."
+      },
+      {
+        "id": "deferred",
+        "label": "Deferred",
+        "description": "Intentionally parked work that should stay visible but not active."
+      }
+    ],
+    "priorities": [
+      {
+        "id": "p0",
+        "label": "P0"
+      },
+      {
+        "id": "p1",
+        "label": "P1"
+      },
+      {
+        "id": "p2",
+        "label": "P2"
+      },
+      {
+        "id": "p3",
+        "label": "P3"
+      }
+    ],
+    "scratchpad": "Roadmap tracker seeded from docs/technical-status.md. This tracker currently covers live open and deferred items; completed history stays in the technical status doc."
+  },
+  "tasks": [
+    {
+      "id": "d0za",
+      "title": "Close long packet/file-pointer completion on the resident Claude lane",
+      "goal": "Make longer prompt-file and artifact-driven Claude lane turns complete as reliably as the now-proven short direct turns.",
+      "status": "in_progress",
+      "placement": {
+        "swimlaneId": "runtime",
+        "priorityId": "p0"
+      },
+      "dependencies": [],
+      "assignee": "codex",
+      "blocker_reason": "Short direct resident-Claude turns are proven, but longer packet/file-pointer turns still do not complete reliably on the interactive Claude backend.",
+      "context": {
+        "tags": [
+          "claude",
+          "resident-lane",
+          "interactive-wrapper"
+        ],
+        "files_touched": [
+          "src/claude-prompt-wrapper.js",
+          "src/claude-resident-lane.js",
+          "src/resident-lane-core.js",
+          "tests/test-claude-prompt-wrapper.js",
+          "tests/test-claude-resident-lane.js"
+        ],
+        "notes": "Roadmap item D0za in docs/technical-status.md remains the main active runtime gap."
+      }
+    },
+    {
+      "id": "enterprise-admin-read-audit",
+      "title": "Versioned admin/event APIs and read-access auditing",
+      "goal": "Finish the external API/admin compatibility side of the enterprise integration surface now that event schema v1 is frozen.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      },
+      "dependencies": [],
+      "assignee": null,
+      "blocker_reason": null,
+      "context": {
+        "tags": [
+          "enterprise",
+          "api-versioning",
+          "audit"
+        ],
+        "notes": "Technical status item 36 is only partially done: emitted events are versioned, but external API contracts, admin-surface versioning, and compatibility guarantees remain open."
+      }
+    },
+    {
+      "id": "d1-npm-registry",
+      "title": "Publish recipes through an npm registry package",
+      "goal": "Add npm distribution for Guardrail recipes once the GitHub-based distribution path is proven stable.",
+      "status": "deferred",
+      "placement": {
+        "swimlaneId": "deferred",
+        "priorityId": "p3"
+      },
+      "dependencies": [],
+      "assignee": null,
+      "blocker_reason": "Deferred until the GitHub-based distribution path and registry ergonomics are proven.",
+      "context": {
+        "tags": [
+          "distribution",
+          "npm"
+        ],
+        "notes": "Roadmap item D1."
+      }
+    },
+    {
+      "id": "r0b-secret-mutation-recipes",
+      "title": "Ship secret-mutation recipes",
+      "goal": "Publish guarded secret-management recipes only once the product can support write-only secret input, runtime injection, revocation, and audit safely.",
+      "status": "deferred",
+      "placement": {
+        "swimlaneId": "deferred",
+        "priorityId": "p3"
+      },
+      "dependencies": [],
+      "assignee": null,
+      "blocker_reason": "Deferred until write-only secret-input UX, multi-stage approval, and guaranteed audit/log redaction are strong enough to ship secret-mutation recipes honestly.",
+      "context": {
+        "tags": [
+          "recipes",
+          "secrets",
+          "high-trust"
+        ],
+        "notes": "Roadmap item R0b."
+      }
+    },
+    {
+      "id": "r0e-destructive-cloud-recipes",
+      "title": "Ship destructive cloud mutation recipes",
+      "goal": "Publish destructive cloud-operation recipes only after Guardrail can bind resources/accounts, prove dry-run parity, and enforce strong multi-stage approval.",
+      "status": "deferred",
+      "placement": {
+        "swimlaneId": "deferred",
+        "priorityId": "p3"
+      },
+      "dependencies": [],
+      "assignee": null,
+      "blocker_reason": "Deferred until resource/account binding, destructive-change summaries, dry-run parity guarantees, and stronger multi-stage approval exist.",
+      "context": {
+        "tags": [
+          "recipes",
+          "cloud",
+          "destructive"
+        ],
+        "notes": "Roadmap item R0e."
+      }
+    }
+  ]
+}

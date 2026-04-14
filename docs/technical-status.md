@@ -2,6 +2,8 @@
 
 **Last updated:** 2026-04-12
 
+Active open and deferred roadmap items are also mirrored into repo-local `llm-tracker` state at [`.llm-tracker/trackers/guardrail-roadmap.json`](../.llm-tracker/trackers/guardrail-roadmap.json). The technical status doc remains the fuller narrative source of truth; the tracker is the operational queue.
+
 ---
 
 ## Recent: Pre-egress classification and scrubbing hooks (2026-04-12, P0g)
