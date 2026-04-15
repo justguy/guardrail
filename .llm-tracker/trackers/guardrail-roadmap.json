@@ -52,8 +52,8 @@
       }
     ],
     "scratchpad": "Tracker reconciled with docs/technical-status.md: completed P0/runtime/recipe slices are now recorded alongside the remaining enterprise and deferred backlog. D0za is now closed after live direct-turn and artifact/report proofs on the host Claude lane.",
-    "rev": 17,
-    "updatedAt": "2026-04-15T03:29:58.690Z"
+    "rev": 21,
+    "updatedAt": "2026-04-15T04:32:46.673Z"
   },
   "tasks": [
     {
@@ -104,7 +104,8 @@
           "audit"
         ],
         "notes": "Closed via slices v36a/v36b/v36c: read/export access events emit audit_queried, metrics_read, and compliance_exported; admin mutation surfaces emit recipe_installed, deploy_mode_changed, and key_rotated; docs/event-schema-v1.md defines the stable { schema_version, data } envelope and compatibility contract."
-      }
+      },
+      "comment": null
     },
     {
       "id": "d1-npm-registry",

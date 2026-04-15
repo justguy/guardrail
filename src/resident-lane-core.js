@@ -23,6 +23,16 @@ import { homedir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { queryAuditLog, verifyAuditChain } from './audit.js';
 import { authorize, ACTIONS } from './authorization.js';
+import { evaluateLaneHealth } from './lane/health.js';
+import {
+  extendResidentLane as extendResidentLaneControl,
+  getResidentLaneLogs as getResidentLaneLogsFromControl,
+  readLogTail,
+  readLaneControl as readLaneControlFromControl,
+  writeLaneControl as writeLaneControlFromControl,
+} from './lane/control.js';
+
+export { evaluateLaneHealth } from './lane/health.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -620,30 +630,11 @@ function writeLaneIdentity(options, existing = null) {
   return identity;
 }
 
-function readLogTail(path, maxLines = 10) {
-  try {
-    const text = readFileSync(path, 'utf8').trim();
-    if (!text) return '';
-    return text.split('\n').slice(-maxLines).join('\n');
-  } catch {
-    return '';
-  }
-}
-
 export function getResidentLaneLogs(rawOptions = {}) {
-  const status = getResidentLaneStatus(rawOptions);
-  const tailLines = parseInteger(rawOptions.tail, 40, 'tail', 1);
-  const text = readLogTail(status.logPath, tailLines);
-  return {
-    laneDir: status.laneDir,
-    laneId: status.laneId || null,
-    status: status.status,
-    tool: status.tool ?? status.adapterId ?? null,
-    logPath: status.logPath || null,
-    tailLines,
-    text,
-    hasLog: text.trim().length > 0,
-  };
+  return getResidentLaneLogsFromControl(rawOptions, {
+    getResidentLaneStatus,
+    parseInteger,
+  });
 }
 
 function isPidAlive(pid) {
@@ -717,84 +708,18 @@ function buildState(options, pid, startedConversation = false, extra = {}) {
 }
 
 export function readLaneControl(laneDir) {
-  return readJson(lanePaths(laneDir).controlPath, null);
+  return readLaneControlFromControl(laneDir, lanePaths, readJson);
 }
 
 export function writeLaneControl(laneDir, patch) {
-  const paths = lanePaths(laneDir);
-  const existing = readJson(paths.controlPath, {}) || {};
-  const next = { ...existing, ...patch, updatedAt: new Date().toISOString() };
-  writeJson(paths.controlPath, next);
-  return next;
-}
-
-export function evaluateLaneHealth(ctx) {
-  const {
-    status,
-    currentRequestId,
-    lastActivityAtMs,
-    lastSeenHeartbeat,
-    now,
-    control = {},
-    idleTimeoutMs,
-    healthTimeoutMs,
-  } = ctx;
-
-  const effectiveIdleMs = (Number.isFinite(control.idleTimeoutMs) && control.idleTimeoutMs >= 1000)
-    ? control.idleTimeoutMs : idleTimeoutMs;
-  const effectiveHealthMs = (Number.isFinite(control.healthTimeoutMs) && control.healthTimeoutMs >= 1000)
-    ? control.healthTimeoutMs : healthTimeoutMs;
-
-  let nextActivity = lastActivityAtMs;
-  let nextSeenHeartbeat = lastSeenHeartbeat;
-  let nextStatus = status;
-  let action = 'none';
-
-  if (control.heartbeatAt && control.heartbeatAt !== lastSeenHeartbeat) {
-    nextSeenHeartbeat = control.heartbeatAt;
-    nextActivity = now;
-    if (status === 'stalled') {
-      nextStatus = currentRequestId ? 'busy' : 'ready';
-      action = 'clear_stall';
-    } else {
-      action = 'heartbeat';
-    }
-    return { nextStatus, nextActivity, nextSeenHeartbeat, action, effectiveIdleMs, effectiveHealthMs };
-  }
-
-  const elapsed = now - nextActivity;
-  if (elapsed > effectiveIdleMs) {
-    return { nextStatus: status, nextActivity, nextSeenHeartbeat, action: 'expire', effectiveIdleMs, effectiveHealthMs };
-  }
-  if (elapsed > effectiveHealthMs && (status === 'ready' || status === 'busy')) {
-    return { nextStatus: 'stalled', nextActivity, nextSeenHeartbeat, action: 'stall', effectiveIdleMs, effectiveHealthMs };
-  }
-  return { nextStatus: status, nextActivity, nextSeenHeartbeat, action: 'none', effectiveIdleMs, effectiveHealthMs };
+  return writeLaneControlFromControl(laneDir, patch, lanePaths, readJson, writeJson);
 }
 
 export function extendResidentLane(laneDir, updates = {}) {
-  const existing = readLaneControl(laneDir) || {};
-  const patch = {};
-  if (updates.idleTimeoutMs != null) {
-    const n = Number(updates.idleTimeoutMs);
-    if (!Number.isFinite(n) || n < 1000) throw new Error('idle_timeout_ms must be >= 1000');
-    patch.idleTimeoutMs = n;
-  }
-  if (updates.healthTimeoutMs != null) {
-    const n = Number(updates.healthTimeoutMs);
-    if (!Number.isFinite(n) || n < 1000) throw new Error('health_timeout_ms must be >= 1000');
-    patch.healthTimeoutMs = n;
-  }
-  if (updates.heartbeat) patch.heartbeatAt = new Date().toISOString();
-  if (Object.keys(patch).length === 0) {
-    throw new Error('extendResidentLane requires idleTimeoutMs, healthTimeoutMs, or heartbeat');
-  }
-  const effectiveIdle = patch.idleTimeoutMs ?? existing.idleTimeoutMs ?? null;
-  const effectiveHealth = patch.healthTimeoutMs ?? existing.healthTimeoutMs ?? null;
-  if (Number.isFinite(effectiveIdle) && Number.isFinite(effectiveHealth) && effectiveHealth >= effectiveIdle) {
-    throw new Error('health_timeout_ms must be less than idle_timeout_ms');
-  }
-  return writeLaneControl(laneDir, patch);
+  return extendResidentLaneControl(laneDir, updates, {
+    readLaneControl,
+    writeLaneControl,
+  });
 }
 
 function canonicalRequestPayload(request) {
