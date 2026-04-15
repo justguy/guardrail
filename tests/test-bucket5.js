@@ -135,6 +135,11 @@ describe('Bucket 5: Profiles', () => {
     assert.ok(errors.some(e => e.includes('environment')));
   });
 
+  it('validateProfile rejects invalid operator_role', () => {
+    const errors = validateProfile({ ...BUILTIN_PROFILES['cautious-dev'], operator_role: 'superuser' });
+    assert.ok(errors.some(e => e.includes('operator_role')));
+  });
+
   it('3 builtin profiles exist: cautious-dev, fast-ci, prod-safe', () => {
     assert.ok(BUILTIN_PROFILES['cautious-dev']);
     assert.ok(BUILTIN_PROFILES['fast-ci']);
@@ -154,6 +159,10 @@ describe('Bucket 5: Profiles', () => {
 
   it('fast-ci profile has medium risk tolerance', () => {
     assert.equal(BUILTIN_PROFILES['fast-ci'].risk_tolerance, 'medium');
+  });
+
+  it('prod-safe profile carries admin operator role', () => {
+    assert.equal(BUILTIN_PROFILES['prod-safe'].operator_role, 'admin');
   });
 });
 

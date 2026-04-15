@@ -273,8 +273,15 @@ guardrail lane revoke --lane-dir .guardrail/lanes/claude-live --actor ops --reas
 # Break-glass emergency stop: SIGKILL + permanent revocation (audits lane_emergency_stop)
 guardrail lane kill --lane-dir .guardrail/lanes/claude-live --actor admin --reason "unresponsive"
 
+# Repo/workspace emergency containment across all lanes in scope
+guardrail lane revoke --guardrail-repo . --all --actor ops --reason "incident-2026-04-14"
+guardrail lane kill --guardrail-repo . --all --actor admin --reason "break-glass"
+
 # Permanently revoke a session contract so all lifecycle operations are blocked
 guardrail session revoke --recipe claude-exec --session-name work --actor admin --reason "credential rotation"
+
+# Revoke a stored key without deleting it; later reads fail closed with key_revoked
+guardrail key revoke API_KEY --guardrail-repo . --state-dir .guardrail --actor admin --reason "compromised"
 
 # Remove one failed/stale lane directly once diagnosis is complete
 guardrail lane cleanup --id claude-live
@@ -294,10 +301,15 @@ guardrail lane batch --action cleanup --status failed --all --dry-run --json
 # Inspect the bundled resident-lane adapters before startup
 guardrail lane adapters --json
 
+# Emergency controls require an active Guardrail profile with operator_role.
+# lane revoke/lane kill require admin-only emergency_control.
+# key revoke requires admin-only manage_keys.
+
 # Start a Codex-backed lane with the same lifecycle/status/result surface
 guardrail lane start \
   --id codex-live \
   --tool codex \
+  --model gpt-5.3-codex-spark \
   --profile dev
 
 # Start a fixed local command lane that reads prompts from stdin

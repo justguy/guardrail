@@ -22,6 +22,7 @@ import { saveManifest } from '../src/manifest.js';
 import { runAdapter } from '../src/adapter-engine.js';
 import { queryAuditLog } from '../src/audit.js';
 import { serializeStable } from '../src/contract.js';
+import { createKeyStore } from '../src/key-management.js';
 
 const CLI = `node ${join(process.cwd(), 'src', 'cli.js')}`;
 
@@ -76,6 +77,21 @@ function writeAdapterProfile(overrides = {}) {
   const profilePath = join(dir, 'acceptance.adapter.json');
   writeFileSync(profilePath, JSON.stringify(makeAdapterProfile(overrides), null, 2));
   return profilePath;
+}
+
+function writeActiveOperatorProfile(homeDir, name, operatorRole, overrides = {}) {
+  const guardrailDir = join(homeDir, '.guardrail');
+  const profilesDir = join(guardrailDir, 'profiles');
+  mkdirSync(profilesDir, { recursive: true });
+  writeFileSync(join(profilesDir, `${name}.json`), JSON.stringify({
+    name,
+    description: `${operatorRole} profile`,
+    risk_tolerance: overrides.risk_tolerance || 'medium',
+    environment: overrides.environment || 'dev',
+    operator_role: operatorRole,
+    approval_rules: overrides.approval_rules || { require_for_high_risk: true, require_for_prod: true, auto_approve_low_risk: false },
+  }, null, 2));
+  writeFileSync(join(guardrailDir, 'active-profile'), name, 'utf8');
 }
 
 // ==========================================================================
@@ -1948,6 +1964,188 @@ describe('README Feature: Resident Lane Mode', () => {
     assert.ok(parsed.results.every((entry) => entry.status === 'success'));
     const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
     assert.ok(entries.some((entry) => entry.event === 'lane_batch'), 'expected lane_batch audit entry');
+  });
+
+  it('guardrail lane revoke --all revokes active lanes and skips already revoked lanes', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const lanesDir = join(repoDir, '.guardrail', 'lanes');
+    const homeDir = join(dir, 'home');
+    mkdirSync(lanesDir, { recursive: true });
+    writeActiveOperatorProfile(homeDir, 'ops-admin', 'admin');
+    const makeLane = (laneId, status = 'ready') => {
+      const laneDir = join(lanesDir, laneId);
+      mkdirSync(laneDir, { recursive: true });
+      writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+        pid: 0,
+        status,
+        laneId,
+        sessionName: laneId,
+        createdAt: new Date().toISOString(),
+      }), 'utf8');
+      if (status === 'revoked') {
+        writeFileSync(join(laneDir, 'REVOKED'), JSON.stringify({ revokedAt: new Date().toISOString() }) + '\n', 'utf8');
+      }
+      return laneDir;
+    };
+
+    const laneA = makeLane('bulk-revoke-a');
+    const laneB = makeLane('bulk-revoke-b');
+    const laneC = makeLane('bulk-revoke-c', 'revoked');
+
+    const r = run(`${CLI} lane revoke --guardrail-repo ${repoDir} --all --actor ops --reason incident --json`, {
+      env: { ...process.env, HOME: homeDir },
+    });
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.targeted, 3);
+    assert.equal(parsed.revoked, 2);
+    assert.equal(parsed.skipped, 1);
+    assert.equal(parsed.failed, 0);
+    assert.equal(parsed.results.length, 3);
+    assert.ok(existsSync(join(laneA, 'REVOKED')));
+    assert.ok(existsSync(join(laneB, 'REVOKED')));
+    assert.ok(existsSync(join(laneC, 'REVOKED')));
+    const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
+    assert.equal(entries.filter((entry) => entry.event === 'lane_revoked').length, 2);
+  });
+
+  it('guardrail lane kill --all kills active lanes and emits per-lane emergency audit events', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const lanesDir = join(repoDir, '.guardrail', 'lanes');
+    const homeDir = join(dir, 'home');
+    mkdirSync(lanesDir, { recursive: true });
+    writeActiveOperatorProfile(homeDir, 'ops-admin', 'admin');
+    const makeLane = (laneId, status = 'ready') => {
+      const laneDir = join(lanesDir, laneId);
+      mkdirSync(laneDir, { recursive: true });
+      writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+        pid: 0,
+        status,
+        laneId,
+        sessionName: laneId,
+        createdAt: new Date().toISOString(),
+      }), 'utf8');
+      if (status === 'revoked') {
+        writeFileSync(join(laneDir, 'REVOKED'), JSON.stringify({ revokedAt: new Date().toISOString() }) + '\n', 'utf8');
+      }
+      return laneDir;
+    };
+
+    const laneA = makeLane('bulk-kill-a');
+    const laneB = makeLane('bulk-kill-b', 'revoked');
+
+    const r = run(`${CLI} lane kill --guardrail-repo ${repoDir} --all --actor admin --reason break-glass --json`, {
+      env: { ...process.env, HOME: homeDir },
+    });
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.targeted, 2);
+    assert.equal(parsed.killed, 1);
+    assert.equal(parsed.skipped, 1);
+    assert.equal(parsed.failed, 0);
+    assert.equal(parsed.results.length, 2);
+    assert.ok(existsSync(join(laneA, 'REVOKED')));
+    assert.ok(existsSync(join(laneB, 'REVOKED')));
+    const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
+    assert.equal(entries.filter((entry) => entry.event === 'lane_emergency_stop').length, 1);
+  });
+
+  it('guardrail lane revoke denies non-admin operator profiles and audits the denial', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const lanesDir = join(repoDir, '.guardrail', 'lanes');
+    const homeDir = join(dir, 'home');
+    mkdirSync(lanesDir, { recursive: true });
+    writeActiveOperatorProfile(homeDir, 'dev-profile', 'developer');
+    const laneDir = join(lanesDir, 'deny-revoke-a');
+    mkdirSync(laneDir, { recursive: true });
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: 0,
+      status: 'ready',
+      laneId: 'deny-revoke-a',
+      sessionName: 'deny-revoke-a',
+      createdAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane revoke --guardrail-repo ${repoDir} --all --actor ops --reason incident --json`, {
+      env: { ...process.env, HOME: homeDir },
+    });
+    assert.equal(r.exitCode, 1);
+    assert.ok(r.stderr.includes('lacks permission') || r.stderr.includes('operator_role'));
+    const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
+    assert.ok(entries.some((entry) => entry.event === 'rbac_check' && entry.status === 'blocked'));
+    assert.ok(entries.some((entry) => entry.event === 'emergency_denied'));
+  });
+
+  it('guardrail lane kill allows admin operator profiles and audits the RBAC check', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const lanesDir = join(repoDir, '.guardrail', 'lanes');
+    const homeDir = join(dir, 'home');
+    mkdirSync(lanesDir, { recursive: true });
+    writeActiveOperatorProfile(homeDir, 'ops-admin', 'admin', { risk_tolerance: 'low', environment: 'prod' });
+    const laneDir = join(lanesDir, 'allow-kill-a');
+    mkdirSync(laneDir, { recursive: true });
+    writeFileSync(join(laneDir, 'state.json'), JSON.stringify({
+      pid: 0,
+      status: 'ready',
+      laneId: 'allow-kill-a',
+      sessionName: 'allow-kill-a',
+      createdAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const r = run(`${CLI} lane kill --guardrail-repo ${repoDir} --all --actor admin --reason break-glass --json`, {
+      env: { ...process.env, HOME: homeDir },
+    });
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.killed, 1);
+    const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
+    assert.ok(entries.some((entry) => entry.event === 'rbac_check' && entry.status === 'allowed' && entry.permission === 'emergency_control'));
+    assert.equal(entries.filter((entry) => entry.event === 'lane_emergency_stop').length, 1);
+  });
+
+  it('guardrail key revoke denies non-admin operator profiles and audits the denial', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const stateDir = join(repoDir, '.guardrail');
+    const homeDir = join(dir, 'home');
+    mkdirSync(stateDir, { recursive: true });
+    writeActiveOperatorProfile(homeDir, 'dev-profile', 'developer');
+    const r = run(`${CLI} key revoke API_KEY --guardrail-repo ${repoDir} --state-dir .guardrail --actor ops --reason incident --json`, {
+      env: { ...process.env, HOME: homeDir },
+    });
+    assert.equal(r.exitCode, 1);
+    assert.ok(r.stderr.includes('lacks permission') || r.stderr.includes('operator_role'));
+    const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
+    assert.ok(entries.some((entry) => entry.event === 'rbac_check' && entry.status === 'blocked' && entry.permission === 'manage_keys'));
+    assert.ok(entries.some((entry) => entry.event === 'emergency_denied' && entry.action === 'key.revoke'));
+  });
+
+  it('guardrail key revoke marks the key revoked, blocks later reads, and audits the action', () => {
+    const dir = tmpDir();
+    const repoDir = join(dir, 'repo');
+    const stateDir = join(repoDir, '.guardrail');
+    const homeDir = join(dir, 'home');
+    mkdirSync(stateDir, { recursive: true });
+    writeActiveOperatorProfile(homeDir, 'ops-admin', 'admin', { risk_tolerance: 'low', environment: 'prod' });
+
+    const ks = createKeyStore(stateDir, 'test-passphrase');
+    ks.set('API_KEY', 'secret-value');
+
+    const r = run(`${CLI} key revoke API_KEY --guardrail-repo ${repoDir} --state-dir .guardrail --actor ops-admin --reason incident --json`, {
+      env: { ...process.env, HOME: homeDir },
+    });
+    assert.equal(r.exitCode, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.revoked, true);
+    assert.equal(parsed.name, 'API_KEY');
+    assert.throws(() => ks.get('API_KEY'), (err) => err.code === 'key_revoked');
+    const entries = queryAuditLog(join(repoDir, '.guardrail', 'audit.jsonl'), {});
+    assert.ok(entries.some((entry) => entry.event === 'rbac_check' && entry.status === 'allowed' && entry.permission === 'manage_keys'));
+    assert.ok(entries.some((entry) => entry.event === 'key_revoked' && entry.key_name === 'API_KEY'));
   });
 });
 

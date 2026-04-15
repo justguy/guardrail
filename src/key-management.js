@@ -97,6 +97,15 @@ export function createKeyStore(stateDir, passphrase) {
     if (!existsSync(path)) return null;
     const meta = JSON.parse(readFileSync(path, 'utf8'));
 
+    if (meta.revoked === true) {
+      const err = new Error(`Key "${name}" has been revoked`);
+      err.code = 'key_revoked';
+      err.revokedAt = meta.revokedAt || null;
+      err.revokedBy = meta.revokedBy || null;
+      err.revocationReason = meta.revocationReason || null;
+      throw err;
+    }
+
     // Scope check
     if (meta.scope !== '*' && requiredScope !== '*' && meta.scope !== requiredScope) {
       throw new Error(`Key "${name}" is scoped to "${meta.scope}" — access from "${requiredScope}" denied`);
@@ -111,8 +120,36 @@ export function createKeyStore(stateDir, passphrase) {
       .filter(f => f.endsWith('.key.json'))
       .map(f => {
         const meta = JSON.parse(readFileSync(join(keyDir, f), 'utf8'));
-        return { name: meta.name, scope: meta.scope, storedAt: meta.storedAt };
+        return {
+          name: meta.name,
+          scope: meta.scope,
+          storedAt: meta.storedAt,
+          revoked: meta.revoked === true,
+          revokedAt: meta.revokedAt || null,
+          revokedBy: meta.revokedBy || null,
+          revocationReason: meta.revocationReason || null,
+        };
       });
+  }
+
+  function revoke(name, opts = {}) {
+    const path = join(keyDir, `${name}.key.json`);
+    if (!existsSync(path)) {
+      throw new Error(`Key "${name}" not found`);
+    }
+    const meta = JSON.parse(readFileSync(path, 'utf8'));
+    if (meta.revoked === true) {
+      return meta;
+    }
+    const revokedMeta = {
+      ...meta,
+      revoked: true,
+      revokedAt: new Date().toISOString(),
+      revokedBy: opts.actor || 'operator',
+      revocationReason: opts.reason || null,
+    };
+    writeFileSync(path, JSON.stringify(revokedMeta, null, 2) + '\n', 'utf8');
+    return revokedMeta;
   }
 
   function remove(name) {
@@ -129,5 +166,5 @@ export function createKeyStore(stateDir, passphrase) {
     return `[REDACTED:${name}]`;
   }
 
-  return { set, get, listSync, remove, redact };
+  return { set, get, listSync, revoke, remove, redact };
 }

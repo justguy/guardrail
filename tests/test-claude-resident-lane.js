@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   closeSync,
   constants as fsConstants,
   existsSync,
@@ -46,6 +47,8 @@ import {
   runResidentLaneDaemon,
   revokeResidentLane,
   killResidentLane,
+  revokeAllResidentLanes,
+  killAllResidentLanes,
 } from '../src/resident-lane-core.js';
 // Exercise the generic lane entrypoint, which now dispatches to Claude/Codex adapters.
 import {
@@ -2470,5 +2473,154 @@ describe('Lane emergency controls: killResidentLane', () => {
     const state = JSON.parse(readFileSync(paths.statePath, 'utf8'));
     assert.notEqual(state.status, 'stopped');
     assert.equal(state.status, 'revoked');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bulk lane emergency controls
+// ---------------------------------------------------------------------------
+
+function makeBulkLane(guardrailRepo, laneId, status = 'ready') {
+  const laneDir = join(guardrailRepo, '.guardrail', 'lanes', laneId);
+  mkdirSync(laneDir, { recursive: true });
+  const paths = lanePaths(laneDir);
+  writeFileSync(paths.statePath, JSON.stringify({
+    pid: 0,
+    status,
+    laneId,
+    adapterId: 'claude',
+    tool: 'claude',
+    bootNonce: 'n1',
+    identityNonce: 'n2',
+    createdAt: new Date().toISOString(),
+  }), 'utf8');
+  if (status === 'revoked') {
+    writeFileSync(join(laneDir, 'REVOKED'), JSON.stringify({ revokedAt: new Date().toISOString() }) + '\n', 'utf8');
+  }
+  // Register lane so listResidentLanes picks it up
+  const registryDir = join(guardrailRepo, '.guardrail', 'lane-registry');
+  mkdirSync(registryDir, { recursive: true });
+  writeFileSync(join(registryDir, `${laneId}.json`), JSON.stringify({
+    laneId, laneDir, guardrailRepo, createdAt: new Date().toISOString(),
+  }), 'utf8');
+  return laneDir;
+}
+
+describe('Bulk lane emergency controls: revokeAllResidentLanes', () => {
+  it('zero lanes in scope returns empty summary with no failures', () => {
+    const dir = tmpLaneDir();
+    const summary = revokeAllResidentLanes({ guardrailRepo: dir });
+    assert.equal(summary.targeted, 0);
+    assert.equal(summary.revoked, 0);
+    assert.equal(summary.skipped, 0);
+    assert.equal(summary.failed, 0);
+    assert.deepEqual(summary.results, []);
+  });
+
+  it('one lane in scope is revoked and gets a REVOKED sentinel', () => {
+    const dir = tmpLaneDir();
+    const laneDir = makeBulkLane(dir, 'bulk-one');
+    const summary = revokeAllResidentLanes({ guardrailRepo: dir, actor: 'ops', reason: 'bulk-test' });
+    assert.equal(summary.targeted, 1);
+    assert.equal(summary.revoked, 1);
+    assert.equal(summary.skipped, 0);
+    assert.equal(summary.failed, 0);
+    assert.ok(existsSync(join(laneDir, 'REVOKED')));
+    const state = JSON.parse(readFileSync(lanePaths(laneDir).statePath, 'utf8'));
+    assert.equal(state.status, 'revoked');
+  });
+
+  it('multiple lanes in scope are all revoked', () => {
+    const dir = tmpLaneDir();
+    makeBulkLane(dir, 'bulk-a');
+    makeBulkLane(dir, 'bulk-b');
+    makeBulkLane(dir, 'bulk-c');
+    const summary = revokeAllResidentLanes({ guardrailRepo: dir });
+    assert.equal(summary.targeted, 3);
+    assert.equal(summary.revoked, 3);
+    assert.equal(summary.skipped, 0);
+    assert.equal(summary.failed, 0);
+  });
+
+  it('already-revoked lane is skipped cleanly and does not count as failed', () => {
+    const dir = tmpLaneDir();
+    makeBulkLane(dir, 'already-rev', 'revoked');
+    const summary = revokeAllResidentLanes({ guardrailRepo: dir });
+    assert.equal(summary.targeted, 1);
+    assert.equal(summary.skipped, 1);
+    assert.equal(summary.revoked, 0);
+    assert.equal(summary.failed, 0);
+    assert.equal(summary.results[0].outcome, 'skipped');
+    assert.equal(summary.results[0].reason, 'already_revoked');
+  });
+
+  it('partial failure: failed lanes counted accurately and mixed with successes', () => {
+    const dir = tmpLaneDir();
+    makeBulkLane(dir, 'pf-good');
+    const badLaneDir = makeBulkLane(dir, 'pf-bad');
+    chmodSync(badLaneDir, 0o555);
+    const summary = revokeAllResidentLanes({ guardrailRepo: dir });
+    assert.equal(summary.targeted, 2);
+    assert.equal(summary.failed + summary.revoked + summary.skipped, 2);
+    chmodSync(badLaneDir, 0o755);
+  });
+});
+
+describe('Bulk lane emergency controls: killAllResidentLanes', () => {
+  it('zero lanes in scope returns empty summary with no failures', () => {
+    const dir = tmpLaneDir();
+    const summary = killAllResidentLanes({ guardrailRepo: dir });
+    assert.equal(summary.targeted, 0);
+    assert.equal(summary.killed, 0);
+    assert.equal(summary.skipped, 0);
+    assert.equal(summary.failed, 0);
+    assert.deepEqual(summary.results, []);
+  });
+
+  it('one lane in scope is killed and gets a REVOKED sentinel', () => {
+    const dir = tmpLaneDir();
+    const laneDir = makeBulkLane(dir, 'kill-bulk-one');
+    const summary = killAllResidentLanes({ guardrailRepo: dir, actor: 'admin', reason: 'emergency' });
+    assert.equal(summary.targeted, 1);
+    assert.equal(summary.killed, 1);
+    assert.equal(summary.skipped, 0);
+    assert.equal(summary.failed, 0);
+    assert.ok(existsSync(join(laneDir, 'REVOKED')));
+    const state = JSON.parse(readFileSync(lanePaths(laneDir).statePath, 'utf8'));
+    assert.equal(state.status, 'revoked');
+    assert.equal(state.failureStage, 'killed');
+  });
+
+  it('multiple lanes in scope are all killed', () => {
+    const dir = tmpLaneDir();
+    makeBulkLane(dir, 'kill-bulk-a');
+    makeBulkLane(dir, 'kill-bulk-b');
+    const summary = killAllResidentLanes({ guardrailRepo: dir });
+    assert.equal(summary.targeted, 2);
+    assert.equal(summary.killed, 2);
+    assert.equal(summary.skipped, 0);
+    assert.equal(summary.failed, 0);
+  });
+
+  it('already-revoked lane is skipped cleanly', () => {
+    const dir = tmpLaneDir();
+    makeBulkLane(dir, 'kill-already-rev', 'revoked');
+    const summary = killAllResidentLanes({ guardrailRepo: dir });
+    assert.equal(summary.targeted, 1);
+    assert.equal(summary.skipped, 1);
+    assert.equal(summary.killed, 0);
+    assert.equal(summary.failed, 0);
+    assert.equal(summary.results[0].outcome, 'skipped');
+  });
+
+  it('partial failure: failed count is accurate and total is consistent', () => {
+    const dir = tmpLaneDir();
+    makeBulkLane(dir, 'kpf-good');
+    const badLaneDir = makeBulkLane(dir, 'kpf-bad');
+    chmodSync(badLaneDir, 0o555);
+    const summary = killAllResidentLanes({ guardrailRepo: dir });
+    assert.equal(summary.targeted, 2);
+    assert.equal(summary.failed + summary.killed + summary.skipped, 2);
+    chmodSync(badLaneDir, 0o755);
   });
 });

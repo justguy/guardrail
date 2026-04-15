@@ -199,6 +199,12 @@ describe('Bucket 6: RBAC', () => {
     assert.equal(hasPermission(user, 'approve_action'), false);
   });
 
+  it('only admin can invoke emergency_control', () => {
+    assert.equal(hasPermission(createUser('admin-user', 'admin'), 'emergency_control'), true);
+    assert.equal(hasPermission(createUser('dev-user', 'developer'), 'emergency_control'), false);
+    assert.equal(hasPermission(createUser('approver-user', 'approver'), 'emergency_control'), false);
+  });
+
   it('enforcePermission returns reason on denial', () => {
     const user = createUser('viewer', 'viewer');
     const result = enforcePermission(user, 'modify_policy');
@@ -255,6 +261,28 @@ describe('Bucket 6: Key Management', () => {
     assert.equal(keys.length, 2);
     assert.ok(keys[0].name);
     assert.ok(!keys[0].value); // no raw value exposed
+  });
+
+  it('revoke marks a key revoked and get fails closed with key_revoked', () => {
+    const dir = tmpDir();
+    const ks = createKeyStore(dir, 'pass');
+    ks.set('TOKEN', 'secret');
+    const revoked = ks.revoke('TOKEN', { actor: 'ops', reason: 'incident' });
+    assert.equal(revoked.revoked, true);
+    assert.equal(revoked.revokedBy, 'ops');
+    assert.equal(revoked.revocationReason, 'incident');
+    assert.throws(() => ks.get('TOKEN'), (err) => err.code === 'key_revoked');
+  });
+
+  it('listSync includes revocation metadata without exposing values', () => {
+    const dir = tmpDir();
+    const ks = createKeyStore(dir, 'pass');
+    ks.set('TOKEN', 'secret');
+    ks.revoke('TOKEN', { actor: 'ops' });
+    const entry = ks.listSync().find((item) => item.name === 'TOKEN');
+    assert.equal(entry.revoked, true);
+    assert.equal(entry.revokedBy, 'ops');
+    assert.ok(!entry.value);
   });
 });
 

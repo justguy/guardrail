@@ -67,7 +67,7 @@ export const INCIDENT_EVENTS = new Set([
   'incident_detected', 'abnormal_activity',
   'audit_chain_broken', 'concurrent_blocked',
   'incident_escalated', 'incident_halted',
-  'lane_revoked', 'lane_emergency_stop', 'session_revoked',
+  'lane_revoked', 'lane_emergency_stop', 'session_revoked', 'emergency_denied', 'key_revoked',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -145,4 +145,6 @@ export const INCIDENT_TRIGGERS = new Set([
   'lane_revoked',
   'lane_emergency_stop',
   'session_revoked',
+  'emergency_denied',
+  'key_revoked',
 ]);

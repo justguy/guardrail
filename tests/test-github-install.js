@@ -858,6 +858,67 @@ describe('CLI bare recipe name detection', () => {
     assert.equal(result.json, true);
   });
 
+  it('parses lane revoke flags', () => {
+    const result = parseArgs([
+      'lane', 'revoke',
+      '--all',
+      '--actor', 'ops',
+      '--reason', 'incident',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-revoke');
+    assert.equal(result.laneOpts.all, true);
+    assert.equal(result.laneOpts.actor, 'ops');
+    assert.equal(result.laneOpts.reason, 'incident');
+    assert.equal(result.json, true);
+  });
+
+  it('parses lane kill flags', () => {
+    const result = parseArgs([
+      'lane', 'kill',
+      '--all',
+      '--actor', 'admin',
+      '--reason', 'break-glass',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'lane-kill');
+    assert.equal(result.laneOpts.all, true);
+    assert.equal(result.laneOpts.actor, 'admin');
+    assert.equal(result.laneOpts.reason, 'break-glass');
+    assert.equal(result.json, true);
+  });
+
+  it('parses profile create role flag', () => {
+    const result = parseArgs([
+      'profile', 'create',
+      '--name', 'ops-admin',
+      '--risk', 'low',
+      '--env', 'prod',
+      '--role', 'admin',
+    ]);
+    assert.equal(result.subcommand, 'profile-create');
+    assert.equal(result.profileOpts.name, 'ops-admin');
+    assert.equal(result.profileOpts.role, 'admin');
+    assert.equal(result.profileOpts.env, 'prod');
+  });
+
+  it('parses key revoke flags', () => {
+    const result = parseArgs([
+      'key', 'revoke',
+      'API_KEY',
+      '--state-dir', '.guardrail',
+      '--actor', 'ops-admin',
+      '--reason', 'incident',
+      '--json',
+    ]);
+    assert.equal(result.subcommand, 'key-revoke');
+    assert.equal(result.keyOpts.name, 'API_KEY');
+    assert.equal(result.keyOpts.stateDir, '.guardrail');
+    assert.equal(result.keyOpts.actor, 'ops-admin');
+    assert.equal(result.keyOpts.reason, 'incident');
+    assert.equal(result.json, true);
+  });
+
   it('parses lane batch flags', () => {
     const result = parseArgs([
       'lane', 'batch',

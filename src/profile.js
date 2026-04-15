@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 
 const VALID_RISK_TOLERANCES = new Set(['low', 'medium', 'high']);
 const VALID_ENVIRONMENTS = new Set(['dev', 'staging', 'prod']);
+const VALID_OPERATOR_ROLES = new Set(['admin', 'approver', 'developer', 'viewer']);
 const PROFILES_DIR = join(homedir(), '.guardrail', 'profiles');
 
 // ---------------------------------------------------------------------------
@@ -29,6 +30,9 @@ export function validateProfile(profile) {
   }
   if (!VALID_ENVIRONMENTS.has(profile.environment)) {
     errors.push(`environment must be one of ${[...VALID_ENVIRONMENTS].join(', ')}`);
+  }
+  if (profile.operator_role !== undefined && !VALID_OPERATOR_ROLES.has(profile.operator_role)) {
+    errors.push(`operator_role must be one of ${[...VALID_OPERATOR_ROLES].join(', ')}`);
   }
   if (typeof profile.approval_rules !== 'object' || profile.approval_rules === null) {
     errors.push('approval_rules must be an object');
@@ -147,6 +151,7 @@ export const BUILTIN_PROFILES = {
     description: 'Conservative developer profile — dry-run by default, approval for all risky actions',
     risk_tolerance: 'low',
     environment: 'dev',
+    operator_role: 'developer',
     approval_rules: { require_for_high_risk: true, require_for_prod: true, auto_approve_low_risk: false },
   },
   'fast-ci': {
@@ -154,6 +159,7 @@ export const BUILTIN_PROFILES = {
     description: 'CI/CD profile — non-interactive, trusts approved manifests, medium risk tolerance',
     risk_tolerance: 'medium',
     environment: 'staging',
+    operator_role: 'developer',
     approval_rules: { require_for_high_risk: true, require_for_prod: true, auto_approve_low_risk: true },
   },
   'prod-safe': {
@@ -161,6 +167,9 @@ export const BUILTIN_PROFILES = {
     description: 'Production profile — maximum safety, approval required for everything',
     risk_tolerance: 'low',
     environment: 'prod',
+    operator_role: 'admin',
     approval_rules: { require_for_high_risk: true, require_for_prod: true, auto_approve_low_risk: false },
   },
 };
+
+export { VALID_OPERATOR_ROLES };

@@ -389,6 +389,101 @@ async function appendLaneAuditEntry(laneOpts, event, details = {}) {
   }
 }
 
+async function appendRepoAuditEntry(guardrailRepo, event, details = {}) {
+  try {
+    const { createAuditLog } = await import('./audit.js');
+    createAuditLog(resolve(guardrailRepo, '.guardrail', 'audit.jsonl')).append({ event, ...details });
+  } catch {
+    // Best effort only.
+  }
+}
+
+async function authorizeEmergencyLaneAction(laneOpts, action) {
+  const { getActiveProfile } = await import('./profile.js');
+  const { createUser, enforcePermission } = await import('./rbac.js');
+
+  const profile = getActiveProfile();
+  const actor = laneOpts.actor || profile?.name || process.env.USER || 'operator';
+  const role = profile?.operator_role || null;
+
+  if (!profile || !role) {
+    const reason = 'Active Guardrail profile with operator_role is required for emergency controls';
+    await appendLaneAuditEntry(laneOpts, 'emergency_denied', {
+      status: 'denied',
+      action,
+      actor,
+      reason,
+    });
+    return { allowed: false, actor, role, reason };
+  }
+
+  const user = createUser(actor, role);
+  const decision = enforcePermission(user, 'emergency_control');
+  await appendLaneAuditEntry(laneOpts, 'rbac_check', {
+    status: decision.allowed ? 'allowed' : 'blocked',
+    action,
+    actor,
+    role,
+    permission: 'emergency_control',
+    reason: decision.reason || null,
+  });
+  if (!decision.allowed) {
+    await appendLaneAuditEntry(laneOpts, 'emergency_denied', {
+      status: 'denied',
+      action,
+      actor,
+      role,
+      reason: decision.reason,
+    });
+    return { allowed: false, actor, role, reason: decision.reason };
+  }
+
+  return { allowed: true, actor, role, profile };
+}
+
+async function authorizeRepoAction(guardrailRepo, actor, action, permission) {
+  const { getActiveProfile } = await import('./profile.js');
+  const { createUser, enforcePermission } = await import('./rbac.js');
+
+  const profile = getActiveProfile();
+  const resolvedActor = actor || profile?.name || process.env.USER || 'operator';
+  const role = profile?.operator_role || null;
+
+  if (!profile || !role) {
+    const reason = 'Active Guardrail profile with operator_role is required for privileged actions';
+    await appendRepoAuditEntry(guardrailRepo, 'emergency_denied', {
+      status: 'denied',
+      action,
+      actor: resolvedActor,
+      reason,
+    });
+    return { allowed: false, actor: resolvedActor, role, reason };
+  }
+
+  const user = createUser(resolvedActor, role);
+  const decision = enforcePermission(user, permission);
+  await appendRepoAuditEntry(guardrailRepo, 'rbac_check', {
+    status: decision.allowed ? 'allowed' : 'blocked',
+    action,
+    actor: resolvedActor,
+    role,
+    permission,
+    reason: decision.reason || null,
+  });
+  if (!decision.allowed) {
+    await appendRepoAuditEntry(guardrailRepo, 'emergency_denied', {
+      status: 'denied',
+      action,
+      actor: resolvedActor,
+      role,
+      reason: decision.reason,
+    });
+    return { allowed: false, actor: resolvedActor, role, reason: decision.reason };
+  }
+
+  return { allowed: true, actor: resolvedActor, role, profile };
+}
+
 // ---------------------------------------------------------------------------
 // Usage
 // ---------------------------------------------------------------------------
@@ -453,6 +548,7 @@ Commands:
   adapter profile show <tool>           Show adapter profile details
   create --name <n> --category <c>      Generate a recipe skeleton
   profile create|use|list|show          Manage user profiles
+  key revoke <name> --state-dir <dir>   Revoke a stored key without deleting it
   policy list|inspect|validate          Manage and enforce policies
   metrics [--path <file>]               View execution metrics
   audit verify [--path <file>]           Verify audit log chain integrity
@@ -845,7 +941,7 @@ export function parseArgs(argv) {
     return result;
   }
 
-  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify' && sub !== 'adapter' && sub !== 'lane' && sub !== 'repo' && sub !== 'session') {
+  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify' && sub !== 'adapter' && sub !== 'lane' && sub !== 'repo' && sub !== 'session' && sub !== 'key') {
     return { error: 'usage' };
   }
 
@@ -881,6 +977,7 @@ export function parseArgs(argv) {
       if (argv[i] === '--name') { i++; result.profileOpts.name = argv[i++]; continue; }
       if (argv[i] === '--risk') { i++; result.profileOpts.risk = argv[i++]; continue; }
       if (argv[i] === '--env') { i++; result.profileOpts.env = argv[i++]; continue; }
+      if (argv[i] === '--role') { i++; result.profileOpts.role = argv[i++]; continue; }
       if (argv[i] === '--json') { result.json = true; i++; continue; }
       if (!argv[i].startsWith('--')) { result.profileOpts.name = argv[i++]; continue; }
       return { error: 'usage' };
@@ -1079,6 +1176,28 @@ export function parseArgs(argv) {
       '--state-dir': 'stateDir',
     });
     return error || result;
+  }
+
+  // --- key subcommand -------------------------------------------------------
+
+  if (sub === 'key') {
+    if (i >= argv.length || !['revoke'].includes(argv[i])) {
+      return { error: 'usage' };
+    }
+    const action = argv[i++];
+    result.subcommand = `key-${action}`;
+    result.keyOpts = {};
+    while (i < argv.length) {
+      if (argv[i] === '--name') { i++; result.keyOpts.name = argv[i++]; continue; }
+      if (argv[i] === '--state-dir') { i++; result.keyOpts.stateDir = argv[i++]; continue; }
+      if (argv[i] === '--guardrail-repo') { i++; result.keyOpts.guardrailRepo = argv[i++]; continue; }
+      if (argv[i] === '--actor') { i++; result.keyOpts.actor = argv[i++]; continue; }
+      if (argv[i] === '--reason') { i++; result.keyOpts.reason = argv[i++]; continue; }
+      if (argv[i] === '--json') { result.json = true; i++; continue; }
+      if (!argv[i].startsWith('--') && !result.keyOpts.name) { result.keyOpts.name = argv[i++]; continue; }
+      return { error: 'usage' };
+    }
+    return result;
   }
 
   // --- repo subcommand ------------------------------------------------------
@@ -2096,10 +2215,34 @@ async function main() {
   }
 
   if (parsed.subcommand === 'lane-revoke') {
-    const { revokeResidentLane } = await import('./resident-lane.js');
+    const { revokeResidentLane, revokeAllResidentLanes } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    const emergencyGate = await authorizeEmergencyLaneAction(laneOpts, laneOpts.all ? 'lane.revoke_all' : 'lane.revoke');
+    if (!emergencyGate.allowed) {
+      console.error(`Error: ${emergencyGate.reason}`);
+      process.exit(1);
+    }
+    if (laneOpts.all) {
+      const summary = revokeAllResidentLanes(laneOpts);
+      for (const r of summary.results) {
+        if (r.outcome === 'revoked') {
+          await appendLaneAuditEntry({ ...laneOpts, laneDir: r.laneDir, laneId: r.laneId || '' }, 'lane_revoked', {
+            status: 'revoked',
+            revoked: true,
+            actor: laneOpts.actor || 'operator',
+            reason: laneOpts.reason || null,
+          });
+        }
+      }
+      if (parsed.json) {
+        console.log(JSON.stringify(summary, null, 2));
+      } else {
+        console.log(`Bulk lane revoke: ${summary.revoked} revoked, ${summary.skipped} skipped, ${summary.failed} failed (${summary.targeted} targeted)`);
+      }
+      process.exit(summary.failed > 0 ? 1 : 0);
+    }
     if (!laneOpts.laneId && !laneOpts.laneDir) {
-      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane revoke');
+      console.error('Error: --id <lane-id>, --lane-dir <path>, or --all is required for lane revoke');
       process.exit(1);
     }
     const result = revokeResidentLane(laneOpts);
@@ -2119,10 +2262,35 @@ async function main() {
   }
 
   if (parsed.subcommand === 'lane-kill') {
-    const { killResidentLane } = await import('./resident-lane.js');
+    const { killResidentLane, killAllResidentLanes } = await import('./resident-lane.js');
     const laneOpts = normalizeLaneCliOptions(parsed.laneOpts);
+    const emergencyGate = await authorizeEmergencyLaneAction(laneOpts, laneOpts.all ? 'lane.kill_all' : 'lane.kill');
+    if (!emergencyGate.allowed) {
+      console.error(`Error: ${emergencyGate.reason}`);
+      process.exit(1);
+    }
+    if (laneOpts.all) {
+      const summary = killAllResidentLanes(laneOpts);
+      for (const r of summary.results) {
+        if (r.outcome === 'killed') {
+          await appendLaneAuditEntry({ ...laneOpts, laneDir: r.laneDir, laneId: r.laneId || '' }, 'lane_emergency_stop', {
+            status: 'killed',
+            killed: true,
+            revoked: true,
+            actor: laneOpts.actor || 'operator',
+            reason: laneOpts.reason || null,
+          });
+        }
+      }
+      if (parsed.json) {
+        console.log(JSON.stringify(summary, null, 2));
+      } else {
+        console.log(`Bulk lane kill: ${summary.killed} killed, ${summary.skipped} skipped, ${summary.failed} failed (${summary.targeted} targeted)`);
+      }
+      process.exit(summary.failed > 0 ? 1 : 0);
+    }
     if (!laneOpts.laneId && !laneOpts.laneDir) {
-      console.error('Error: --id <lane-id> or --lane-dir <path> is required for lane kill');
+      console.error('Error: --id <lane-id>, --lane-dir <path>, or --all is required for lane kill');
       process.exit(1);
     }
     const result = killResidentLane(laneOpts);
@@ -2138,6 +2306,57 @@ async function main() {
     } else {
       console.log(`Lane killed (break-glass): ${laneOpts.laneId || laneOpts.laneDir}`);
       if (laneOpts.reason) console.log(`  Reason: ${laneOpts.reason}`);
+    }
+    process.exit(0);
+  }
+
+  if (parsed.subcommand === 'key-revoke') {
+    const { createKeyStore } = await import('./key-management.js');
+    const keyOpts = parsed.keyOpts || {};
+    const guardrailRepo = resolve(keyOpts.guardrailRepo || process.cwd());
+    const permissionGate = await authorizeRepoAction(guardrailRepo, keyOpts.actor, 'key.revoke', 'manage_keys');
+    if (!permissionGate.allowed) {
+      console.error(`Error: ${permissionGate.reason}`);
+      process.exit(1);
+    }
+    if (!keyOpts.name) {
+      console.error('Error: key name is required');
+      process.exit(1);
+    }
+    if (!keyOpts.stateDir) {
+      console.error('Error: --state-dir <dir> is required for key revoke');
+      process.exit(1);
+    }
+    const keyStore = createKeyStore(resolve(guardrailRepo, keyOpts.stateDir), 'guardrail-revoke-no-decrypt');
+    let revoked;
+    try {
+      revoked = keyStore.revoke(keyOpts.name, {
+        actor: permissionGate.actor,
+        reason: keyOpts.reason || null,
+      });
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+    await appendRepoAuditEntry(guardrailRepo, 'key_revoked', {
+      status: 'revoked',
+      key_name: keyOpts.name,
+      actor: permissionGate.actor,
+      role: permissionGate.role,
+      reason: keyOpts.reason || null,
+      revoked_at: revoked.revokedAt || null,
+    });
+    if (parsed.json) {
+      console.log(JSON.stringify({
+        revoked: true,
+        name: keyOpts.name,
+        revokedAt: revoked.revokedAt || null,
+        revokedBy: revoked.revokedBy || null,
+        revocationReason: revoked.revocationReason || null,
+      }, null, 2));
+    } else {
+      console.log(`Key revoked: ${keyOpts.name}`);
+      if (keyOpts.reason) console.log(`  Reason: ${keyOpts.reason}`);
     }
     process.exit(0);
   }
@@ -3063,6 +3282,7 @@ async function main() {
       description: `Custom profile: ${name}`,
       risk_tolerance: opts.risk || 'medium',
       environment: opts.env || 'dev',
+      operator_role: opts.role || 'developer',
       approval_rules: { require_for_high_risk: true, require_for_prod: true, auto_approve_low_risk: opts.risk === 'high' },
     };
 
@@ -3091,7 +3311,7 @@ async function main() {
       else {
         for (const p of profiles) {
           const marker = active?.name === p.name ? ' (active)' : '';
-          console.log(`  ${p.name.padEnd(20)} ${p.environment.padEnd(10)} risk: ${p.risk_tolerance}${marker}`);
+          console.log(`  ${p.name.padEnd(20)} ${p.environment.padEnd(10)} risk: ${p.risk_tolerance} role: ${(p.operator_role || 'developer').padEnd(9)}${marker}`);
         }
       }
     }

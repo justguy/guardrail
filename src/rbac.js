@@ -19,6 +19,7 @@ const PERMISSIONS = {
   view_recipes:   { minRole: 'viewer',    description: 'List and inspect recipes' },
   export_data:    { minRole: 'approver',  description: 'Export compliance data' },
   manage_keys:    { minRole: 'admin',     description: 'Manage API keys and secrets' },
+  emergency_control: { minRole: 'admin',  description: 'Invoke break-glass lane/session emergency controls' },
 };
 
 /**

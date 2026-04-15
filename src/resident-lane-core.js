@@ -2971,3 +2971,69 @@ export function killResidentLane(rawOptions) {
     reason: options.reason || null,
   };
 }
+
+/**
+ * Bulk revoke all resident lanes in the current repo/workspace scope.
+ * Iterates lanes via listResidentLanes, calls revokeResidentLane per lane,
+ * skips lanes already revoked, and returns an aggregate summary.
+ */
+export function revokeAllResidentLanes(rawOptions = {}) {
+  const listing = listResidentLanes(rawOptions);
+  const lanes = listing.lanes || [];
+  const targeted = lanes.length;
+  let revoked = 0;
+  let skipped = 0;
+  let failed = 0;
+  const results = [];
+
+  for (const lane of lanes) {
+    if (lane.status === 'revoked' || existsSync(join(lane.laneDir, 'REVOKED'))) {
+      skipped += 1;
+      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'skipped', reason: 'already_revoked' });
+      continue;
+    }
+    try {
+      const result = revokeResidentLane({ ...rawOptions, laneDir: lane.laneDir, laneId: lane.laneId });
+      revoked += 1;
+      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'revoked', result });
+    } catch (err) {
+      failed += 1;
+      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'failed', error: err.message });
+    }
+  }
+
+  return { targeted, revoked, skipped, failed, results };
+}
+
+/**
+ * Bulk break-glass kill all resident lanes in the current repo/workspace scope.
+ * Iterates lanes via listResidentLanes, calls killResidentLane per lane,
+ * skips lanes already revoked, and returns an aggregate summary.
+ */
+export function killAllResidentLanes(rawOptions = {}) {
+  const listing = listResidentLanes(rawOptions);
+  const lanes = listing.lanes || [];
+  const targeted = lanes.length;
+  let killed = 0;
+  let skipped = 0;
+  let failed = 0;
+  const results = [];
+
+  for (const lane of lanes) {
+    if (lane.status === 'revoked' || existsSync(join(lane.laneDir, 'REVOKED'))) {
+      skipped += 1;
+      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'skipped', reason: 'already_revoked' });
+      continue;
+    }
+    try {
+      const result = killResidentLane({ ...rawOptions, laneDir: lane.laneDir, laneId: lane.laneId });
+      killed += 1;
+      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'killed', result });
+    } catch (err) {
+      failed += 1;
+      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'failed', error: err.message });
+    }
+  }
+
+  return { targeted, killed, skipped, failed, results };
+}
