@@ -351,6 +351,13 @@ guardrail lane start \
   --resource service:postgres
 ```
 
+The code behind that surface is split now instead of living in one monolith:
+
+- `src/cli.js` is the thin entrypoint.
+- `src/cli/*.js` holds parsing, usage text, helpers, and command-family handlers.
+- `src/lane/*.js` holds extracted lane business logic for control, health, maintenance, query, and runtime orchestration.
+- `src/resident-lane-core.js` now carries shared lane state and protocol glue instead of every lane subsystem.
+
 For Claude-backed lanes and Claude execution recipes, Guardrail now defaults the LLM budget to `$10.00` unless you override it, and the review/approval summary shows that budget explicitly before execution.
 Guardrail controls the Guardrail approval boundary, lane/session contract, and bounded monitoring surface. It does not control Claude's own internal tool availability or any downstream Claude-side approval behavior. If Claude itself needs or surfaces a tool-approval decision, that remains the operator's responsibility.
 
@@ -1094,6 +1101,7 @@ Tests are automated, passing, and use only the Node.js built-in test runner. Use
 npm test              # full suite
 npm run test:e2e      # verification/e2e/adversarial suites
 npm run test:core     # core unit/integration suites
+npm run test:coverage:business  # >90% line-coverage gate for decision-heavy business modules
 ```
 
 Tests are organized in five levels:

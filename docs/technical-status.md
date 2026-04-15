@@ -1,6 +1,6 @@
 # Guardrail — Technical Status & Roadmap
 
-**Last updated:** 2026-04-12
+**Last updated:** 2026-04-15
 
 Active open and deferred roadmap items are also mirrored into repo-local `llm-tracker` state at [`.llm-tracker/trackers/guardrail-roadmap.json`](../.llm-tracker/trackers/guardrail-roadmap.json). The technical status doc remains the fuller narrative source of truth; the tracker is the operational queue.
 
@@ -36,7 +36,8 @@ Guardrail is a Node.js CLI (zero dependencies) that enforces contract-locked exe
 
 ```
 src/
-  cli.js                 Entry point, argument parsing, command routing
+  cli.js                 Thin entry point + top-level dispatch
+  cli/                   Extracted CLI parsing, usage, helpers, and command-family handlers
   contract.js            Contract creation, normalization, hashing, shell detection
   manifest.js            Manifest creation, persistence (atomic write), diff, comparison
   workflow.js            Workflow definition loading, validation, linting, normalization, hashing, recipe_ref pinning
@@ -82,6 +83,7 @@ src/
   environment.js         dev/staging/prod isolation, cross-env enforcement
   marketplace.js         Recipe discovery, publishing, usage tracking
   incident-hooks.js      Incident response triggers + actions
+  lane/                  Extracted resident-lane business logic: control, health, maintenance, query, runtime orchestration
   shared.js              Utilities (deep equality, atomic writes, env building, subprocess execution)
   recipe-runner.js       Recipe resolution by ID, input validation, dry-run orchestration
   recipe-install.js      Local registry, install from path/URL/github://, SHA pinning, trusted sources
@@ -152,7 +154,7 @@ docs/                    Product requirements, specs, invariants, implementation
 .guardrail/              Runtime state (approved manifests, logs, state files)
 ```
 
-**Stats:** ~15,500 lines of source, ~16,000 lines of tests, 0 dependencies. Use `npm test` for the current passing count.
+**Stats:** ~15,500 lines of source, ~16,000 lines of tests, 0 dependencies. Use `npm test` for the current passing count. The refactor business-logic gate is now `npm run test:coverage:business`, which enforces `>90%` line coverage on the decision-heavy modules instead of process-plumbing code.
 
 ---
 
@@ -748,6 +750,12 @@ Five fixture environments under `tests/fixtures/e2e/`, each with a recipe, known
 | E2E integration | test-e2e | 42 | Full path: load recipe → validate → dry-run → scope check → channel → audit |
 | Golden demos | test-golden-demos | 31 | Viral demo scenarios as regression tests (rm -rf, PR merge, prod rollout, tamper) |
 | Adversarial | test-adversarial-e2e | 37 | Intentional breakage: path traversal, version swap, agent bypass, schema bypass |
+
+### Business-Logic Coverage Gate
+
+- `npm run test:coverage:business` enforces `--test-coverage-lines=90` over the decision-heavy modules rather than every orchestration file.
+- Current gate includes `src/lane/control.js`, `src/lane/health.js`, `src/lane/maintenance.js`, and `src/lane/query.js`.
+- `src/lane/runtime.js` is tested directly, but kept out of this coverage gate because it is process/integration plumbing rather than primary policy/business logic.
 
 ### Must-Pass Acceptance Matrix
 
