@@ -4,19 +4,33 @@
     "slug": "guardrail-roadmap",
     "swimlanes": [
       {
-        "id": "runtime",
-        "label": "Runtime",
-        "description": "Execution-path and orchestration gaps that block reliable agent work."
-      },
-      {
         "id": "enterprise",
         "label": "Enterprise",
-        "description": "Open enterprise-facing roadmap seams and partial delivery items."
+        "description": "Enterprise delivery items, rollout work, and capability gaps.",
+        "collapsed": true
+      },
+      {
+        "id": "runtime",
+        "label": "Runtime",
+        "description": "Execution-path, lane, and model/runtime integration work.",
+        "collapsed": true
+      },
+      {
+        "id": "recipes",
+        "label": "Recipes",
+        "description": "Recipe catalog expansion, packaging, and guardrailed operator surfaces.",
+        "collapsed": true
+      },
+      {
+        "id": "platform",
+        "label": "Platform",
+        "description": "Registry, distribution, and non-enterprise platform capabilities."
       },
       {
         "id": "deferred",
         "label": "Deferred",
-        "description": "Intentionally parked work that should stay visible but not active."
+        "description": "Intentionally parked work that should remain visible.",
+        "collapsed": true
       }
     ],
     "priorities": [
@@ -37,26 +51,29 @@
         "label": "P3"
       }
     ],
-    "scratchpad": "Roadmap tracker seeded from docs/technical-status.md. This tracker currently covers live open and deferred items; completed history stays in the technical status doc."
+    "scratchpad": "Tracker reconciled with docs/technical-status.md: completed P0/runtime/recipe slices are now recorded alongside the remaining enterprise and deferred backlog. D0za is now closed after live direct-turn and artifact/report proofs on the host Claude lane.",
+    "rev": 11,
+    "updatedAt": "2026-04-15T02:14:03.095Z"
   },
   "tasks": [
     {
       "id": "d0za",
-      "title": "Close long packet/file-pointer completion on the resident Claude lane",
-      "goal": "Make longer prompt-file and artifact-driven Claude lane turns complete as reliably as the now-proven short direct turns.",
-      "status": "in_progress",
+      "title": "Claude interactive submit/complete contract",
+      "goal": "Close the remaining long packet/file-pointer completion gap on the resident Claude interactive backend.",
+      "status": "complete",
       "placement": {
         "swimlaneId": "runtime",
         "priorityId": "p0"
       },
       "dependencies": [],
       "assignee": "codex",
-      "blocker_reason": "Short direct resident-Claude turns are proven, but longer packet/file-pointer turns still do not complete reliably on the interactive Claude backend.",
+      "blocker_reason": null,
       "context": {
         "tags": [
           "claude",
           "resident-lane",
-          "interactive-wrapper"
+          "interactive-wrapper",
+          "active-gap"
         ],
         "files_touched": [
           "src/claude-prompt-wrapper.js",
@@ -65,13 +82,13 @@
           "tests/test-claude-prompt-wrapper.js",
           "tests/test-claude-resident-lane.js"
         ],
-        "notes": "Roadmap item D0za in docs/technical-status.md remains the main active runtime gap."
+        "notes": "Technical status item D0za. Closed after live host-runtime proof of both tiny direct turns and bounded artifact/report turns."
       }
     },
     {
       "id": "enterprise-admin-read-audit",
       "title": "Versioned admin/event APIs and read-access auditing",
-      "goal": "Finish the external API/admin compatibility side of the enterprise integration surface now that event schema v1 is frozen.",
+      "goal": "Finish the external API/admin compatibility side now that event schema v1 is frozen.",
       "status": "not_started",
       "placement": {
         "swimlaneId": "enterprise",
@@ -86,7 +103,7 @@
           "api-versioning",
           "audit"
         ],
-        "notes": "Technical status item 36 is only partially done: emitted events are versioned, but external API contracts, admin-surface versioning, and compatibility guarantees remain open."
+        "notes": "Technical status item 36. P0e closed schema v1; versioned external/admin compatibility guarantees remain open."
       }
     },
     {
@@ -96,7 +113,7 @@
       "status": "deferred",
       "placement": {
         "swimlaneId": "deferred",
-        "priorityId": "p3"
+        "priorityId": "p2"
       },
       "dependencies": [],
       "assignee": null,
@@ -106,7 +123,7 @@
           "distribution",
           "npm"
         ],
-        "notes": "Roadmap item D1."
+        "notes": "Technical status item D1."
       }
     },
     {
@@ -127,7 +144,7 @@
           "secrets",
           "high-trust"
         ],
-        "notes": "Roadmap item R0b."
+        "notes": "Technical status item R0b."
       }
     },
     {
@@ -148,7 +165,562 @@
           "cloud",
           "destructive"
         ],
-        "notes": "Roadmap item R0e."
+        "notes": "Technical status item R0e."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "p0a",
+      "title": "Universal authorization seam",
+      "goal": "Ship one shared authorize(action, facts) boundary across all execution paths.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "context": {
+        "tags": [
+          "p0",
+          "authorization",
+          "complete"
+        ],
+        "notes": "Technical status item P0a."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "p0b",
+      "title": "Policy simulation and decision traces",
+      "goal": "Add dry-run policy evaluation and structured decision traces on top of the authorization seam.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "context": {
+        "tags": [
+          "p0",
+          "policy",
+          "complete"
+        ],
+        "notes": "Technical status item P0b."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "p0c",
+      "title": "Sovereign record metadata model",
+      "goal": "Stamp hosted-facing records with organization/workspace, retention, payload hash, sensitivity, and provenance metadata.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "context": {
+        "tags": [
+          "p0",
+          "records",
+          "complete"
+        ],
+        "notes": "Technical status item P0c."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "p0d",
+      "title": "Single crypto boundary",
+      "goal": "Keep all sensitive-at-rest flows routed through one replaceable crypto boundary.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "context": {
+        "tags": [
+          "p0",
+          "crypto",
+          "complete"
+        ],
+        "notes": "Technical status item P0d."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "p0e",
+      "title": "Event schema v1",
+      "goal": "Freeze the event vocabulary and emit schema-versioned event families across all subsystems.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "context": {
+        "tags": [
+          "p0",
+          "events",
+          "complete"
+        ],
+        "notes": "Technical status item P0e."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "p0f",
+      "title": "Model gateway seam",
+      "goal": "Centralize model/wrapper dispatch behind one allowlisted gateway seam.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "context": {
+        "tags": [
+          "p0",
+          "model-gateway",
+          "complete"
+        ],
+        "notes": "Technical status item P0f."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "p0g",
+      "title": "Pre-egress scrubbing and classification hooks",
+      "goal": "Classify, block, or redact outgoing adapter payloads before they leave the trust boundary.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "context": {
+        "tags": [
+          "p0",
+          "egress",
+          "complete"
+        ],
+        "notes": "Technical status item P0g."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "p0h",
+      "title": "Emergency controls",
+      "goal": "Add revocation, break-glass, and emergency kill-switch controls with audit coverage.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "context": {
+        "tags": [
+          "p0",
+          "emergency-controls",
+          "complete"
+        ],
+        "notes": "Technical status item P0h."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "d0y",
+      "title": "Guarded AI exec progress channel",
+      "goal": "Provide real-time operator visibility and continuation for long-running one-shot AI packets.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "runtime",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "context": {
+        "tags": [
+          "runtime",
+          "progress-channel",
+          "complete"
+        ],
+        "notes": "Technical status item D0y."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "d0z",
+      "title": "True repo-local autonomous lane mode",
+      "goal": "Keep lane state and downstream tool project/session state repo-local for hands-free execution.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "runtime",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "context": {
+        "tags": [
+          "runtime",
+          "repo-local",
+          "complete"
+        ],
+        "notes": "Technical status item D0z."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "d2",
+      "title": "Self-hosted recipe registry (JSON API)",
+      "goal": "Ship a static export/import recipe registry path for enterprise and air-gapped use.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "platform",
+        "priorityId": "p1"
+      },
+      "context": {
+        "tags": [
+          "registry",
+          "platform",
+          "complete"
+        ],
+        "notes": "Technical status item D2."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "r0a",
+      "title": "Ship-now bounded recipe batch",
+      "goal": "Ship the initial bounded set of high-signal day-one recipes.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "recipes",
+        "priorityId": "p1"
+      },
+      "context": {
+        "tags": [
+          "recipes",
+          "batch",
+          "complete"
+        ],
+        "notes": "Technical status item R0a."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "r0c",
+      "title": "Broad package install recipes",
+      "goal": "Ship bounded npm and pip install recipes for safer dependency bootstrap flows.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "recipes",
+        "priorityId": "p1"
+      },
+      "context": {
+        "tags": [
+          "recipes",
+          "packages",
+          "complete"
+        ],
+        "notes": "Technical status item R0c."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "r0d",
+      "title": "Direct push and history-mutation recipes",
+      "goal": "Ship bounded Git push, amend, and safe force-push recipes.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "recipes",
+        "priorityId": "p1"
+      },
+      "context": {
+        "tags": [
+          "recipes",
+          "git",
+          "complete"
+        ],
+        "notes": "Technical status item R0d."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "r0f",
+      "title": "Task-specific OpenClaw recipes",
+      "goal": "Ship task-oriented OpenClaw entrypoints with hard-bound scope and verification.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "recipes",
+        "priorityId": "p1"
+      },
+      "context": {
+        "tags": [
+          "recipes",
+          "openclaw",
+          "complete"
+        ],
+        "notes": "Technical status item R0f."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-15-cloud-audit-shipping",
+      "title": "Cloud audit log shipping and retention",
+      "goal": "Add remote audit delivery and retention-backed enterprise log handling.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      },
+      "context": {
+        "notes": "Technical status item 15. Folded into enterprise items 28 and 36 in the broader roadmap."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-16-hsm-kms",
+      "title": "HSM / KMS key management",
+      "goal": "Add external key custody and governance beyond the local AES-256-GCM store.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      },
+      "context": {
+        "notes": "Technical status item 16. Local key management exists; external custody is still open."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-17-soc2-type-ii",
+      "title": "SOC 2 Type II certification",
+      "goal": "Reach the process and audit maturity needed for large enterprise contracts.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p2"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-18-org-workspace-lifecycle",
+      "title": "Org/workspace lifecycle, delegated admin, and service accounts",
+      "goal": "Add governed org/workspace persistence and delegated admin/service account capabilities.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-19-ha-dr",
+      "title": "HA/DR, backups, restore, failover, and SLOs",
+      "goal": "Add production-grade replicated state, backup/restore orchestration, failover, and ops telemetry.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-20-finops-chargeback",
+      "title": "Spend governance / FinOps / chargeback",
+      "goal": "Add org/project quotas, provider cost ingestion, and chargeback-aware budget enforcement.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-21-private-deployment",
+      "title": "Private VPC / single-tenant / on-prem / regional deployment",
+      "goal": "Support regulated buyer deployment control and topology choices.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-22-byom-endpoint-control",
+      "title": "BYOM / enterprise model endpoint control",
+      "goal": "Add endpoint registry, credential injection, and policy-backed private model control.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-23-operational-integrations",
+      "title": "Operational integrations",
+      "goal": "Ship production connectors for SIEM, IdP, ticketing, SCM, webhooks, and public admin APIs.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-24-sovereign-audit-legal-hold",
+      "title": "Sovereign audit/event records and legal-hold metadata",
+      "goal": "Add hosted control-plane persistence for legal-hold state, retention classes, and immutable records.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      },
+      "context": {
+        "notes": "Local seam landed via P0c; hosted persistence and legal-hold storage remain."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-25-external-kms-vault",
+      "title": "Enterprise crypto abstraction and external KMS/Vault custody",
+      "goal": "Add external KMS/Vault/HSM integration and rotation orchestration on top of the local crypto boundary.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      },
+      "context": {
+        "notes": "Local seam landed via P0d; external custody and runtime brokering remain."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-26-tenant-hosted-control-plane",
+      "title": "Tenant-scoped hosted control plane and noisy-neighbor isolation",
+      "goal": "Add tenant-prefixed persistence, per-tenant queues, quotas, and hosted isolation boundaries.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-27-model-governance",
+      "title": "Model gateway, model governance, and pre-egress scrubbing",
+      "goal": "Add enterprise-grade provider allowlists, fallback/retention policy, token accounting, and governed egress.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      },
+      "context": {
+        "notes": "Local seams landed via P0f and P0g; hosted governance and policy control remain."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-28-event-bus-spine",
+      "title": "Event bus and enterprise integration spine",
+      "goal": "Add a durable event bus, delivery guarantees, and production connectors around the frozen event vocabulary.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-30-break-glass-rollout",
+      "title": "Break-glass controls, revocation, and emergency kill switch rollout",
+      "goal": "Add org/workspace kill switches, break-glass approval flows, and auditable emergency override paths.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      },
+      "context": {
+        "notes": "Local seam landed via P0h; broader enterprise rollout paths remain."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-31-secret-handle-ux",
+      "title": "Secret-handle UX, write-only inputs, and access audit",
+      "goal": "Add write-only secret inputs, secret handles, runtime injection/revocation, and access audit trails.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-32-data-classification",
+      "title": "Data classification, sensitivity labels, and egress labeling",
+      "goal": "Add sensitivity labels and classification-aware egress/export policy across prompts, artifacts, and events.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-33-snapshots-replay-migrations",
+      "title": "Hosted state snapshots, replay, and migration tooling",
+      "goal": "Add snapshot/rehydration, event replay, schema migration, and rollback-safe hosted upgrades.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-34-queue-fairness",
+      "title": "Queue admission control and tenant fairness",
+      "goal": "Add quotas, admission control, fair scheduling, and starvation prevention.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-35-policy-rollout",
+      "title": "Policy rollout management and safe rollback",
+      "goal": "Add versioned policy bundles, canaries, rollback, and impact analysis.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-37-dsar",
+      "title": "DSAR / subject-access / deletion workflows",
+      "goal": "Add subject access export flows, deletion orchestration, hold exceptions, and hosted identity plumbing.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p2"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "enterprise-38-sbom-provenance",
+      "title": "Supply-chain attestations, SBOMs, and provenance packs",
+      "goal": "Add SBOM generation, artifact attestations, provenance bundles, and evidence-pack tooling.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p2"
       }
     }
   ]

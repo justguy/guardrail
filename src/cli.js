@@ -1765,7 +1765,7 @@ async function main() {
         '--request-id', requestId,
         '--prompt', laneOpts.prompt,
         ...(laneOpts.reportArtifact ? ['--report-artifact', laneOpts.reportArtifact] : []),
-        ...(laneOpts.completionMode ? ['--completion-mode', laneOpts.completionMode] : []),
+        '--completion-mode', laneOpts.completionMode || (laneOpts.reportArtifact ? 'artifact' : 'direct'),
         '--timeout-ms', laneOpts.timeoutMs || '30000',
         ...(keyFd !== null ? ['--auth-fd', String(keyFd)] : []),
       ]);

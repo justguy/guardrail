@@ -5,9 +5,12 @@ import {
   buildClaudeArgs,
   buildInteractivePromptInput,
   EXPECT_INTERACTIVE_SCRIPT,
+  interactiveCompletionSatisfied,
   progressEventRequestsExit,
+  reportArtifactRequestsExit,
   resolveInteractiveSubmitDelayMs,
   resolveInteractiveSubmitSequence,
+  shouldTreatSentinelDrivenExitAsSuccess,
   stderrLooksLikeInteractiveWrapperFailure,
 } from '../src/claude-prompt-wrapper.js';
 
@@ -84,6 +87,19 @@ describe('Claude prompt wrapper', () => {
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /send_logged \$send_hex_log "stdin" \$submit_sequence/);
   });
 
+  it('falls back to sending submit on 1s quiet timeout when beacon has not fired', () => {
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\$prompt_sent && !\$submit_sent\} \{/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /append_event_log \$event_log "submit_fallback"/);
+  });
+
+  it('falls back to pasting after 2s of startup quiet when ready beacon has not fired', () => {
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /set startup_quiet_ticks 0/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{!\$prompt_sent && \[string length \$startup_buffer\] > 0\} \{/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /incr startup_quiet_ticks/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\$startup_quiet_ticks >= 2\} \{/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /append_event_log \$event_log "startup_beacon_fallback"/);
+  });
+
   it('fails closed on internal expect or Tcl wrapper errors', () => {
     assert.equal(stderrLooksLikeInteractiveWrapperFailure('missing "\nin expression "foo"\ninvoked from within'), true);
     assert.equal(stderrLooksLikeInteractiveWrapperFailure('while executing\n"bad command"'), true);
@@ -99,13 +115,16 @@ describe('Claude prompt wrapper', () => {
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\!\$assistant_response_seen && \[assistant_output_seen \$recent_buffer\]\} \{/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\[turn_completion_seen \$recent_buffer\]\} \{/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /Claude is waiting for your input/);
-    assert.match(EXPECT_INTERACTIVE_SCRIPT, /Thinking\|Beaming\|Schlepping\|Planning\|Searching\|Reading\|Writing/);
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /Thinking\|Beaming\|Schlepping\|Planning\|Searching\|Reading\|Writing\|Seasoning/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\$assistant_response_seen && \[ready_beacon_seen \$recent_buffer\]\} \{/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /exit 0/);
   });
 
-  it('only uses terminal completion heuristics for direct completion mode', () => {
-    assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\$env\(GUARDRAIL_COMPLETION_MODE\) eq "direct"\} \{/);
+  it('uses terminal completion heuristics for all modes except artifact (ne "artifact" guard)', () => {
+    // Regression: was `eq "direct"` which silently stalled when completionMode was empty or unset.
+    // Must be `ne "artifact"` so direct turns and unspecified modes exit via Tcl-side heuristics.
+    assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\$env\(GUARDRAIL_COMPLETION_MODE\) ne "artifact"\} \{/);
+    assert.doesNotMatch(EXPECT_INTERACTIVE_SCRIPT, /if \{\$env\(GUARDRAIL_COMPLETION_MODE\) eq "direct"\} \{/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\[turn_completion_seen \$recent_buffer\]\} \{/);
     assert.match(EXPECT_INTERACTIVE_SCRIPT, /if \{\$assistant_response_seen && \[ready_beacon_seen \$recent_buffer\]\} \{/);
   });
@@ -116,5 +135,68 @@ describe('Claude prompt wrapper', () => {
     assert.equal(progressEventRequestsExit({ event: 'ai_question' }), true);
     assert.equal(progressEventRequestsExit({ status: 'waiting_for_review' }), true);
     assert.equal(progressEventRequestsExit({ phase: 'implementation_started' }), false);
+  });
+
+  it('treats COMPLETE and NEEDS_REVIEW report artifacts as artifact completion sentinels', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guardrail-report-artifact-'));
+    const reportPath = path.join(dir, 'REPORT_demo.md');
+    try {
+      fs.writeFileSync(reportPath, 'Status: COMPLETE\nObjective: demo\n', 'utf8');
+      assert.equal(reportArtifactRequestsExit(reportPath), true);
+      assert.equal(interactiveCompletionSatisfied({ completionMode: 'artifact', reportArtifact: reportPath }), true);
+
+      fs.writeFileSync(reportPath, 'Status: NEEDS_REVIEW\nObjective: demo\n', 'utf8');
+      assert.equal(reportArtifactRequestsExit(reportPath), true);
+      assert.equal(interactiveCompletionSatisfied({ completionMode: 'artifact', reportArtifact: reportPath }), true);
+
+      fs.writeFileSync(reportPath, 'Status: STARTED\nObjective: demo\n', 'utf8');
+      assert.equal(reportArtifactRequestsExit(reportPath), false);
+      assert.equal(interactiveCompletionSatisfied({ completionMode: 'artifact', reportArtifact: reportPath }), false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats soft review/input states as sufficient artifact completion for wrapper exit', () => {
+    assert.equal(interactiveCompletionSatisfied({
+      completionMode: 'artifact',
+      reportArtifact: '/tmp/missing-report.md',
+      currentSoftState: 'waiting_for_review',
+    }), true);
+    assert.equal(interactiveCompletionSatisfied({
+      completionMode: 'artifact',
+      reportArtifact: '/tmp/missing-report.md',
+      currentSoftState: 'waiting_for_input',
+    }), true);
+  });
+
+  it('treats sentinel-driven 143 exits as success but not arbitrary signal exits', () => {
+    assert.equal(shouldTreatSentinelDrivenExitAsSuccess({
+      code: 143,
+      signal: null,
+      exitRequested: true,
+      exitRequestReason: 'Guardrail interactive wrapper requested exit after report-artifact sentinel',
+    }), true);
+    assert.equal(shouldTreatSentinelDrivenExitAsSuccess({
+      code: 143,
+      signal: 'SIGTERM',
+      exitRequested: true,
+      exitRequestReason: 'Guardrail interactive wrapper requested exit after progress sentinel (completed)',
+    }), true);
+    assert.equal(shouldTreatSentinelDrivenExitAsSuccess({
+      code: 143,
+      signal: null,
+      exitRequested: false,
+      exitRequestReason: 'Guardrail interactive wrapper hit hard wall-clock timeout',
+    }), false);
+    assert.equal(shouldTreatSentinelDrivenExitAsSuccess({
+      code: 143,
+      signal: null,
+      exitRequested: true,
+      exitRequestReason: 'Guardrail interactive wrapper hit hard wall-clock timeout',
+    }), false);
   });
 });

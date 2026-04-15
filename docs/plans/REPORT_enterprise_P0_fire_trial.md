@@ -6,8 +6,8 @@ Status: In progress
 
 - Start time: 2026-04-11
 - Current packet: `P0h / D0za follow-on`
-- Current status: `P0a through P0h implementation exists and tests pass locally; live resident-Claude direct-turn proof is now working, but the remaining D0za gap still blocks longer packet-style prompt-file execution`
-- Operator follow-on: `D0y and D0z closed after review/fix; D0za still open`
+- Current status: `P0a through P0h implementation exists and tests pass locally; D0y, D0z, and D0za are now closed after review/fix and live host-runtime proof`
+- Operator follow-on: `next open roadmap work is no longer the Claude lane backend; use the closed runtime path for subsequent bounded roadmap slices`
 
 ## Packet Timeline
 
@@ -202,7 +202,7 @@ Minimum shape:
 - This follow-on is now tracked explicitly as `D0za` in `docs/technical-status.md`, with the live evidence bundle in `docs/plans/REPORT_claude_tui_paste_submit_semantics.md`.
 - Subsequent host-runtime probes narrowed that gap further:
   - kitty keyboard protocol is active in Claude's TUI
-  - explicit kitty Enter (`ESC[13u]`) is the working submit sequence for a tiny direct prompt
+  - the proven current submit sequence is `\r\r`, with bounded fallback behavior for silent-paste Claude TUI versions
   - a real resident-lane proof turn (`Reply with exactly: PONG`) now executes on the host Claude runtime
 - The remaining live blocker is no longer submit/auth/transport. It is completion detection for longer file-pointer turns:
   - short direct turns can execute

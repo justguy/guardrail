@@ -1,5 +1,23 @@
 # Claude TUI Submit Diagnosis — From Send/Receive PTY Logs
 
+## SUPERSEDED — 2026-04-14
+
+The hypothesis in this report (`ESC[13u]` is the correct submit key) was tested and **reverted**.
+
+Current code default: `POST_PASTE_SUBMIT_SEQUENCE = '\r\r'` (two raw CR bytes).
+
+Rationale: `\r\r` is the only empirically proven submit path (d0za-direct-receive7, 2026-04-13).
+`ESC[13u]` was set as the default in commit 28cc5b2 but caused all live direct turns to stall at
+"Claude interactive subprocess is starting". It was reverted before any successful live proof run
+was completed. The kitty keyboard protocol analysis below remains accurate as a theoretical model
+but the recommended "next single experiment" (`ESC[13u]` probe) was not the unblocking fix.
+
+The remaining open question is why the current code no longer gets past the startup beacon even
+with `\r\r` restored — that is a separate regression, not covered by this report.
+
+---
+
+
 Date: 2026-04-12
 Source: `.guardrail/debug/p0h-atomic-singlenl-send.log`, `.guardrail/debug/p0h-atomic-singlenl-hex.log`
 

@@ -1,5 +1,26 @@
 # Sonnet Direct Lane Submit Blocker — Diagnosis
 
+## SUPERSEDED — 2026-04-14
+
+Rank-1 cause in this report ("override not applied, lane sent `\r\r`") was based on the belief
+that `\r\r` does not submit. That belief is incorrect: d0za-direct-receive7 completed successfully
+with `\r\r` as the submit sequence (pre-two-phase code, 2026-04-13T15:20:55Z).
+
+Current code default: `POST_PASTE_SUBMIT_SEQUENCE = '\r\r'`.
+
+The statement at line ~44 ("which all prior tests already proved does not submit") refers only to
+tests where `\r\r` was sent WITHOUT the bracketed paste envelope or with wrong timing — not to the
+correct two-phase paste+submit flow. With two-phase paste the proven sequence is bracketed paste
+followed by `\r\r` after the submit-ready beacon.
+
+`ESC[13u]` was set as default in commit 28cc5b2, broke live direct turns, and was reverted.
+The recommendation to set `GUARDRAIL_SUBMIT_SEQUENCE_OVERRIDE=$'\x1b[13u'` is no longer the
+suggested path. The remaining blocker is that the startup beacon may not be firing in the current
+Claude TUI version, which is a separate investigation.
+
+---
+
+
 Date: 2026-04-12
 Source: `src/claude-prompt-wrapper.js`, `.guardrail/lanes/sonnet-direct-debug/state.json`,
 `.guardrail/lanes/sonnet-direct-debug/progress/req-1776025302833-kpfoqt.ndjson`,

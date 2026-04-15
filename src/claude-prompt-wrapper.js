@@ -92,7 +92,7 @@ proc assistant_output_seen {text} {
   if {[regexp {(^|\n)[[:space:]]*[⏺●•]\s*\S+} $cleaned]} {
     return 1
   }
-  if {[regexp {(Thinking|Beaming|Schlepping|Planning|Searching|Reading|Writing)} $cleaned]} {
+  if {[regexp {(Thinking|Beaming|Schlepping|Planning|Searching|Reading|Writing|Seasoning)} $cleaned]} {
     return 1
   }
   return 0
@@ -163,6 +163,7 @@ if {$ready_timeout_ms eq ""} {
 set prompt_sent 0
 set submit_sent 0
 set startup_buffer ""
+set startup_quiet_ticks 0
 set post_paste_buffer ""
 set recent_buffer ""
 set assistant_response_seen 0
@@ -176,6 +177,7 @@ while {1} {
   expect {
     -re {.+} {
       set chunk $expect_out(0,string)
+      set startup_quiet_ticks 0
       append startup_buffer $chunk
       if {!$prompt_sent && [ready_beacon_seen $startup_buffer]} {
         append_event_log $event_log "ready_beacon startup"
@@ -218,7 +220,7 @@ while {1} {
           append_event_log $event_log "assistant_output_seen"
           set assistant_response_seen 1
         }
-        if {$env(GUARDRAIL_COMPLETION_MODE) eq "direct"} {
+        if {$env(GUARDRAIL_COMPLETION_MODE) ne "artifact"} {
           if {[turn_completion_seen $recent_buffer]} {
             append_event_log $event_log "turn_completion_seen"
             exit 0
@@ -242,6 +244,31 @@ while {1} {
       if {!$prompt_sent && [clock milliseconds] >= $ready_deadline} {
         send_error "guardrail_ready_timeout\n"
         exit 124
+      }
+      if {!$prompt_sent && [string length $startup_buffer] > 0} {
+        incr startup_quiet_ticks
+        if {$startup_quiet_ticks >= 2} {
+          append_event_log $event_log "startup_beacon_fallback"
+          after $startup_delay_ms
+          send_bracketed_paste $send_hex_log $prompt_input
+          append_event_log $event_log "prompt_pasted"
+          set prompt_sent 1
+          set submit_sent 0
+          set startup_buffer ""
+          set post_paste_buffer ""
+          set recent_buffer ""
+          set assistant_response_seen 0
+          set post_submit_bytes 0
+        }
+      }
+      if {$prompt_sent && !$submit_sent} {
+        append_event_log $event_log "submit_fallback"
+        send_logged $send_hex_log "stdin" $submit_sequence
+        append_event_log $event_log "submit_sent"
+        set submit_sent 1
+        set recent_buffer ""
+        set assistant_response_seen 0
+        set post_submit_bytes 0
       }
       continue
     }
@@ -557,7 +584,7 @@ export function resolveInteractiveSubmitDelayMs(env = process.env) {
   return env.GUARDRAIL_SUBMIT_DELAY_MS_OVERRIDE ?? String(POST_PASTE_SUBMIT_DELAY_MS);
 }
 
-function reportArtifactRequestsExit(reportArtifact) {
+export function reportArtifactRequestsExit(reportArtifact) {
   if (!reportArtifact || !existsSync(reportArtifact)) return false;
   try {
     const text = readFileSync(reportArtifact, 'utf8');
@@ -565,6 +592,26 @@ function reportArtifactRequestsExit(reportArtifact) {
   } catch {
     return false;
   }
+}
+
+export function interactiveCompletionSatisfied({
+  completionMode = 'direct',
+  reportArtifact = '',
+  currentSoftState = null,
+}) {
+  if (completionMode !== 'artifact') return true;
+  if (typeof currentSoftState === 'string' && currentSoftState.length > 0) return true;
+  return reportArtifactRequestsExit(reportArtifact);
+}
+
+export function shouldTreatSentinelDrivenExitAsSuccess({
+  code = null,
+  signal = null,
+  exitRequested = false,
+  exitRequestReason = '',
+}) {
+  const sentinelDrivenExit = exitRequested && /progress sentinel|report-artifact sentinel/.test(exitRequestReason || '');
+  return !!(sentinelDrivenExit && (signal || code === 143));
 }
 
 function normalizeOptions(rawOptions) {
@@ -785,12 +832,17 @@ async function runClaudeInteractive(args, options) {
       closeSeen = true;
       cleanup();
       flushProgress();
-      const sentinelDrivenExit = exitRequested && /progress sentinel|report-artifact sentinel/.test(exitRequestReason);
+      const sentinelDrivenExit = shouldTreatSentinelDrivenExitAsSuccess({
+        code,
+        signal,
+        exitRequested,
+        exitRequestReason,
+      });
       if (signal && !sentinelDrivenExit) {
         rejectPromise(new Error(`claude interactive exited on signal ${signal}`));
         return;
       }
-      if (sentinelDrivenExit && (signal || code === 143)) {
+      if (sentinelDrivenExit) {
         resolvePromise({ code: 0, stdout, stderr });
         return;
       }
@@ -870,9 +922,11 @@ export async function runClaudeInteractiveExec(rawOptions) {
 
   const existingState = readProgressState(progressStateFile) || {};
   const currentSoftState = deriveSoftStateFromProgressFile(progressFile);
-  const artifactCompletionSatisfied = options.completionMode !== 'artifact'
-    || reportArtifactRequestsExit(reportArtifact)
-    || typeof currentSoftState === 'string';
+  const artifactCompletionSatisfied = interactiveCompletionSatisfied({
+    completionMode: options.completionMode,
+    reportArtifact,
+    currentSoftState,
+  });
 
   if (result.code === 0 && stderrLooksLikeInteractiveWrapperFailure(result.stderr)) {
     emitWrapperProgressLine(progressFile, {
