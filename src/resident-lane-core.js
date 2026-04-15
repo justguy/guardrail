@@ -31,6 +31,26 @@ import {
   readLaneControl as readLaneControlFromControl,
   writeLaneControl as writeLaneControlFromControl,
 } from './lane/control.js';
+import {
+  cleanupResidentLane as cleanupResidentLaneMaintenance,
+  killAllResidentLanes as killAllResidentLanesMaintenance,
+  killResidentLane as killResidentLaneMaintenance,
+  pruneResidentLanes as pruneResidentLanesMaintenance,
+  revokeAllResidentLanes as revokeAllResidentLanesMaintenance,
+  revokeResidentLane as revokeResidentLaneMaintenance,
+  stopResidentLane as stopResidentLaneMaintenance,
+} from './lane/maintenance.js';
+import {
+  collectComparableLaneEntries as collectComparableLaneEntriesQuery,
+  getResidentLaneHistory as getResidentLaneHistoryQuery,
+  getResidentLanePortfolioTimeline as getResidentLanePortfolioTimelineQuery,
+  getResidentLaneResult as getResidentLaneResultQuery,
+  getResidentLaneStatus as getResidentLaneStatusQuery,
+  getResidentLaneTimeline as getResidentLaneTimelineQuery,
+  listResidentLanes as listResidentLanesQuery,
+  residentLanePortfolioAuditPath as residentLanePortfolioAuditPathQuery,
+  waitForResidentLaneResult as waitForResidentLaneResultQuery,
+} from './lane/query.js';
 
 export { evaluateLaneHealth } from './lane/health.js';
 
@@ -1157,890 +1177,139 @@ function buildResourceConflict(entry, other) {
 }
 
 export function getResidentLaneHistory(rawOptions = {}) {
-  const guardrailRepo = resolve(rawOptions.guardrailRepo || '.');
-  const auditPath = resolve(guardrailRepo, '.guardrail', 'audit.jsonl');
-  const requestedLaneDir = rawOptions.laneDir ? resolve(guardrailRepo, rawOptions.laneDir) : null;
-  const entries = queryAuditLog(auditPath, {
-    event: rawOptions.event || undefined,
-  }).filter((entry) => {
-    if (rawOptions.laneId && entry.lane_id !== rawOptions.laneId) return false;
-    if (requestedLaneDir) {
-      const entryLaneDir = entry.lane_dir ? resolve(guardrailRepo, entry.lane_dir) : null;
-      if (entryLaneDir !== requestedLaneDir) return false;
-    }
-    if (rawOptions.requestId && entry.request_id !== rawOptions.requestId) return false;
-    return true;
-  });
-  const limit = parseInteger(rawOptions.limit, 20, 'limit', 1);
-  const tailEntries = entries.slice(-limit);
-  return {
-    auditPath,
-    chainValid: verifyAuditChain(auditPath).valid,
-    count: tailEntries.length,
-    totalMatches: entries.length,
-    entries: tailEntries,
-  };
-}
-
-function laneTimelineEntryMatches(entry, rawOptions = {}) {
-  if (rawOptions.event && entry.event !== rawOptions.event) return false;
-  if (rawOptions.laneId && entry.lane_id !== rawOptions.laneId) return false;
-  if (rawOptions.filterLaneId && entry.lane_id !== rawOptions.filterLaneId) return false;
-  if (rawOptions.requestId && entry.request_id !== rawOptions.requestId) return false;
-  if (rawOptions.filterSessionName && entry.session_name !== rawOptions.filterSessionName) return false;
-  if (rawOptions.toolFilter) {
-    const wantedTools = new Set(Array.isArray(rawOptions.toolFilter) ? rawOptions.toolFilter : splitCsv(rawOptions.toolFilter));
-    if (wantedTools.size > 0 && !wantedTools.has(entry.tool || '')) return false;
-  }
-  if (rawOptions.status) {
-    const wantedStatuses = new Set(Array.isArray(rawOptions.status) ? rawOptions.status : splitCsv(rawOptions.status));
-    if (wantedStatuses.size > 0 && !wantedStatuses.has(entry.status || '')) return false;
-  }
-  if (rawOptions.after && entry.timestamp < rawOptions.after) return false;
-  if (rawOptions.before && entry.timestamp > rawOptions.before) return false;
-  if (rawOptions.repoFilter) {
-    const requestedRepo = resolve(rawOptions.guardrailRepo || '.', rawOptions.repoFilter);
-    const entryRepo = entry.guardrail_repo ? resolve(entry.guardrail_repo) : null;
-    if (entryRepo !== requestedRepo) return false;
-  }
-  return true;
-}
-
-function readLaneTimelineAuditEntries(guardrailRepo, rawOptions = {}) {
-  const auditPath = resolve(guardrailRepo, '.guardrail', 'audit.jsonl');
-  const repoEntries = queryAuditLog(auditPath, {
-    after: rawOptions.after || undefined,
-    before: rawOptions.before || undefined,
-  }).filter((entry) => String(entry.event || '').startsWith('lane_'))
-    .map((entry) => ({
-      source: 'audit',
-      timestamp: entry.timestamp,
-      event: entry.event,
-      lane_id: entry.lane_id || null,
-      lane_dir: entry.lane_dir ? resolve(guardrailRepo, entry.lane_dir) : null,
-      session_name: entry.session_name || null,
-      session_id: entry.session_id || null,
-      tool: entry.tool || null,
-      status: entry.status || null,
-      reason: entry.reason || entry.prune_reason || entry.cleanup_reason || null,
-      request_id: entry.request_id || null,
-      guardrail_repo: guardrailRepo,
-      detail: entry,
-    }))
-    .filter((entry) => laneTimelineEntryMatches(entry, rawOptions));
-  return {
-    guardrailRepo,
-    auditPath,
-    chainValid: verifyAuditChain(auditPath).valid,
-    entries: repoEntries,
-  };
-}
-
-function readLaneTimelineTombstones(guardrailRepo, rawOptions = {}) {
-  const dir = laneTombstoneDir(guardrailRepo);
-  const entries = [];
-  if (!existsSync(dir)) {
-    return { tombstoneDir: dir, entries };
-  }
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const parsed = readJson(join(dir, entry.name), null);
-    if (!parsed?.cleanedAt || !parsed?.laneDir) continue;
-    const event = parsed.action === 'prune' ? 'lane_prune' : 'lane_cleanup';
-    const normalized = {
-      source: 'tombstone',
-      timestamp: parsed.cleanedAt,
-      event,
-      lane_id: parsed.laneId || null,
-      lane_dir: resolve(parsed.laneDir),
-      session_name: parsed.sessionName || null,
-      session_id: parsed.sessionId || null,
-      tool: parsed.tool || parsed.adapterId || null,
-      status: parsed.status || null,
-      reason: parsed.reason || null,
-      request_id: parsed.currentRequestId || parsed.lastRequestId || null,
-      guardrail_repo: parsed.guardrailRepo ? resolve(parsed.guardrailRepo) : guardrailRepo,
-      tombstone_path: join(dir, entry.name),
-      detail: parsed,
-    };
-    if (laneTimelineEntryMatches(normalized, rawOptions)) {
-      entries.push(normalized);
-    }
-  }
-  return { tombstoneDir: dir, entries };
+  return getResidentLaneHistoryQuery(rawOptions, { parseInteger });
 }
 
 export function residentLanePortfolioAuditPath(rawOptions = {}) {
-  return join(resolve(rawOptions.hostStateDir || defaultHostStateDir()), 'resident-lane-portfolio.jsonl');
-}
-
-function readLaneTimelinePortfolioAuditEntries(rawOptions = {}) {
-  const auditPath = residentLanePortfolioAuditPath(rawOptions);
-  const entries = queryAuditLog(auditPath, {
-    after: rawOptions.after || undefined,
-    before: rawOptions.before || undefined,
-  }).filter((entry) => String(entry.event || '').startsWith('lane_'))
-    .map((entry) => ({
-      source: 'host-audit',
-      timestamp: entry.timestamp,
-      event: entry.event,
-      lane_id: entry.lane_id || null,
-      lane_dir: entry.lane_dir ? resolve(entry.lane_dir) : null,
-      session_name: entry.session_name || null,
-      session_id: entry.session_id || null,
-      tool: entry.tool || null,
-      status: entry.status || null,
-      reason: entry.reason || entry.prune_reason || entry.cleanup_reason || null,
-      request_id: entry.request_id || null,
-      guardrail_repo: entry.guardrail_repo ? resolve(entry.guardrail_repo) : null,
-      tombstone_path: entry.tombstone_path || null,
-      detail: entry,
-    }))
-    .filter((entry) => laneTimelineEntryMatches(entry, rawOptions));
-  return {
-    auditPath,
-    chainValid: verifyAuditChain(auditPath).valid,
-    entries,
-  };
-}
-
-function portfolioReposForLaneTimeline(rawOptions = {}) {
-  const guardrailRepo = resolve(rawOptions.guardrailRepo || '.');
-  const repos = new Set([guardrailRepo]);
-  if (rawOptions.allRepos === true || rawOptions.allRepos === 'true') {
-    const hostEntries = readHostLaneRegistryEntries(rawOptions).entries;
-    for (const entry of hostEntries) {
-      if (entry.guardrailRepo) repos.add(resolve(entry.guardrailRepo));
-    }
-  }
-  return Array.from(repos).sort();
+  return residentLanePortfolioAuditPathQuery(rawOptions, { defaultHostStateDir });
 }
 
 export function getResidentLaneTimeline(rawOptions = {}) {
-  const allRepos = rawOptions.allRepos === true || rawOptions.allRepos === 'true';
-  const listing = listResidentLanes(rawOptions);
-  const snapshot = {
-    registryDir: listing.registryDir,
-    hostRegistryDir: listing.hostRegistryDir || null,
-    counts: listing.counts,
-    visibleLaneCount: listing.lanes.length,
-    lanes: listing.lanes.map((lane) => ({
-      laneId: lane.laneId || null,
-      laneDir: lane.laneDir,
-      guardrailRepo: lane.guardrailRepo || null,
-      tool: lane.tool || lane.adapterId || null,
-      status: lane.status,
-      alive: !!lane.alive,
-      currentRequestId: lane.currentRequestId || null,
-      sessionName: lane.sessionName || null,
-      scopeType: lane.scopeType || 'none',
-      scopeMode: lane.scopeMode || 'warn',
-      resourceClaims: Array.isArray(lane.resourceClaims) ? lane.resourceClaims : [],
-    })),
-  };
-  if (allRepos) {
-    const hostAudit = readLaneTimelinePortfolioAuditEntries(rawOptions);
-    const entries = hostAudit.entries.slice(-parseInteger(rawOptions.limit, 40, 'limit', 1));
-    const summary = {
-      totalMatches: hostAudit.entries.length,
-      byEvent: {},
-      byTool: {},
-      byStatus: {},
-    };
-    for (const entry of hostAudit.entries) {
-      summary.byEvent[entry.event] = (summary.byEvent[entry.event] || 0) + 1;
-      if (entry.tool) summary.byTool[entry.tool] = (summary.byTool[entry.tool] || 0) + 1;
-      if (entry.status) summary.byStatus[entry.status] = (summary.byStatus[entry.status] || 0) + 1;
-    }
-    return {
-      repos: [],
-      repoCount: 0,
-      allRepos: true,
-      scope: 'host',
-      auditPath: hostAudit.auditPath,
-      chainValid: hostAudit.chainValid,
-      count: entries.length,
-      totalMatches: hostAudit.entries.length,
-      eventCounts: summary.byEvent,
-      toolCounts: summary.byTool,
-      statusCounts: summary.byStatus,
-      summary,
-      snapshot,
-      entries,
-    };
-  }
-
-  const repos = portfolioReposForLaneTimeline(rawOptions);
-  const repoSummaries = [];
-  const allEntries = [];
-
-  for (const guardrailRepo of repos) {
-    const audit = readLaneTimelineAuditEntries(guardrailRepo, rawOptions);
-    const tombstones = readLaneTimelineTombstones(guardrailRepo, rawOptions);
-    repoSummaries.push({
-      guardrailRepo,
-      auditPath: audit.auditPath,
-      chainValid: audit.chainValid,
-      auditEntryCount: audit.entries.length,
-      tombstoneDir: tombstones.tombstoneDir,
-      tombstoneCount: tombstones.entries.length,
-    });
-    allEntries.push(...audit.entries, ...tombstones.entries);
-  }
-
-  allEntries.sort((a, b) => {
-    const byTs = String(a.timestamp || '').localeCompare(String(b.timestamp || ''));
-    if (byTs !== 0) return byTs;
-    return String(a.lane_id || a.lane_dir || '').localeCompare(String(b.lane_id || b.lane_dir || ''));
+  return getResidentLaneTimelineQuery(rawOptions, {
+    buildResourceConflict,
+    buildScopeConflict,
+    classifyLaneStatus,
+    defaultHostStateDir,
+    hydrateStateFromResultArtifact,
+    inferImplicitFailure,
+    isFifo,
+    lanePaths,
+    laneResourcesOverlap,
+    laneScopesOverlap,
+    parseInteger,
+    parseResourceClaim,
+    readHostLaneRegistryEntries,
+    readJson,
+    splitCsv,
+    writeJson,
   });
-
-  const limit = parseInteger(rawOptions.limit, 40, 'limit', 1);
-  const entries = allEntries.slice(-limit);
-  const summary = {
-    totalMatches: allEntries.length,
-    byEvent: {},
-    byTool: {},
-    byStatus: {},
-  };
-  for (const entry of allEntries) {
-    summary.byEvent[entry.event] = (summary.byEvent[entry.event] || 0) + 1;
-    if (entry.tool) summary.byTool[entry.tool] = (summary.byTool[entry.tool] || 0) + 1;
-    if (entry.status) summary.byStatus[entry.status] = (summary.byStatus[entry.status] || 0) + 1;
-  }
-
-  return {
-    repos: repoSummaries,
-    repoCount: repoSummaries.length,
-    allRepos: false,
-    scope: 'repo',
-    auditPath: repoSummaries[0]?.auditPath || null,
-    chainValid: repoSummaries.every((repo) => repo.chainValid !== false),
-    count: entries.length,
-    totalMatches: allEntries.length,
-    eventCounts: summary.byEvent,
-    toolCounts: summary.byTool,
-    statusCounts: summary.byStatus,
-    summary,
-    snapshot,
-    entries,
-  };
 }
 
 export function getResidentLanePortfolioTimeline(rawOptions = {}) {
-  return getResidentLaneTimeline(rawOptions);
-}
-
-function annotateScopeConflicts(entries) {
-  return entries.map((entry) => {
-    const scopeConflicts = entries
-      .filter((other) => (
-        other.laneDir !== entry.laneDir
-        && other.alive
-        && entry.alive
-        && laneScopesOverlap(entry, other)
-      ))
-      .map((other) => buildScopeConflict(entry, other));
-    const resourceConflicts = entries
-      .filter((other) => (
-        other.laneDir !== entry.laneDir
-        && other.alive
-        && entry.alive
-        && laneResourcesOverlap(entry, other)
-      ))
-      .map((other) => buildResourceConflict(entry, other));
-    return {
-      ...entry,
-      scopeConflicts,
-      resourceConflicts,
-    };
+  return getResidentLanePortfolioTimelineQuery(rawOptions, {
+    buildResourceConflict,
+    buildScopeConflict,
+    classifyLaneStatus,
+    defaultHostStateDir,
+    hydrateStateFromResultArtifact,
+    inferImplicitFailure,
+    isFifo,
+    lanePaths,
+    laneResourcesOverlap,
+    laneScopesOverlap,
+    laneTombstoneDir,
+    parseInteger,
+    parseResourceClaim,
+    readHostLaneRegistryEntries,
+    readJson,
+    splitCsv,
+    writeJson,
   });
-}
-
-function normalizeListFilterValues(value) {
-  if (value == null || value === '') return [];
-  if (Array.isArray(value)) {
-    return value
-      .flatMap((entry) => String(entry).split(','))
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-  }
-  return String(value)
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
-function parseOptionalBooleanFilter(value) {
-  if (value == null || value === '') return null;
-  if (value === true || value === 'true') return true;
-  if (value === false || value === 'false') return false;
-  throw new Error('Boolean lane filters must be true or false.');
-}
-
-function laneMatchesFilters(entry, rawOptions = {}) {
-  const statuses = normalizeListFilterValues(rawOptions.status);
-  if (statuses.length > 0 && !statuses.includes(entry.status)) return false;
-
-  const tools = normalizeListFilterValues(rawOptions.toolFilter);
-  if (tools.length > 0 && !tools.includes(entry.tool || entry.adapterId || '')) return false;
-
-  const laneIds = normalizeListFilterValues(rawOptions.filterLaneId || rawOptions.laneId);
-  if (laneIds.length > 0 && !laneIds.includes(entry.laneId || '')) return false;
-
-  const sessionNames = normalizeListFilterValues(rawOptions.filterSessionName);
-  if (sessionNames.length > 0 && !sessionNames.includes(entry.sessionName || '')) return false;
-
-  const scopeTypes = normalizeListFilterValues(rawOptions.scopeTypeFilter);
-  if (scopeTypes.length > 0 && !scopeTypes.includes(entry.scopeType || 'none')) return false;
-
-  const scopeModes = normalizeListFilterValues(rawOptions.scopeModeFilter);
-  if (scopeModes.length > 0 && !scopeModes.includes(entry.scopeMode || 'warn')) return false;
-
-  const resourceFilter = normalizeListFilterValues(rawOptions.resourceFilter);
-  if (resourceFilter.length > 0) {
-    const entryResources = (Array.isArray(entry.resourceDetails) && entry.resourceDetails.length > 0 ? entry.resourceDetails : (
-      Array.isArray(entry.resourceClaims) ? entry.resourceClaims : (Array.isArray(entry.resources) ? entry.resources : [])
-    ).map((resource) => parseResourceClaim(resource)));
-    const matchesFilter = (filterValue) => {
-      if (filterValue.includes(':')) {
-        const parsed = parseResourceClaim(filterValue);
-        return entryResources.some((resource) => resource.className === parsed.className && resource.name === parsed.name);
-      }
-      return entryResources.some((resource) => resource.className === filterValue || resource.raw === filterValue);
-    };
-    if (!resourceFilter.every((resource) => matchesFilter(resource))) return false;
-  }
-
-  const alive = parseOptionalBooleanFilter(rawOptions.alive);
-  if (alive !== null && alive !== entry.alive) return false;
-
-  const hasConflicts = parseOptionalBooleanFilter(rawOptions.hasConflicts);
-  const totalConflicts = (entry.scopeConflicts?.length || 0) + (entry.resourceConflicts?.length || 0);
-  if (hasConflicts !== null && hasConflicts !== (totalConflicts > 0)) return false;
-
-  return true;
-}
-
-function registryDirFor(rawOptions = {}) {
-  const guardrailRepo = rawOptions.guardrailRepo
-    ? resolve(process.cwd(), rawOptions.guardrailRepo)
-    : process.cwd();
-  const registryDir = rawOptions.lanesDir
-    ? resolve(guardrailRepo, rawOptions.lanesDir)
-    : join(guardrailRepo, '.guardrail', 'lanes');
-  return { guardrailRepo, registryDir };
-}
-
-function collectResidentLaneRegistryEntries(rawOptions = {}) {
-  const { registryDir } = registryDirFor(rawOptions);
-  const entries = [];
-  if (!existsSync(registryDir)) {
-    return { registryDir, entries: [] };
-  }
-
-  for (const entry of readdirSync(registryDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const laneDir = join(registryDir, entry.name);
-    entries.push(collectResidentLaneStatusBase({ ...rawOptions, laneDir }));
-  }
-
-  return { registryDir, entries };
-}
-
-function dedupeLaneEntries(entries) {
-  const seen = new Map();
-  for (const entry of entries) {
-    const key = resolve(entry.laneDir || `${entry.ownerRepoId || 'unknown'}:${entry.laneId || entry.sessionName || 'unknown'}`);
-    if (!seen.has(key)) {
-      seen.set(key, entry);
-      continue;
-    }
-    const existing = seen.get(key);
-    if (!existing.alive && entry.alive) {
-      seen.set(key, entry);
-    }
-  }
-  return Array.from(seen.values());
-}
-
-function collectComparableLaneEntries(rawOptions = {}) {
-  const local = collectResidentLaneRegistryEntries(rawOptions);
-  const host = readHostLaneRegistryEntries(rawOptions);
-  return {
-    registryDir: local.registryDir,
-    hostRegistryDir: host.registryDir,
-    entries: dedupeLaneEntries([...local.entries, ...host.entries]),
-  };
-}
-
-function collectResidentLaneStatusBase(rawOptions) {
-  if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
-  const guardrailRepo = rawOptions.guardrailRepo
-    ? resolve(process.cwd(), rawOptions.guardrailRepo)
-    : process.cwd();
-  const laneDir = resolve(guardrailRepo, rawOptions.laneDir);
-  const keyPath = rawOptions.keyPath ? resolve(process.cwd(), rawOptions.keyPath) : '';
-  const paths = lanePaths(laneDir);
-  let state = readJson(paths.statePath, null);
-  const hydratedState = hydrateStateFromResultArtifact(laneDir, paths, state);
-  if (hydratedState !== state) {
-    state = hydratedState;
-    try {
-      writeJson(paths.statePath, state);
-    } catch {
-      // Best effort only.
-    }
-  }
-  const identity = readJson(paths.identityPath, null);
-  const effectiveKeyPath = identity?.keyPath || state?.keyPath || keyPath || '';
-  const keyPresent = !!(effectiveKeyPath && existsSync(effectiveKeyPath));
-  const requestFifoPresent = isFifo(paths.requestFifo);
-  const responseFifoPresent = isFifo(paths.responseFifo);
-  const classified = classifyLaneStatus(state, !!identity, keyPresent, requestFifoPresent, responseFifoPresent);
-  const implicitFailure = inferImplicitFailure(classified, state);
-  const derived = implicitFailure || classified;
-
-  return {
-    adapterId: state?.adapterId ?? identity?.adapterId ?? rawOptions.adapterId ?? rawOptions.tool ?? null,
-    tool: state?.tool ?? identity?.tool ?? rawOptions.tool ?? state?.adapterId ?? identity?.adapterId ?? rawOptions.adapterId ?? null,
-    scopeType: state?.scopeType ?? identity?.scopeType ?? rawOptions.scopeType ?? 'none',
-    scopeMode: state?.scopeMode ?? identity?.scopeMode ?? rawOptions.scopeMode ?? 'warn',
-    scopePaths: state?.scopePaths ?? identity?.scopePaths ?? rawOptions.scopePaths ?? [],
-    resourceMode: state?.resourceMode ?? identity?.resourceMode ?? rawOptions.resourceMode ?? 'warn',
-    resources: state?.resources ?? state?.resourceClaims ?? identity?.resources ?? identity?.resourceClaims ?? rawOptions.resources ?? rawOptions.resourceClaims ?? [],
-    resourceClaims: state?.resourceClaims ?? state?.resources ?? identity?.resourceClaims ?? identity?.resources ?? rawOptions.resourceClaims ?? rawOptions.resources ?? [],
-    resourceDetails: state?.resourceDetails ?? identity?.resourceDetails ?? rawOptions.resourceDetails ?? [],
-    laneDir,
-    statePath: paths.statePath,
-    status: derived.status,
-    alive: derived.alive,
-    pid: state?.pid ?? null,
-    laneId: state?.laneId ?? identity?.laneId ?? rawOptions.laneId ?? null,
-    sessionName: state?.sessionName ?? identity?.sessionName ?? rawOptions.sessionName ?? null,
-    sessionId: state?.sessionId ?? identity?.sessionId ?? rawOptions.sessionId ?? null,
-    transportSummary: state?.transportSummary ?? identity?.transportSummary ?? rawOptions.transportSummary ?? null,
-    identityPath: paths.identityPath,
-    identityNonce: state?.identityNonce ?? identity?.identityNonce ?? null,
-    bootNonce: state?.bootNonce ?? identity?.bootNonce ?? null,
-    ownerRepoId: state?.ownerRepoId ?? identity?.ownerRepoId ?? null,
-    guardrailRepo: state?.guardrailRepo ?? identity?.guardrailRepo ?? guardrailRepo,
-    workingDir: state?.workingDir ?? identity?.workingDir ?? rawOptions.workingDir ?? guardrailRepo,
-    hostStateDir: state?.hostStateDir ?? identity?.hostStateDir ?? rawOptions.hostStateDir ?? defaultHostStateDir(),
-    lastRequestId: state?.lastRequestId ?? null,
-    currentRequestId: state?.currentRequestId ?? null,
-    currentRequestStartedAt: state?.currentRequestStartedAt ?? null,
-    lastCompletedRequestId: state?.lastCompletedRequestId ?? null,
-    lastCompletedAt: state?.lastCompletedAt ?? null,
-    lastExitCode: state?.lastExitCode ?? null,
-    lastResultPath: state?.lastResultPath ?? null,
-    lastActivityAt: state?.lastActivityAt ?? null,
-    createdAt: state?.createdAt ?? null,
-    pollIntervalMs: state?.pollIntervalMs ?? null,
-    idleTimeoutMs: state?.idleTimeoutMs ?? null,
-    healthTimeoutMs: state?.healthTimeoutMs ?? null,
-    currentAiState: state?.currentAiState ?? null,
-    currentAiEvent: state?.currentAiEvent ?? null,
-    currentAiPhase: state?.currentAiPhase ?? null,
-    currentAiMessage: state?.currentAiMessage ?? null,
-    currentAiTimestamp: state?.currentAiTimestamp ?? null,
-    control: readJson(paths.controlPath, null),
-    logPath: state?.logPath ?? paths.logPath,
-    keyPath: effectiveKeyPath || null,
-    keyPresent,
-    requestFifoPresent,
-    responseFifoPresent,
-    startedConversation: state?.startedConversation ?? false,
-    authMode: state?.authMode ?? null,
-    authSource: state?.authSource ?? null,
-    authPreflightStatus: state?.authPreflightStatus ?? null,
-    authPreflightReason: state?.authPreflightReason ?? null,
-    authPreflightMessage: state?.authPreflightMessage ?? null,
-    authPreflightCheckedAt: state?.authPreflightCheckedAt ?? null,
-    failureReason: state?.failureReason ?? derived.failureReason ?? null,
-    failureStage: state?.failureStage ?? derived.failureStage ?? null,
-    recommendedAction: derived.recommendedAction,
-  };
 }
 
 export function getResidentLaneStatus(rawOptions) {
-  const base = collectResidentLaneStatusBase(rawOptions);
-  const { entries } = collectComparableLaneEntries({ ...rawOptions, guardrailRepo: base.guardrailRepo });
-  const combined = entries.some((entry) => entry.laneDir === base.laneDir)
-    ? entries
-    : [...entries, base];
-  return annotateScopeConflicts(combined).find((entry) => entry.laneDir === base.laneDir) || base;
+  return getResidentLaneStatusQuery(rawOptions, {
+    buildResourceConflict,
+    buildScopeConflict,
+    classifyLaneStatus,
+    defaultHostStateDir,
+    hydrateStateFromResultArtifact,
+    inferImplicitFailure,
+    isFifo,
+    lanePaths,
+    laneResourcesOverlap,
+    laneScopesOverlap,
+    parseResourceClaim,
+    readHostLaneRegistryEntries,
+    readJson,
+    writeJson,
+  });
 }
 
 export function listResidentLanes(rawOptions = {}) {
-  const { registryDir, entries: localEntries } = collectResidentLaneRegistryEntries(rawOptions);
-  const comparableEntries = collectComparableLaneEntries(rawOptions).entries;
-  const localLaneDirs = new Set(localEntries.map((entry) => entry.laneDir));
-  const visibleEntries = rawOptions.allRepos === true || rawOptions.allRepos === 'true'
-    ? comparableEntries
-    : comparableEntries.filter((entry) => localLaneDirs.has(entry.laneDir));
-  const entries = annotateScopeConflicts(visibleEntries).filter((entry) => laneMatchesFilters(entry, rawOptions));
-
-  entries.sort((a, b) => {
-    const byCreated = String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
-    if (byCreated !== 0) return byCreated;
-    return String(a.laneId || a.sessionName || a.laneDir).localeCompare(String(b.laneId || b.sessionName || b.laneDir));
+  return listResidentLanesQuery(rawOptions, {
+    buildResourceConflict,
+    buildScopeConflict,
+    classifyLaneStatus,
+    defaultHostStateDir,
+    hydrateStateFromResultArtifact,
+    inferImplicitFailure,
+    isFifo,
+    lanePaths,
+    laneResourcesOverlap,
+    laneScopesOverlap,
+    parseResourceClaim,
+    readHostLaneRegistryEntries,
+    readJson,
+    writeJson,
   });
-
-  const counts = entries.reduce((acc, entry) => {
-    acc.total += 1;
-    acc[entry.status] = (acc[entry.status] || 0) + 1;
-    return acc;
-  }, { total: 0 });
-
-  return {
-    registryDir,
-    counts,
-    lanes: entries,
-  };
-}
-
-function cleanupOneLane(lane) {
-  return cleanupLaneWithReason(lane, 'cleanup', 'manual_cleanup');
-}
-
-function removeLaneDirectory(laneDir) {
-  try {
-    rmSync(laneDir, { recursive: true, force: true });
-  } catch {
-    // Best effort.
-  }
-}
-
-function laneTombstoneDir(guardrailRepo) {
-  return join(resolve(guardrailRepo || process.cwd()), '.guardrail', 'lane-tombstones');
-}
-
-function laneTombstonePathFor(lane, cleanedAt) {
-  const stamp = String(cleanedAt || new Date().toISOString()).replaceAll(':', '-');
-  return join(laneTombstoneDir(lane.guardrailRepo), `${stamp}-${laneDirFingerprint(lane.laneDir)}.json`);
-}
-
-function writeLaneTombstone(lane, details = {}) {
-  if (!lane?.laneDir) return null;
-  const cleanedAt = new Date().toISOString();
-  const tombstonePath = laneTombstonePathFor(lane, cleanedAt);
-  mkdirSync(dirname(tombstonePath), { recursive: true });
-  writeJson(tombstonePath, {
-    schemaVersion: 1,
-    action: details.action || 'cleanup',
-    reason: details.reason || null,
-    cleanedAt,
-    laneId: lane.laneId || null,
-    laneDir: lane.laneDir,
-    guardrailRepo: lane.guardrailRepo || null,
-    ownerRepoId: lane.ownerRepoId || null,
-    tool: lane.tool || lane.adapterId || null,
-    adapterId: lane.adapterId || null,
-    status: lane.status || null,
-    aliveBeforeCleanup: !!lane.alive,
-    sessionName: lane.sessionName || null,
-    sessionId: lane.sessionId || null,
-    keyPath: lane.keyPath || null,
-    bootNonce: lane.bootNonce || null,
-    identityNonce: lane.identityNonce || null,
-    keyPresent: lane.keyPresent === true,
-    requestFifoPresent: lane.requestFifoPresent === true,
-    responseFifoPresent: lane.responseFifoPresent === true,
-    currentRequestId: lane.currentRequestId || null,
-    lastRequestId: lane.lastRequestId || null,
-    lastCompletedRequestId: lane.lastCompletedRequestId || null,
-    lastActivityAt: lane.lastActivityAt || null,
-    logPath: lane.logPath || null,
-    transportSummary: lane.transportSummary || null,
-    scopeType: lane.scopeType || 'none',
-    scopeMode: lane.scopeMode || 'warn',
-    scopePaths: Array.isArray(lane.scopePaths) ? lane.scopePaths : [],
-    resourceMode: lane.resourceMode || 'none',
-    resourceClaims: Array.isArray(lane.resourceClaims) ? lane.resourceClaims : [],
-    resourceDetails: Array.isArray(lane.resourceDetails) ? lane.resourceDetails : [],
-  });
-  return tombstonePath;
-}
-
-function lanePruneSignals(lane) {
-  const claim = lane.laneId ? readLaneClaim(lane.laneId, lane.keyPath || '') : null;
-  const claimAlive = !!claim && laneClaimIsLive(claim);
-  return {
-    alive: !!lane.alive,
-    status: lane.status,
-    identityPresent: !!lane.identityPath && existsSync(lane.identityPath),
-    statePresent: !!lane.statePath && existsSync(lane.statePath),
-    keyPresent: lane.keyPresent === true,
-    requestFifoPresent: lane.requestFifoPresent === true,
-    responseFifoPresent: lane.responseFifoPresent === true,
-    bootNonce: lane.bootNonce || null,
-    claimPresent: !!claim,
-    claimAlive,
-  };
-}
-
-function classifyResidentLaneForPrune(lane, options = {}) {
-  const includeFailed = options.includeFailed === true;
-  const signals = lanePruneSignals(lane);
-  const prunableStates = new Set(includeFailed ? ['stale', 'expired', 'stopped', 'failed'] : ['stale', 'expired', 'stopped']);
-
-  if (signals.alive) {
-    return { prunable: false, reason: 'lane_alive', signals };
-  }
-  if (signals.claimAlive) {
-    return { prunable: false, reason: 'live_claim_present', signals };
-  }
-  if (!prunableStates.has(lane.status)) {
-    return { prunable: false, reason: 'not_prunable', signals };
-  }
-
-  const reasonByStatus = {
-    stale: 'dead_artifacts_present',
-    expired: 'lane_expired',
-    stopped: 'lane_stopped',
-    failed: 'lane_failed',
-  };
-  return {
-    prunable: true,
-    reason: reasonByStatus[lane.status] || 'dead_artifacts_present',
-    signals,
-  };
-}
-
-function cleanupLaneWithReason(lane, action, reason) {
-  const tombstonePath = writeLaneTombstone(lane, { action, reason });
-  removeHostLaneRegistryEntry(lane);
-  if (lane.laneId) {
-    removeLaneClaim(lane.laneId, lane.keyPath || '', {
-      laneDir: lane.laneDir,
-      bootNonce: lane.bootNonce || null,
-    });
-  }
-  if (lane.keyPath) {
-    removeIfExists(lane.keyPath);
-  }
-  removeLaneDirectory(lane.laneDir);
-  return {
-    laneDir: lane.laneDir,
-    laneId: lane.laneId || null,
-    adapterId: lane.adapterId || null,
-    tool: lane.tool || lane.adapterId || null,
-    status: lane.status,
-    keyPath: lane.keyPath || null,
-    aliveBeforeCleanup: lane.alive,
-    tombstonePath,
-    cleanupReason: reason || null,
-  };
 }
 
 export function pruneResidentLanes(rawOptions = {}) {
-  const includeFailed = rawOptions.includeFailed === true || rawOptions.includeFailed === 'true';
-  const dryRun = rawOptions.dryRun === true || rawOptions.dryRun === 'true';
-  const listing = listResidentLanes(rawOptions);
-  const candidates = [];
-  const pruned = [];
-  const skipped = [];
-
-  for (const lane of listing.lanes) {
-    const classification = classifyResidentLaneForPrune(lane, { includeFailed });
-    const summary = {
-      laneDir: lane.laneDir,
-      laneId: lane.laneId || null,
-      tool: lane.tool || lane.adapterId || null,
-      status: lane.status,
-      reason: classification.reason,
-      signals: classification.signals,
-    };
-    if (!classification.prunable) {
-      skipped.push({
-        ...summary,
-      });
-      continue;
-    }
-
-    candidates.push(summary);
-    if (dryRun) continue;
-    pruned.push(cleanupLaneWithReason(lane, 'prune', classification.reason));
-  }
-
-  return {
-    registryDir: listing.registryDir,
-    includeFailed,
-    dryRun,
-    candidates,
-    pruned,
-    skipped,
-  };
+  return pruneResidentLanesMaintenance(rawOptions, {
+    laneDirFingerprint,
+    laneClaimIsLive,
+    listResidentLanes,
+    readLaneClaim,
+    removeHostLaneRegistryEntry,
+    removeIfExists,
+    removeLaneClaim,
+    writeJson,
+  });
 }
 
 export function cleanupResidentLane(rawOptions = {}) {
-  const listing = listResidentLanes(rawOptions);
-  const explicitLaneDir = rawOptions.laneDir
-    ? resolve(rawOptions.guardrailRepo ? resolve(process.cwd(), rawOptions.guardrailRepo) : process.cwd(), rawOptions.laneDir)
-    : null;
-  const selected = explicitLaneDir
-    ? listing.lanes.filter((lane) => lane.laneDir === explicitLaneDir)
-    : listing.lanes;
-
-  if (selected.length === 0) {
-    return {
-      status: 'missing',
-      cleaned: false,
-      message: 'No resident lane matched the requested cleanup target.',
-      registryDir: listing.registryDir,
-      matches: [],
-    };
-  }
-
-  if (selected.length > 1) {
-    return {
-      status: 'ambiguous',
-      cleaned: false,
-      message: 'More than one resident lane matched the requested cleanup target.',
-      registryDir: listing.registryDir,
-      matches: selected.map((lane) => ({
-        laneDir: lane.laneDir,
-        laneId: lane.laneId || null,
-        status: lane.status,
-        tool: lane.tool || lane.adapterId || null,
-      })),
-    };
-  }
-
-  const lane = selected[0];
-  const stopped = lane.alive ? stopResidentLane({
-    ...rawOptions,
-    laneDir: lane.laneDir,
-    laneId: lane.laneId || rawOptions.laneId || '',
-    keyPath: lane.keyPath || rawOptions.keyPath || '',
-    tool: lane.tool || rawOptions.tool || lane.adapterId || 'claude',
-    sessionName: lane.sessionName || rawOptions.sessionName || lane.laneId || '',
-    sessionId: lane.sessionId || rawOptions.sessionId || '',
-  }) : null;
-  const cleaned = cleanupLaneWithReason({
-    ...lane,
-    alive: false,
-    status: stopped ? 'stopped' : lane.status,
-    keyPath: (stopped?.keyPath || lane.keyPath || null),
-  }, 'cleanup', stopped ? 'manual_stop_then_cleanup' : 'manual_cleanup');
-
-  return {
-    status: 'cleaned',
-    cleaned: true,
-    registryDir: listing.registryDir,
-    lane: cleaned,
-    stoppedLiveLane: !!stopped,
-  };
+  return cleanupResidentLaneMaintenance(rawOptions, {
+    cleanupLaneArtifacts,
+    isPidAlive,
+    laneDirFingerprint,
+    lanePaths,
+    listResidentLanes,
+    readJson,
+    readLaneClaim,
+    removeHostLaneRegistryEntry,
+    removeIfExists,
+    removeLaneClaim,
+    writeJson,
+  });
 }
 
 export function getResidentLaneResult(rawOptions) {
-  if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
-  const status = getResidentLaneStatus(rawOptions);
-  const requestId = rawOptions.requestId
-    || status.currentRequestId
-    || status.lastCompletedRequestId
-    || status.lastRequestId
-    || null;
-
-  if (!requestId) {
-    return {
-      status: 'missing',
-      reason: 'no_request_selected',
-      message: 'No resident lane request has been recorded yet.',
-      requestId: null,
-      resultPath: null,
-    };
-  }
-
-  const resultPath = laneResultPath(status.laneDir, requestId);
-  const result = readJson(resultPath, null);
-  if (result) {
-    return {
-      status: 'completed',
-      requestId,
-      resultPath,
-      result,
-    };
-  }
-
-  if (status.currentRequestId === requestId && (status.status === 'busy' || status.status === 'stalled')) {
-    return {
-      status: 'pending',
-      reason: 'request_still_running',
-      message: 'Resident lane request is still running.',
-      requestId,
-      resultPath,
-      currentRequestStartedAt: status.currentRequestStartedAt,
-    };
-  }
-
-  return {
-    status: 'missing',
-    reason: 'result_not_found',
-    message: 'No stored resident lane result was found for that request.',
-    requestId,
-    resultPath,
-  };
+  return getResidentLaneResultQuery(rawOptions, {
+    getResidentLaneStatus,
+    laneResultPath,
+    readJson,
+  });
 }
 
 export async function waitForResidentLaneResult(rawOptions = {}) {
-  const timeoutMs = parseInteger(rawOptions.timeoutMs, DEFAULT_WAIT_TIMEOUT_MS, 'timeout_ms', 1);
-  const pollIntervalMs = parseInteger(rawOptions.pollIntervalMs, DEFAULT_WAIT_POLL_INTERVAL_MS, 'poll_interval_ms', 1);
-  const startedAt = Date.now();
-
-  for (;;) {
-    const result = getResidentLaneResult(rawOptions);
-    if (result.status === 'completed') return result;
-
-    const status = getResidentLaneStatus(rawOptions);
-    const requestedId = rawOptions.requestId || status.currentRequestId || status.lastRequestId || null;
-    if (status.status === 'failed') {
-      return {
-        status: 'failed',
-        reason: 'lane_failed',
-        message: 'Resident lane failed before the requested result was produced.',
-        requestId: requestedId,
-        failureReason: status.failureReason || null,
-        failureStage: status.failureStage || null,
-        logPath: status.logPath || null,
-      };
-    }
-    if (status.status === 'expired' || status.status === 'stale' || status.status === 'stopped' || status.status === 'missing') {
-      return {
-        status: 'missing',
-        reason: 'lane_unavailable',
-        message: 'Resident lane is no longer available.',
-        requestId: requestedId,
-      };
-    }
-    if (
-      result.status === 'missing'
-      && requestedId
-      && status.status === 'ready'
-      && status.currentRequestId !== requestedId
-    ) {
-      return {
-        status: 'missing',
-        reason: 'result_not_found',
-        message: 'The resident lane returned to ready state without storing a result for the requested id.',
-        requestId: requestedId,
-        resultPath: result.resultPath || null,
-      };
-    }
-
-    if ((Date.now() - startedAt) >= timeoutMs) {
-      return {
-        status: 'pending',
-        reason: 'request_still_running',
-        message: 'Resident lane request is still running.',
-        requestId: requestedId,
-        currentRequestStartedAt: status.currentRequestStartedAt || null,
-        resultPath: result.resultPath || null,
-      };
-    }
-
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, pollIntervalMs));
-  }
+  return waitForResidentLaneResultQuery(rawOptions, {
+    getResidentLaneResult,
+    getResidentLaneStatus,
+    parseInteger,
+    waitTimeoutMs: DEFAULT_WAIT_TIMEOUT_MS,
+    waitPollIntervalMs: DEFAULT_WAIT_POLL_INTERVAL_MS,
+  });
 }
 
 function cleanupLaneArtifacts(options, status, extra = {}) {
@@ -2422,10 +1691,20 @@ export async function launchResidentLaneWithAdapter(options, adapter, deps = {})
   const startupLock = { release: startupAuth.release };
 
   try {
-    const comparableLanes = collectComparableLaneEntries({
+    const comparableLanes = collectComparableLaneEntriesQuery({
       guardrailRepo: optionsWithIdentity.guardrailRepo,
       keyPath: optionsWithIdentity.keyPath || '',
       hostStateDir: optionsWithIdentity.hostStateDir || undefined,
+    }, {
+      classifyLaneStatus,
+      defaultHostStateDir,
+      hydrateStateFromResultArtifact,
+      inferImplicitFailure,
+      isFifo,
+      lanePaths,
+      readHostLaneRegistryEntries,
+      readJson,
+      writeJson,
     }).entries;
     const duplicates = optionsWithIdentity.laneId
       ? comparableLanes.filter((lane) => (
@@ -2702,263 +1981,59 @@ export function launchResidentLaneDaemonHelper(options, adapter) {
 }
 
 export function stopResidentLane(rawOptions) {
-  if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
-  const guardrailRepo = rawOptions.guardrailRepo
-    ? resolve(process.cwd(), rawOptions.guardrailRepo)
-    : process.cwd();
-  const laneDir = resolve(guardrailRepo, rawOptions.laneDir);
-  const keyPath = rawOptions.keyPath ? resolve(process.cwd(), rawOptions.keyPath) : '';
-  const options = {
-    adapterId: rawOptions.adapterId || 'unknown',
-    laneDir,
-    keyPath,
-    guardrailRepo,
-    workingDir: rawOptions.workingDir ? resolve(guardrailRepo, rawOptions.workingDir) : guardrailRepo,
-    laneId: rawOptions.laneId || '',
-    scopeType: rawOptions.scopeType || 'none',
-    scopeMode: rawOptions.scopeMode || 'warn',
-    scopePaths: Array.isArray(rawOptions.scopePaths) ? rawOptions.scopePaths : [],
-    resourceMode: rawOptions.resourceMode || 'warn',
-    resources: Array.isArray(rawOptions.resources) ? rawOptions.resources : [],
-    sessionName: rawOptions.sessionName || rawOptions.laneId || '',
-    sessionId: rawOptions.sessionId || '',
-    noSessionPersistence: false,
-    authFd: null,
-  };
-  const paths = lanePaths(options.laneDir);
-  const state = readJson(paths.statePath, null);
-  options.scopeType = state?.scopeType ?? options.scopeType;
-  options.scopeMode = state?.scopeMode ?? options.scopeMode;
-  options.scopePaths = state?.scopePaths ?? options.scopePaths;
-  options.resourceMode = state?.resourceMode ?? options.resourceMode;
-  options.resources = state?.resources ?? options.resources;
-  options.bootNonce = state?.bootNonce ?? rawOptions.bootNonce ?? '';
-  options.identityNonce = state?.identityNonce ?? rawOptions.identityNonce ?? '';
-  if (state?.pid && isPidAlive(state.pid)) {
-    try {
-      process.kill(state.pid, 'SIGTERM');
-    } catch {
-      // fall through to local cleanup
-    }
-  }
-  cleanupLaneArtifacts(options, 'stopped', {
-    lastRequestId: state?.lastRequestId || null,
-    currentRequestId: state?.currentRequestId || null,
-    currentRequestStartedAt: state?.currentRequestStartedAt || null,
-    lastCompletedRequestId: state?.lastCompletedRequestId || null,
-    lastCompletedAt: state?.lastCompletedAt || null,
-    lastExitCode: state?.lastExitCode ?? null,
-    lastResultPath: state?.lastResultPath || null,
-    createdAt: state?.createdAt,
+  return stopResidentLaneMaintenance(rawOptions, {
+    cleanupLaneArtifacts,
+    isPidAlive,
+    lanePaths,
+    readJson,
   });
-  try {
-    rmSync(join(options.laneDir, 'logs'), { recursive: true, force: true });
-  } catch {}
-  return {
-    adapterId: state?.adapterId ?? options.adapterId,
-    tool: state?.tool ?? options.tool ?? state?.adapterId ?? options.adapterId,
-    laneDir: options.laneDir,
-    statePath: paths.statePath,
-    keyPath: options.keyPath || null,
-    stopped: true,
-  };
 }
-
-// ---------------------------------------------------------------------------
-// Emergency controls — revoke and kill (break-glass)
-// ---------------------------------------------------------------------------
-//
-// These are intentionally distinct from stopResidentLane:
-//   stop  → SIGTERM, state='stopped', no sentinel, restartable
-//   revoke → SIGTERM, state='revoked', REVOKED sentinel written, not restartable
-//   kill  → SIGKILL (break-glass), state='revoked'+'killed', REVOKED sentinel, not restartable
-//
-// Both revoke and kill write a REVOKED sentinel file inside the lane dir.
-// runResidentLaneDaemon checks this sentinel before bootstrap; any restart
-// attempt fails closed with failureStage='revocation_check'.
-
-function writeRevocationSentinel(laneDir) {
-  const sentinelPath = join(laneDir, 'REVOKED');
-  writeFileSync(sentinelPath, JSON.stringify({
-    revokedAt: new Date().toISOString(),
-  }) + '\n', 'utf8');
-}
-
-function resolveEmergencyOptions(rawOptions) {
-  if (!rawOptions.laneDir) throw new Error('Provide --lane-dir.');
-  const guardrailRepo = rawOptions.guardrailRepo
-    ? resolve(process.cwd(), rawOptions.guardrailRepo)
-    : process.cwd();
-  const laneDir = resolve(guardrailRepo, rawOptions.laneDir);
-  return {
-    adapterId: rawOptions.adapterId || 'unknown',
-    laneDir,
-    keyPath: rawOptions.keyPath ? resolve(process.cwd(), rawOptions.keyPath) : '',
-    guardrailRepo,
-    workingDir: rawOptions.workingDir ? resolve(guardrailRepo, rawOptions.workingDir) : guardrailRepo,
-    laneId: rawOptions.laneId || '',
-    scopeType: 'none',
-    scopeMode: 'warn',
-    scopePaths: [],
-    resourceMode: 'warn',
-    resources: [],
-    sessionName: rawOptions.sessionName || rawOptions.laneId || '',
-    sessionId: rawOptions.sessionId || '',
-    noSessionPersistence: false,
-    authFd: null,
-    actor: rawOptions.actor || 'operator',
-    reason: rawOptions.reason || '',
-  };
-}
-
-/**
- * Permanently revoke a resident lane. Sends SIGTERM to any running process,
- * writes state='revoked', and writes a REVOKED sentinel that prevents restart.
- * Distinct from stopResidentLane: revoked lanes cannot be restarted.
- */
 export function revokeResidentLane(rawOptions) {
-  const options = resolveEmergencyOptions(rawOptions);
-  const paths = lanePaths(options.laneDir);
-  const state = readJson(paths.statePath, null);
-  options.bootNonce = state?.bootNonce ?? rawOptions.bootNonce ?? '';
-  options.identityNonce = state?.identityNonce ?? rawOptions.identityNonce ?? '';
-
-  if (state?.pid && isPidAlive(state.pid)) {
-    try { process.kill(state.pid, 'SIGTERM'); } catch { /* process already gone */ }
-  }
-
-  cleanupLaneArtifacts(options, 'revoked', {
-    lastRequestId: state?.lastRequestId || null,
-    currentRequestId: state?.currentRequestId || null,
-    currentRequestStartedAt: state?.currentRequestStartedAt || null,
-    lastCompletedRequestId: state?.lastCompletedRequestId || null,
-    lastCompletedAt: state?.lastCompletedAt || null,
-    lastExitCode: state?.lastExitCode ?? null,
-    lastResultPath: state?.lastResultPath || null,
-    createdAt: state?.createdAt,
-    failureReason: options.reason || null,
-    failureStage: 'revoked',
+  return revokeResidentLaneMaintenance(rawOptions, {
+    cleanupLaneArtifacts,
+    isPidAlive,
+    lanePaths,
+    readJson,
   });
-
-  writeRevocationSentinel(options.laneDir);
-
-  return {
-    adapterId: state?.adapterId ?? options.adapterId,
-    tool: state?.tool ?? options.adapterId,
-    laneDir: options.laneDir,
-    statePath: paths.statePath,
-    revoked: true,
-    actor: options.actor,
-    reason: options.reason || null,
-  };
 }
 
-/**
- * Break-glass emergency stop. Sends SIGKILL (not SIGTERM) to immediately
- * terminate the process without graceful shutdown. Writes state='revoked' +
- * failureStage='killed', writes REVOKED sentinel. Use only when normal
- * revocation is insufficient (e.g., process is unresponsive to SIGTERM).
- */
 export function killResidentLane(rawOptions) {
-  const options = resolveEmergencyOptions(rawOptions);
-  const paths = lanePaths(options.laneDir);
-  const state = readJson(paths.statePath, null);
-  options.bootNonce = state?.bootNonce ?? rawOptions.bootNonce ?? '';
-  options.identityNonce = state?.identityNonce ?? rawOptions.identityNonce ?? '';
-
-  if (state?.pid && isPidAlive(state.pid)) {
-    try { process.kill(state.pid, 'SIGKILL'); } catch { /* process already gone */ }
-  }
-
-  cleanupLaneArtifacts(options, 'revoked', {
-    lastRequestId: state?.lastRequestId || null,
-    currentRequestId: state?.currentRequestId || null,
-    currentRequestStartedAt: state?.currentRequestStartedAt || null,
-    lastCompletedRequestId: state?.lastCompletedRequestId || null,
-    lastCompletedAt: state?.lastCompletedAt || null,
-    lastExitCode: state?.lastExitCode ?? null,
-    lastResultPath: state?.lastResultPath || null,
-    createdAt: state?.createdAt,
-    failureReason: options.reason || 'break-glass emergency kill',
-    failureStage: 'killed',
+  return killResidentLaneMaintenance(rawOptions, {
+    cleanupLaneArtifacts,
+    isPidAlive,
+    lanePaths,
+    readJson,
   });
-
-  writeRevocationSentinel(options.laneDir);
-
-  return {
-    adapterId: state?.adapterId ?? options.adapterId,
-    tool: state?.tool ?? options.adapterId,
-    laneDir: options.laneDir,
-    statePath: paths.statePath,
-    killed: true,
-    revoked: true,
-    actor: options.actor,
-    reason: options.reason || null,
-  };
 }
 
-/**
- * Bulk revoke all resident lanes in the current repo/workspace scope.
- * Iterates lanes via listResidentLanes, calls revokeResidentLane per lane,
- * skips lanes already revoked, and returns an aggregate summary.
- */
 export function revokeAllResidentLanes(rawOptions = {}) {
-  const listing = listResidentLanes(rawOptions);
-  const lanes = listing.lanes || [];
-  const targeted = lanes.length;
-  let revoked = 0;
-  let skipped = 0;
-  let failed = 0;
-  const results = [];
-
-  for (const lane of lanes) {
-    if (lane.status === 'revoked' || existsSync(join(lane.laneDir, 'REVOKED'))) {
-      skipped += 1;
-      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'skipped', reason: 'already_revoked' });
-      continue;
-    }
-    try {
-      const result = revokeResidentLane({ ...rawOptions, laneDir: lane.laneDir, laneId: lane.laneId });
-      revoked += 1;
-      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'revoked', result });
-    } catch (err) {
-      failed += 1;
-      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'failed', error: err.message });
-    }
-  }
-
-  return { targeted, revoked, skipped, failed, results };
+  return revokeAllResidentLanesMaintenance(rawOptions, {
+    cleanupLaneArtifacts,
+    isPidAlive,
+    laneDirFingerprint,
+    lanePaths,
+    listResidentLanes,
+    readJson,
+    readLaneClaim,
+    removeHostLaneRegistryEntry,
+    removeIfExists,
+    removeLaneClaim,
+    writeJson,
+  });
 }
 
-/**
- * Bulk break-glass kill all resident lanes in the current repo/workspace scope.
- * Iterates lanes via listResidentLanes, calls killResidentLane per lane,
- * skips lanes already revoked, and returns an aggregate summary.
- */
 export function killAllResidentLanes(rawOptions = {}) {
-  const listing = listResidentLanes(rawOptions);
-  const lanes = listing.lanes || [];
-  const targeted = lanes.length;
-  let killed = 0;
-  let skipped = 0;
-  let failed = 0;
-  const results = [];
-
-  for (const lane of lanes) {
-    if (lane.status === 'revoked' || existsSync(join(lane.laneDir, 'REVOKED'))) {
-      skipped += 1;
-      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'skipped', reason: 'already_revoked' });
-      continue;
-    }
-    try {
-      const result = killResidentLane({ ...rawOptions, laneDir: lane.laneDir, laneId: lane.laneId });
-      killed += 1;
-      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'killed', result });
-    } catch (err) {
-      failed += 1;
-      results.push({ laneDir: lane.laneDir, laneId: lane.laneId || null, outcome: 'failed', error: err.message });
-    }
-  }
-
-  return { targeted, killed, skipped, failed, results };
+  return killAllResidentLanesMaintenance(rawOptions, {
+    cleanupLaneArtifacts,
+    isPidAlive,
+    laneDirFingerprint,
+    lanePaths,
+    listResidentLanes,
+    readJson,
+    readLaneClaim,
+    removeHostLaneRegistryEntry,
+    removeIfExists,
+    removeLaneClaim,
+    writeJson,
+  });
 }
