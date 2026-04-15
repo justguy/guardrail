@@ -7,7 +7,7 @@
         "id": "enterprise",
         "label": "Enterprise",
         "description": "Enterprise delivery items, rollout work, and capability gaps.",
-        "collapsed": true
+        "collapsed": false
       },
       {
         "id": "runtime",
@@ -52,8 +52,8 @@
       }
     ],
     "scratchpad": "Tracker reconciled with docs/technical-status.md: completed P0/runtime/recipe slices are now recorded alongside the remaining enterprise and deferred backlog. D0za is now closed after live direct-turn and artifact/report proofs on the host Claude lane.",
-    "rev": 11,
-    "updatedAt": "2026-04-15T02:14:03.095Z"
+    "rev": 17,
+    "updatedAt": "2026-04-15T03:29:58.690Z"
   },
   "tasks": [
     {
@@ -89,7 +89,7 @@
       "id": "enterprise-admin-read-audit",
       "title": "Versioned admin/event APIs and read-access auditing",
       "goal": "Finish the external API/admin compatibility side now that event schema v1 is frozen.",
-      "status": "not_started",
+      "status": "complete",
       "placement": {
         "swimlaneId": "enterprise",
         "priorityId": "p1"
@@ -103,7 +103,7 @@
           "api-versioning",
           "audit"
         ],
-        "notes": "Technical status item 36. P0e closed schema v1; versioned external/admin compatibility guarantees remain open."
+        "notes": "Closed via slices v36a/v36b/v36c: read/export access events emit audit_queried, metrics_read, and compliance_exported; admin mutation surfaces emit recipe_installed, deploy_mode_changed, and key_rotated; docs/event-schema-v1.md defines the stable { schema_version, data } envelope and compatibility contract."
       }
     },
     {
