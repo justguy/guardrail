@@ -1,8 +1,19 @@
 # Guardrail — Technical Status & Roadmap
 
-**Last updated:** 2026-04-15
+**Last updated:** 2026-04-16
 
 Active open and deferred roadmap items are also mirrored into repo-local `llm-tracker` state at [`.llm-tracker/trackers/guardrail-roadmap.json`](../.llm-tracker/trackers/guardrail-roadmap.json). The technical status doc remains the fuller narrative source of truth; the tracker is the operational queue.
+
+---
+
+## Recent: Repo-local Claude raw-git hook (2026-04-16)
+
+- Added a zero-dependency Claude `PreToolUse` hook in `src/claude-git-guardrail-hook.js` and wired the current checkout's `.claude/settings.local.json` to call it before Bash tool execution.
+- The hook blocks raw `git push`, `git reset --hard`, `git clean -f/-fd`, `git branch -D`, `git checkout .`, and `git restore .` in this Guardian checkout before Claude executes them.
+- Raw push attempts now redirect Claude toward the bounded `git-push` or `git-force-push-safe` Guardrail recipes with concrete invocation templates instead of letting the model mutate history or remotes directly.
+- Worktree/history wipe commands remain intentionally unwrapped: the hook tells Claude there is no shipped bounded recipe for those destructive forms and that the operator must approve a reviewed alternative first.
+- Added focused proof coverage in `tests/test-claude-git-guardrail-hook.js`, including direct detection, PreToolUse payload handling, and end-to-end script execution.
+- Added a repo-root `AGENTS.md` with the same raw-git policy so Codex and other AGENTS-aware agents receive the same guardrail instructions even though they do not share Claude Code's `PreToolUse` hook surface.
 
 ---
 

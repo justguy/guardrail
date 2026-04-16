@@ -613,6 +613,10 @@ guardrail run --recipe git-commit-amend --input repo_path=. --input message_file
 # Force push through lease validation using explicit local/remote OIDs
 guardrail run --recipe git-force-push-safe --input repo_path=. --input remote=origin --input branch=feature/demo --input expected_head=abcdef123456789 --input expected_remote_oid=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --dry-run
 
+# Agent-facing raw Git guardrails live above these recipes too:
+# - Claude Code: repo-local PreToolUse hook blocks raw destructive Git Bash commands
+# - Codex / AGENTS-aware agents: repo-root AGENTS.md instructs the agent to use these recipes instead of raw git push/reset/clean
+
 # Create a bounded PR through GitHub CLI with a reviewed body file
 guardrail run --recipe gh-open-pr \
   --input repo=guardrail-dev/recipes \
@@ -1129,6 +1133,22 @@ guardrail verify
 For detailed implementation status, what's working, what's not, and the full roadmap, see [docs/technical-status.md](docs/technical-status.md).
 
 For agent onboarding and automation integration, see [docs/agent-onboarding.md](docs/agent-onboarding.md).
+
+### Agent Git Guardrails
+
+This repo now ships two agent-facing raw-Git guardrail surfaces on top of the normal Guardrail runtime:
+
+- **Claude Code**: repo-local `.claude/settings.local.json` installs a `PreToolUse` hook that intercepts raw Bash attempts to run `git push`, `git reset --hard`, `git clean -f/-fd`, `git branch -D`, `git checkout .`, and `git restore .` before execution.
+- **Codex and other AGENTS-aware agents**: the repo-root `AGENTS.md` declares the same raw-Git policy and points the agent at the bounded `git-push` and `git-force-push-safe` recipes instead of raw Git mutation.
+
+The intended path for remote Git mutation remains:
+
+```bash
+guardrail run --recipe git-push --input repo_path=. --input remote=origin --input branch=feature/demo
+guardrail run --recipe git-force-push-safe --input repo_path=. --input remote=origin --input branch=feature/demo --input expected_head=<sha> --input expected_remote_oid=<sha>
+```
+
+There is still no shipped bounded recipe for destructive worktree/history wipe forms such as `git reset --hard`, `git clean -fd`, `git branch -D`, or `git restore .`; agents should stop and ask the operator in those cases.
 
 ---
 

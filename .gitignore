@@ -1,4 +1,10 @@
 node_modules/
 .guardrail/
+.claude/backups/
+.claude/projects/
+.claude/sessions/
+.claude/telemetry/
+.claude/worktrees/
+.claude/.claude.json
 *.log
 .DS_Store
