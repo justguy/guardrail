@@ -10,6 +10,11 @@
         "collapsed": false
       },
       {
+        "id": "rbaa-auth-plan",
+        "label": "RBAA Auth Plan",
+        "description": "Plan repair and implementation-prep tasks for Guardrail static/rbaa authorization mode."
+      },
+      {
         "id": "runtime",
         "label": "Runtime",
         "description": "Execution-path, lane, and model/runtime integration work.",
@@ -51,9 +56,9 @@
         "label": "P3"
       }
     ],
-    "scratchpad": "Tracker reconciled with docs/technical-status.md: completed P0/runtime/recipe slices are now recorded alongside the remaining enterprise and deferred backlog. D0za is now closed after live direct-turn and artifact/report proofs on the host Claude lane.",
-    "rev": 21,
-    "updatedAt": "2026-04-15T04:32:46.673Z"
+    "scratchpad": "rbaa-auth-000 completed on feature/rbaa-auth-000: RBAA/Auth plan repaired; implementation remains gated by sign-off, tests, envelope enforcement, and identity readiness.",
+    "rev": 26,
+    "updatedAt": "2026-05-05T00:33:15.886Z"
   },
   "tasks": [
     {
@@ -722,6 +727,444 @@
       "placement": {
         "swimlaneId": "enterprise",
         "priorityId": "p2"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "flight-recorder-audit-trail",
+      "title": "Flight Recorder audit trail and explainability surface",
+      "goal": "Close the gap between the current hash-chained audit/query surface and a compliance-grade flight recorder that can explain what each agent requested, how Guardrail resolved it, why it was allowed/required approval/blocked, what actually ran, what output was produced, and what files/resources changed.",
+      "status": "not_started",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      },
+      "effort": "l",
+      "related": [
+        "enterprise-admin-read-audit",
+        "enterprise-15-cloud-audit-shipping",
+        "enterprise-24-sovereign-audit-legal-hold"
+      ],
+      "comment": "Created from the Flight Recorder gap review: current Guardrail audit has chain integrity, query, blocked/runtime events, and lane timelines, but does not yet provide one normalized per-run evidence record or the requested audit last/show/explain/blocked/timeline command family.",
+      "definition_of_done": [
+        "Audit entries or linked run evidence record normalized agent_id, origin tool/client, requested action, declared recipe/tool, resolved command, approved manifest hash, sanitized input values, risk traits, decision enum, block/approval reason, actual execution result/output reference, and file/resource changes without leaking secrets.",
+        "Decision outcomes are explicit and queryable as allowed, approval_required, or blocked, with stable reason codes distinct from human-readable messages.",
+        "CLI surfaces exist for the operator workflows: guardrail audit last, guardrail audit show <run-id>, guardrail audit explain <run-id>, guardrail audit blocked, and guardrail audit timeline, with --json envelopes compatible with event schema versioning.",
+        "The implementation reuses the existing hash-chained audit log and/or linked evidence artifacts rather than introducing an unchained parallel truth source.",
+        "Proof covers allowed execution, approval-required noninteractive stop, policy/runtime blocked execution, denied interactive approval, failed execution with output reference, and at least one file/resource-change capture path."
+      ],
+      "constraints": [
+        "Do not persist raw secrets, raw tokens, or unbounded stdout/stderr directly in audit rows; store bounded clips or content-addressed artifact references with hashes.",
+        "Do not silently change execution/approval policy while adding observability; separate recording changes from any new blocking behavior.",
+        "Keep existing guardrail audit verify/query compatibility or version the JSON response envelope if the shape changes.",
+        "Use stable machine reason codes for explain output; do not force consumers to parse prose.",
+        "Do not duplicate lane history/portfolio mechanisms; integrate or reference them from the audit timeline surface."
+      ],
+      "expected_changes": [
+        "src/audit.js",
+        "src/event-schema.js",
+        "src/cli/audit-commands.js",
+        "src/cli/usage.js",
+        "src/supervisor.js",
+        "src/recipe-supervisor.js",
+        "src/workflow-supervisor.js",
+        "src/lane/query.js",
+        "src/compliance.js",
+        "tests/test-bucket3.js",
+        "tests/test-integration-runtime.js",
+        "tests/test-e2e.js",
+        "docs/event-schema-v1.md",
+        "docs/technical-status.md"
+      ],
+      "allowed_paths": [
+        "src/audit.js",
+        "src/event-schema.js",
+        "src/cli/audit-commands.js",
+        "src/cli/usage.js",
+        "src/supervisor.js",
+        "src/recipe-supervisor.js",
+        "src/workflow-supervisor.js",
+        "src/lane/query.js",
+        "src/compliance.js",
+        "tests/test-bucket3.js",
+        "tests/test-integration-runtime.js",
+        "tests/test-e2e.js",
+        "docs/event-schema-v1.md",
+        "docs/technical-status.md"
+      ],
+      "context": {
+        "tags": [
+          "audit",
+          "compliance",
+          "flight-recorder",
+          "forensics"
+        ],
+        "gap_summary": "Current Guardrail audit has hash chaining, verify/query, blocked/execution events, and lane timelines. Missing: one per-run forensic evidence surface covering requested action, resolved command, manifest approval, inputs, risk traits, decision, output reference, and file/resource changes plus last/show/explain/blocked/timeline CLI workflows.",
+        "requested_commands": [
+          "guardrail audit last",
+          "guardrail audit show <run-id>",
+          "guardrail audit explain <run-id>",
+          "guardrail audit blocked",
+          "guardrail audit timeline"
+        ],
+        "source_question": "User requested a Flight Recorder for auditing and compliance after gap review on 2026-04-29."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "rbaa-auth-000",
+      "title": "RBAA/Auth plan repair and implementation prep",
+      "kind": "group",
+      "goal": "Repair the RBAA/Auth mode plan so it matches the current Guardrail architecture before implementation begins.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "rbaa-auth-plan",
+        "priorityId": "p0"
+      },
+      "effort": "l",
+      "references": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:1",
+        "docs/technical-status.md:650"
+      ],
+      "definition_of_done": [
+        "Plan acknowledges existing P0a/P0b/P0c status.",
+        "Implementation tasks have explicit boundaries for approval handshake, runtime operations, audit, spawn, and mode switching.",
+        "Known contradictions from review are resolved before code work starts."
+      ],
+      "constraints": [
+        "Do not implement RBAA/Auth code until the plan contradictions are resolved.",
+        "Keep static mode behavior unchanged unless a task explicitly changes the runtime contract."
+      ],
+      "context": {
+        "files_touched": [
+          "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+        ],
+        "notes": "Plan repair package completed on feature/rbaa-auth-000; child tasks rbaa-auth-001..009 resolved in the plan."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "rbaa-auth-001",
+      "title": "Rebase RBAA/Auth plan on landed P0a/P0b/P0c",
+      "parent_id": "rbaa-auth-000",
+      "goal": "Update the plan assumptions to reflect that Guardrail already has `src/authorization.js`, policy simulation, decision traces, and sovereign audit metadata.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "rbaa-auth-plan",
+        "priorityId": "p0"
+      },
+      "effort": "s",
+      "references": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:60",
+        "src/authorization.js:247",
+        "docs/technical-status.md:650"
+      ],
+      "expected_changes": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+      ],
+      "definition_of_done": [
+        "The prerequisite section states P0a/P0b/P0c are already landed where true.",
+        "Phase 0 is framed as adapting the existing `authorize(action, facts)` seam rather than creating a second seam.",
+        "Any stale confidence assumptions about P0a landing first are removed or rewritten."
+      ],
+      "context": {
+        "review_findings": "P0a/P0b/P0c are already marked done, so the plan should not treat them as pending prerequisites.",
+        "files_touched": [
+          "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+        ],
+        "notes": "Plan now treats P0a/P0b/P0c as landed tracker items and extends the shipped authorization seam/trace/metadata contracts."
+      }
+    },
+    {
+      "dependencies": [
+        "rbaa-auth-001"
+      ],
+      "id": "rbaa-auth-002",
+      "title": "Define authorization action taxonomy and adapter contract",
+      "parent_id": "rbaa-auth-000",
+      "goal": "Separate approval-time handshake decisions, runtime operation gates, simulation, escalation, and approval outcomes into one explicit adapter request/response contract.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "rbaa-auth-plan",
+        "priorityId": "p0"
+      },
+      "effort": "m",
+      "references": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:100",
+        "src/authorization.js:5",
+        "src/policy-simulate.js:7"
+      ],
+      "expected_changes": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+      ],
+      "definition_of_done": [
+        "The plan names every adapter action family: approval handshake, runtime operation, recipe auth preflight, lane/session lifecycle, adapter preflight, and simulation if included.",
+        "The result contract covers `allow`, `deny`, `requires_escalation`, and `requires_approval` without breaking existing static callers.",
+        "The static adapter parity contract names which existing fields must remain stable."
+      ],
+      "context": {
+        "review_findings": "Existing `authorize()` is binary today; RBAA introduces non-binary outcomes that need status and exit-code mapping.",
+        "files_touched": [
+          "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+        ],
+        "notes": "Added adapter action taxonomy, normalized non-binary outcomes, and compact exit-code mapping."
+      }
+    },
+    {
+      "dependencies": [
+        "rbaa-auth-001"
+      ],
+      "id": "rbaa-auth-003",
+      "title": "Resolve static/rbaa manifest migration semantics",
+      "parent_id": "rbaa-auth-000",
+      "goal": "Pick one consistent rule for static manifests under rbaa and rbaa manifests under static, then align migration text and tests.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "rbaa-auth-plan",
+        "priorityId": "p0"
+      },
+      "effort": "s",
+      "references": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:205",
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:325"
+      ],
+      "expected_changes": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+      ],
+      "definition_of_done": [
+        "The plan no longer says rbaa manifests are both rejected under static and non-disruptive under static.",
+        "Mode isolation tests match the selected migration rule.",
+        "Rollback/reverse-migration behavior is explicit for operators."
+      ],
+      "context": {
+        "review_findings": "The current test plan and migration section conflict.",
+        "files_touched": [
+          "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+        ],
+        "notes": "Resolved migration as symmetric mode-scoped manifests/envelopes with no automatic reuse or backfill."
+      }
+    },
+    {
+      "dependencies": [
+        "rbaa-auth-001"
+      ],
+      "id": "rbaa-auth-004",
+      "title": "Inventory all audit and spawn surfaces before enforcement design",
+      "parent_id": "rbaa-auth-000",
+      "goal": "Create the authoritative list of audit append paths and worker spawn paths that RBAA mode must cover.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "rbaa-auth-plan",
+        "priorityId": "p0"
+      },
+      "effort": "m",
+      "references": [
+        "src/recipe-executor.js:268",
+        "src/recipe-executor.js:321",
+        "src/cli/helpers.js:357",
+        "src/adapter-engine.js:922"
+      ],
+      "expected_changes": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+      ],
+      "definition_of_done": [
+        "The plan lists every current `launchWorker()` call site and states whether envelope enforcement applies there.",
+        "The plan lists audit append helper surfaces and specifies how `authMode`, `decisionId`, and envelope fields are applied centrally.",
+        "The plan no longer claims four supervisor edits are enough if helper/executor paths remain uncovered."
+      ],
+      "context": {
+        "review_findings": "Envelope enforcement and audit fields are wider than the four top-level supervisors.",
+        "files_touched": [
+          "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+        ],
+        "notes": "Added inventory requirement for audit, approval/risk, lifecycle, runtime auth, and spawn/delegation surfaces."
+      }
+    },
+    {
+      "dependencies": [
+        "rbaa-auth-001"
+      ],
+      "id": "rbaa-auth-005",
+      "title": "Define auth-mode root, environment override, and process immutability",
+      "parent_id": "rbaa-auth-000",
+      "goal": "Specify exactly which state directory owns auth-mode configuration across command, template, workflow, recipe, lane, and adapter surfaces.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "rbaa-auth-plan",
+        "priorityId": "p0"
+      },
+      "effort": "s",
+      "references": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:272",
+        "src/supervisor.js:250",
+        "src/template-supervisor.js:307",
+        "src/workflow-supervisor.js:1089",
+        "src/recipe-supervisor.js:729"
+      ],
+      "expected_changes": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+      ],
+      "definition_of_done": [
+        "The plan names the canonical deployment-level auth-mode root and how surface-local state dirs relate to it.",
+        "Per-environment override lookup order is deterministic and testable.",
+        "Process-immutable resolution is defined for CLI and imported module usage."
+      ],
+      "context": {
+        "review_findings": "Current stateDir meanings vary by surface, so `<stateDir>/auth-mode.json` is ambiguous.",
+        "files_touched": [
+          "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+        ],
+        "notes": "Defined canonical authConfigRoot, per-environment override root, and process-immutable mode resolution."
+      }
+    },
+    {
+      "dependencies": [
+        "rbaa-auth-002",
+        "rbaa-auth-004",
+        "rbaa-auth-005"
+      ],
+      "id": "rbaa-auth-006",
+      "title": "Revise Phase 0 implementation slice",
+      "parent_id": "rbaa-auth-000",
+      "goal": "Turn Phase 0 into a no-behavior-change adapter extraction behind the existing authorization seam with explicit architecture tests.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "rbaa-auth-plan",
+        "priorityId": "p0"
+      },
+      "effort": "m",
+      "references": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:98",
+        "src/authorization.js:247",
+        "src/supervisor.js:6",
+        "src/workflow-supervisor.js:12"
+      ],
+      "expected_changes": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+      ],
+      "definition_of_done": [
+        "Phase 0 says `authorize()` delegates to static adapter or equivalent without changing public call sites unless justified.",
+        "Direct `policy-engine.js` import exceptions are listed and temporary removal targets are scoped.",
+        "Focused tests cover decision-shape stability, architecture import rules, and `auth-mode show` defaulting to static."
+      ],
+      "context": {
+        "review_findings": "Static adapter scope must include approval-time risk calls, not only existing runtime authorization checks.",
+        "files_touched": [
+          "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+        ],
+        "notes": "Revised Phase 0 to include approval-time risk, approval refresh/reuse, lifecycle gates, and existing runtime authorization checks."
+      }
+    },
+    {
+      "dependencies": [
+        "rbaa-auth-003",
+        "rbaa-auth-004",
+        "rbaa-auth-006"
+      ],
+      "id": "rbaa-auth-007",
+      "title": "Gate rbaa activation until load-bearing enforcement exists",
+      "parent_id": "rbaa-auth-000",
+      "goal": "Adjust phases so `auth-mode set rbaa` cannot create a cosmetic mode that mints envelopes before enforcement and identity binding are safe enough.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "rbaa-auth-plan",
+        "priorityId": "p0"
+      },
+      "effort": "s",
+      "references": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:173",
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:184",
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:211"
+      ],
+      "expected_changes": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+      ],
+      "definition_of_done": [
+        "The plan distinguishes internal adapter tests from operator-visible `auth-mode set rbaa` activation.",
+        "Activation prerequisites include envelope enforcement and the selected identity behavior.",
+        "Phase DoDs prevent envelope minting from being mistaken for completed RBAA enforcement."
+      ],
+      "context": {
+        "review_findings": "Phase 3 activation precedes Phase 4 enforcement and Phase 5 identity, creating a half-secure mode.",
+        "files_touched": [
+          "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+        ],
+        "notes": "Gated persistent rbaa activation until envelope enforcement and verifiable identity handling are load-bearing."
+      }
+    },
+    {
+      "dependencies": [
+        "rbaa-auth-002",
+        "rbaa-auth-003",
+        "rbaa-auth-005"
+      ],
+      "id": "rbaa-auth-008",
+      "title": "Specify envelope persistence, counters, and renewal state",
+      "parent_id": "rbaa-auth-000",
+      "goal": "Define where envelopes, operation counters, revocation records, and renewal state live without churning immutable manifests.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "rbaa-auth-plan",
+        "priorityId": "p1"
+      },
+      "effort": "m",
+      "references": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:145",
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:194",
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:352"
+      ],
+      "expected_changes": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+      ],
+      "definition_of_done": [
+        "Envelope store path and keying strategy are explicit.",
+        "Operation counter semantics are defined for retries, workflows, recipes, and renewals.",
+        "Revocation and renewal records have clear fail-closed malformed-data behavior."
+      ],
+      "context": {
+        "review_findings": "The plan recommends sibling envelope storage but does not make it load-bearing in phase tasks.",
+        "files_touched": [
+          "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+        ],
+        "notes": "Specified envelope, counter, revocation, renewal, and quarantine stores under authConfigRoot/rbaa with fail-closed behavior."
+      }
+    },
+    {
+      "dependencies": [
+        "rbaa-auth-006",
+        "rbaa-auth-007",
+        "rbaa-auth-008"
+      ],
+      "id": "rbaa-auth-009",
+      "title": "Add plan sign-off checklist and implementation stop gates",
+      "parent_id": "rbaa-auth-000",
+      "goal": "Add a final plan review checklist that makes the nine review findings non-regressable before implementation starts.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "rbaa-auth-plan",
+        "priorityId": "p1"
+      },
+      "effort": "s",
+      "references": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:370",
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md:385"
+      ],
+      "expected_changes": [
+        "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md",
+        "docs/issues.md",
+        "docs/technical-status.md"
+      ],
+      "definition_of_done": [
+        "Plan-level DoD includes resolved findings from the review.",
+        "Stop conditions include stale P0 assumptions, incomplete audit/spawn coverage, and ambiguous mode root.",
+        "Docs/issues or technical-status captures any remaining accepted deviation."
+      ],
+      "context": {
+        "review_findings": "The existing stop conditions are good but do not yet encode all concrete repo-specific gaps found in review.",
+        "files_touched": [
+          "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
+        ],
+        "notes": "Added implementation sign-off checklist and strengthened stop conditions for the repo-specific gaps."
       }
     }
   ]
