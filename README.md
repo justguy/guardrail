@@ -1042,6 +1042,68 @@ See [docs/adapter-implementation-plan.md](docs/adapter-implementation-plan.md) f
 
 ---
 
+## Delegated MCP Server
+
+Guardrail can also run as a stdio MCP server for unattended agents that need a bounded set of pre-approved operations:
+
+```bash
+guardrail mcp serve --grant .guardrail/mcp-grant.json --agent codex
+```
+
+The server is fail-closed. It does not expose arbitrary shell execution. Every tool call must be allowed by the active grant, the grant must match the agent id, the grant must be unexpired, and repository paths are resolved with real paths before containment checks.
+
+Current MCP tools:
+
+- `guardrail_grant_status`
+- `guardrail_run_recipe`
+- `guardrail_service_start`, `guardrail_service_stop`, `guardrail_service_status`
+- `guardrail_http_request`
+- `guardrail_git_status`, `guardrail_git_diff`
+- `guardrail_git_commit`
+- `guardrail_git_push_feature_branch`
+
+Delegated recipe execution still goes through the recipe supervisor, so manifest creation, drift detection, runtime policy, audit, and locks remain in force. A grant must pin delegated recipe execution by `recipe_hash`; recipe drift after grant issuance is blocked instead of silently re-approved. Delegated manifests are marked with grant metadata and require an active delegated grant for later non-interactive reuse.
+
+Minimal grant shape:
+
+```json
+{
+  "version": 1,
+  "agent": "codex",
+  "repo_path": ".",
+  "expires_at": "2026-06-01T00:00:00.000Z",
+  "tools": {
+    "guardrail_run_recipe": {
+      "recipes": {
+        "test-api": {
+          "recipe_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "allow_unverified": true,
+          "inputs": {
+            "base_url": { "exact": "http://127.0.0.1:4317" }
+          }
+        }
+      }
+    },
+    "guardrail_http_request": {
+      "hosts": ["127.0.0.1", "localhost"],
+      "ports": [4317],
+      "methods": ["GET", "POST"],
+      "max_body_bytes": 4096,
+      "max_timeout_ms": 5000
+    },
+    "guardrail_git_status": true,
+    "guardrail_git_diff": {
+      "allowed_paths": ["src", "tests"],
+      "max_bytes": 65536
+    }
+  }
+}
+```
+
+HTTP requests are loopback-only unless a grant explicitly sets `allow_remote_hosts: true`. Git mutation surfaces are wrappers around shipped Guardrail recipes, not raw `git push` or arbitrary git commands.
+
+---
+
 ## When to Use It
 
 - **Repo-local build, test, lint commands** -- lock down what your dev scripts actually run

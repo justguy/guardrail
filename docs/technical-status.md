@@ -1,8 +1,19 @@
 # Guardrail — Technical Status & Roadmap
 
-**Last updated:** 2026-04-16
+**Last updated:** 2026-05-25
 
 Active open and deferred roadmap items are also mirrored into repo-local `llm-tracker` state at [`.llm-tracker/trackers/guardrail-roadmap.json`](../.llm-tracker/trackers/guardrail-roadmap.json). The technical status doc remains the fuller narrative source of truth; the tracker is the operational queue.
+
+---
+
+## Recent: Delegated Guardrail MCP server (2026-05-25)
+
+- Added a zero-dependency stdio JSON-RPC MCP server behind `guardrail mcp serve --grant <path> --agent <id>`.
+- The server exposes only grant-delegated tools for recipe execution, local service lifecycle, bounded loopback HTTP probes, read-only git status/diff, and shipped Guardrail git wrapper recipes.
+- Delegated recipe calls still route through `runRecipeSupervisor()`, preserving manifest-backed approval, drift detection, runtime policy, audit, and execution locks.
+- Delegated recipe grants must pin `recipe_hash`; recipe content drift after grant issuance fails closed instead of being silently re-approved.
+- Delegated manifests are tagged with grant metadata and require an active delegated grant for later non-interactive reuse, so an expired or removed grant cannot be replayed as a normal approved manifest.
+- Repo containment now uses real paths to catch symlink escapes, HTTP/diff resource limits are grant-enforced, MCP tool calls are serialized per runtime, and focused coverage lives in `tests/test-mcp-policy.js` plus `tests/test-mcp-server.js`.
 
 ---
 
@@ -106,6 +117,11 @@ src/
   adapter-stdin.js       stdin-json protocol handler, bounded input parsing
   adapter-shim.js        env-shim protocol: PATH shim create/remove/list/install-path
   adapter-cli.js         Adapter subcommand parsing and routing
+  delegated-policy.js    Grant loading and authorization for delegated Guardrail MCP tools
+  delegated-tool-evaluators.js  Tool-specific delegated MCP policy checks
+  mcp-server.js          SDK-backed stdio MCP server entrypoint and tool dispatcher
+  mcp-runtime.js         Delegated MCP tool runtime over recipes, services, HTTP, and git wrappers
+  mcp-tools.js           MCP tool schema inventory
   adapter-profile-install.js  Adapter profile install from path/URL/github://
   adapter-profiles/      Bundled profiles: openclaw (stdin-json), aider (env-shim), cline (mcp/blocked)
   adapter-result.js      Adapter-result/v1 reason codes, status-to-code mapping, shape validator, blocked/failed builders
@@ -153,6 +169,8 @@ tests/
   test-agent-session-supervisor.js  Supervisor-level session-contract enforcement: session_missing, drift, attach mismatch, review_each_time parity
   test-adapter-install.js      Adapter profile install: local/URL/github:// paths, trusted sources, immutability, pin metadata, bundled-profile round-trip
   test-adapter-runtime.js      Adapter runtime proof: bundled profile inventory, openclaw/aider render parity, MCP-gate blocked result, shim helpers, stdin protocol limits
+  test-mcp-policy.js           Delegated MCP grant, boundary, and resource-limit policy checks
+  test-mcp-server.js           Guardrail MCP framing, stdio discovery, delegated recipe approval, and drift checks
 
   fixtures/e2e/                E2E fixture repos (5 environments with recipes and expected behaviors)
     git-safe-repo/             Read-only git status, verified, low risk
@@ -521,7 +539,8 @@ Derived from a targeted review of `openai/codex` (Rust). Each item has a concret
 
 - [ ] **Tiered approval decisions** (highest leverage). Extend `policy-engine.js` and `recipe-supervisor.js` approval surface beyond binary approve/deny to emit a third outcome: a proposed *manifest amendment* the user can accept to convert a one-off approval into a durable rule (e.g., widen allowed-args prefix, add session-scoped allow). Reference: `codex-rs/protocol/src/approvals.rs` — `ExecApprovalRequestEvent.proposed_execpolicy_amendment`, `available_decisions`. Persistence path already exists via manifest updates + approval queue.
 - [ ] **External lane event stream, separate from audit log**. Append-only `<laneDir>/events.ndjson` written by the daemon on state transitions (`health_stall`, `health_clear`, `request_queued`, `request_started`, `request_completed`, `timeout_extended`, `heartbeat`). Consumers `tail -f | jq` for live status; audit log stays immutable hash-chained record-of-truth. Hook into the existing `evaluateLaneHealth` dispatch site in `src/resident-lane-core.js`. Reference: `codex-rs/protocol/src/protocol.rs` EventMsg variants.
-- [ ] **Guardrail MCP server** (`src/mcp-server.js`, zero new deps, stdio JSON-RPC). Surface tools: `lane_status`, `lane_send`, `lane_extend`, `lane_stop`, `recipe_run`, `recipe_list`, `audit_query`. Surface resources: `lane://<id>`, `audit://<range>`, `manifest://<id>`. Lets any MCP-aware agent (Claude Code, Cursor, etc.) drive Guardrail without shelling. Reference: `codex-rs/mcp-server/src/message_processor.rs`.
+- [x] **Delegated Guardrail MCP server** (`src/mcp-server.js`, zero new deps, stdio JSON-RPC). Ships a grant-scoped execution slice for `guardrail_run_recipe`, local service start/stop/status, bounded HTTP probes, read-only git status/diff, and guarded git wrapper recipes. Grants are agent-bound, expiring, repo-contained, and recipe-hash-pinned.
+- [ ] **MCP resource/read model expansion**. Add non-mutating MCP resources such as `lane://<id>`, `audit://<range>`, and `manifest://<id>`, plus lane-focused tools (`lane_status`, `lane_send`, `lane_extend`, `lane_stop`) once their authorization shape is explicit. Reference: `codex-rs/mcp-server/src/message_processor.rs`.
 
 Explicitly *not* in this phase (reviewed and rejected as poor fit):
 - Full rollout/replay JSONL as primary state store — our snapshot + manifest + audit chain covers resumability; event-sourcing everything doubles write path for marginal gain.

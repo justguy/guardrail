@@ -25,8 +25,16 @@ export function parseWrapperArgs(argv) {
         i += 1;
         break;
       case '--paths':
-        options.paths = value;
-        i += 1;
+        {
+          const values = [];
+          i += 1;
+          while (i < argv.length && !argv[i].startsWith('--')) {
+            values.push(argv[i]);
+            i += 1;
+          }
+          options.paths = values.join(',');
+          i -= 1;
+        }
         break;
       case '--message-file':
         options.messageFile = value;

@@ -722,6 +722,7 @@ export async function runRecipeSupervisor(options) {
     executorFn = executeRecipe,
     promptApprovalFn = promptApproval,
     authCheckFn = null,
+    delegatedApproval = null,
   } = options;
 
   const runId = generateRunId();
@@ -927,6 +928,7 @@ export async function runRecipeSupervisor(options) {
 
     let needsApproval = false;
     let driftDiffs = [];
+    let delegatedManifestReason = '';
     const reviewEachTimeReasons = [
       formatReviewEachTimeReason(flaggedInputs),
       ...composedBindings.reviewReasons,
@@ -955,6 +957,24 @@ export async function runRecipeSupervisor(options) {
       }
     }
 
+    if (!needsApproval && approved?.riskAssessment?.delegated) {
+      const delegatedRecord = approved.riskAssessment.delegated;
+      if (delegatedApproval?.allowed !== true) {
+        delegatedManifestReason = 'Approved recipe manifest was created by a delegated grant and requires an active delegated grant for reuse.';
+        needsApproval = true;
+      } else if (delegatedRecord.tool && delegatedRecord.tool !== delegatedApproval.tool) {
+        delegatedManifestReason = 'Approved recipe manifest was created by a different delegated MCP tool and must be re-approved for this tool.';
+        needsApproval = true;
+      }
+      if (delegatedManifestReason) {
+        logger.warn('recipe_delegated_manifest_reapproval_required', {
+          recipeId: recipe.id,
+          manifestPath,
+          reason: delegatedManifestReason,
+        });
+      }
+    }
+
     if (nonInteractive && approved !== null && !needsApproval) {
       if (!approved.riskAssessment?.acknowledgedBy) {
         const reason = 'Approved recipe manifest has no acknowledged risk assessment. Run interactively first.';
@@ -972,12 +992,62 @@ export async function runRecipeSupervisor(options) {
     }
 
     if (needsApproval) {
+      if (delegatedApproval?.allowed === true) {
+        const expectedRecipeHash = delegatedApproval.recipeHash ?? delegatedApproval.expectedRecipeHash ?? null;
+        if (!expectedRecipeHash) {
+          const reason = 'Delegated recipe approval requires a recipe_hash pinned in the active grant.';
+          state.terminalReason = reason;
+          persistStateSafe(stateDir, state);
+          if (!jsonOutput) {
+            printResult({ success: false, exitCode: STATUS_EXIT_CODES.policy_violation, message: reason });
+          }
+          return emitFinalResult('policy_violation', { ...resultOpts, reason });
+        }
+        if (expectedRecipeHash !== recipeHash) {
+          const reason = 'Delegated recipe approval grant does not match the resolved recipe hash.';
+          state.terminalReason = reason;
+          persistStateSafe(stateDir, state);
+          if (!jsonOutput) {
+            printResult({ success: false, exitCode: STATUS_EXIT_CODES.policy_violation, message: reason });
+          }
+          return emitFinalResult('policy_violation', { ...resultOpts, reason });
+        }
+        candidate.riskAssessment.acknowledgedBy = delegatedApproval.actor || 'delegated_grant';
+        candidate.riskAssessment.acknowledgedAt = new Date().toISOString();
+        candidate.riskAssessment.delegated = {
+          grantHash: delegatedApproval.grantHash ?? null,
+          recipeHash,
+          tool: delegatedApproval.tool ?? null,
+          reason: delegatedApproval.reason ?? 'delegated approval',
+        };
+        try {
+          saveManifest(candidate, manifestPath);
+          approved = candidate;
+          needsApproval = false;
+          logger.info('recipe_delegated_approval', {
+            recipeId: recipe.id,
+            manifestPath,
+            grantHash: delegatedApproval.grantHash ?? null,
+          });
+        } catch (err) {
+          const reason = `Failed to save delegated recipe approval manifest: ${err.message}`;
+          state.terminalReason = reason;
+          persistStateSafe(stateDir, state);
+          if (!jsonOutput) {
+            printResult({ success: false, exitCode: STATUS_EXIT_CODES.internal_error, message: 'Failed to save manifest.' });
+          }
+          return emitFinalResult('internal_error', { ...resultOpts, reason });
+        }
+      }
+    }
+
+    if (needsApproval) {
       if (nonInteractive) {
         const reason = approved === null
           ? 'No approved manifest found. Run interactively to approve.'
           : driftDiffs.length > 0
             ? 'Recipe drift detected in non-interactive mode.'
-            : reviewEachTimeReason;
+            : delegatedManifestReason || reviewEachTimeReason;
         state.terminalReason = reason;
         persistStateSafe(stateDir, state);
         emitRecipeProgress(progressSink, runId, 'approval_pending', {

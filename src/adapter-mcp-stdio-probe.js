@@ -14,12 +14,23 @@ function appendBounded(text, chunk, maxBytes) {
   return buf.subarray(0, maxBytes).toString('utf8');
 }
 
-function encodeFrame(message) {
+function encodeMessage(message, framing) {
+  if (framing === 'ndjson') {
+    return Buffer.from(`${JSON.stringify(message)}\n`, 'utf8');
+  }
   const body = Buffer.from(JSON.stringify(message), 'utf8');
   return Buffer.concat([
     Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'utf8'),
     body,
   ]);
+}
+
+function findHeaderDelimiter(buffer) {
+  const crlf = buffer.indexOf('\r\n\r\n');
+  if (crlf !== -1) return { index: crlf, length: 4 };
+  const lf = buffer.indexOf('\n\n');
+  if (lf !== -1) return { index: lf, length: 2 };
+  return null;
 }
 
 class McpFrameReader {
@@ -32,16 +43,16 @@ class McpFrameReader {
     const messages = [];
 
     for (;;) {
-      const headerEnd = this.buffer.indexOf('\r\n\r\n');
-      if (headerEnd === -1) {
+      const delimiter = findHeaderDelimiter(this.buffer);
+      if (!delimiter) {
         if (this.buffer.length > MAX_HEADER_BYTES) {
           throw new Error('MCP stdio probe received an oversized frame header.');
         }
         break;
       }
 
-      const headerText = this.buffer.subarray(0, headerEnd).toString('utf8');
-      const headers = headerText.split('\r\n');
+      const headerText = this.buffer.subarray(0, delimiter.index).toString('utf8');
+      const headers = headerText.split(/\r?\n/);
       let contentLength = null;
       for (const line of headers) {
         const match = /^content-length:\s*(\d+)$/i.exec(line.trim());
@@ -58,12 +69,13 @@ class McpFrameReader {
         throw new Error(`MCP stdio probe received an oversized frame body (${contentLength} bytes).`);
       }
 
-      const messageEnd = headerEnd + 4 + contentLength;
+      const payloadStart = delimiter.index + delimiter.length;
+      const messageEnd = payloadStart + contentLength;
       if (this.buffer.length < messageEnd) {
         break;
       }
 
-      const payload = this.buffer.subarray(headerEnd + 4, messageEnd).toString('utf8');
+      const payload = this.buffer.subarray(payloadStart, messageEnd).toString('utf8');
       let message;
       try {
         message = JSON.parse(payload);
@@ -76,6 +88,42 @@ class McpFrameReader {
 
     return messages;
   }
+}
+
+class NdjsonMessageReader {
+  constructor() {
+    this.buffer = Buffer.alloc(0);
+  }
+
+  push(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    const messages = [];
+
+    for (;;) {
+      const lineEnd = this.buffer.indexOf('\n');
+      if (lineEnd === -1) {
+        if (this.buffer.length > MAX_MESSAGE_BYTES) {
+          throw new Error('MCP stdio probe received an oversized JSON line.');
+        }
+        break;
+      }
+
+      const line = this.buffer.subarray(0, lineEnd).toString('utf8').replace(/\r$/, '');
+      this.buffer = this.buffer.subarray(lineEnd + 1);
+      if (!line) continue;
+      try {
+        messages.push(JSON.parse(line));
+      } catch (err) {
+        throw new Error(`MCP stdio probe received invalid JSON: ${err.message}`);
+      }
+    }
+
+    return messages;
+  }
+}
+
+function createReader(framing) {
+  return framing === 'ndjson' ? new NdjsonMessageReader() : new McpFrameReader();
 }
 
 function summarizeProbeSuccess(transport, initializeResult, toolsResult) {
@@ -124,7 +172,14 @@ function summarizeProbeFailure(code, reason, detail = null) {
 
 export async function runMcpStdioProbe(transport, options = {}) {
   const timeoutMs = Number.parseInt(options.timeoutMs, 10) || DEFAULT_TIMEOUT_MS;
-  const reader = new McpFrameReader();
+  const firstTimeoutMs = Math.min(timeoutMs, 1500);
+  const first = await attemptMcpStdioProbe(transport, firstTimeoutMs, 'ndjson');
+  if (first.ok || !['timeout', 'transport_closed'].includes(first.code)) return first;
+  return await attemptMcpStdioProbe(transport, timeoutMs, 'content-length');
+}
+
+async function attemptMcpStdioProbe(transport, timeoutMs, framing) {
+  const reader = createReader(framing);
   let stderr = '';
 
   return await new Promise((resolveProbe) => {
@@ -217,12 +272,12 @@ export async function runMcpStdioProbe(transport, options = {}) {
     const request = (id, method, params) => new Promise((resolveRequest, rejectRequest) => {
       pending.set(String(id), { resolve: resolveRequest, reject: rejectRequest });
       try {
-        child.stdin.write(encodeFrame({
+        child.stdin.write(encodeMessage({
           jsonrpc: '2.0',
           id,
           method,
           params,
-        }));
+        }, framing));
       } catch (err) {
         pending.delete(String(id));
         rejectRequest(err);
@@ -230,11 +285,11 @@ export async function runMcpStdioProbe(transport, options = {}) {
     });
 
     const sendNotification = (method, params) => {
-      child.stdin.write(encodeFrame({
+      child.stdin.write(encodeMessage({
         jsonrpc: '2.0',
         method,
         params,
-      }));
+      }, framing));
     };
 
     (async () => {
