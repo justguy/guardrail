@@ -31,6 +31,7 @@ import { handleExecutionSubcommand } from './cli/execution-commands.js';
 import { handleProgressSubcommand } from './cli/progress-commands.js';
 import { handleRecipeCatalogSubcommand } from './cli/recipe-catalog-commands.js';
 import { handleRecipeManagementSubcommand } from './cli/recipe-management-commands.js';
+import { handleMcpSubcommand } from './cli/mcp-commands.js';
 import { handleGenericRunSubcommand } from './cli/run-command.js';
 import { handleTemplateSubcommand } from './cli/template-commands.js';
 import { parseArgs } from './cli/parse.js';
@@ -136,9 +137,7 @@ async function main() {
 
   await handleLaneManagementSubcommand(parsed);
 
-  if (parsed.subcommand === 'repo-status') {
-    await handleGovernanceSubcommand(parsed);
-  }
+  await handleGovernanceSubcommand(parsed);
 
   await handleTemplateSubcommand(parsed);
 
@@ -156,6 +155,7 @@ async function main() {
   });
 
   await handleAuditSubcommand(parsed, { statusExitCodes: STATUS_EXIT_CODES });
+  await handleMcpSubcommand(parsed);
 
   await handleGenericRunSubcommand(parsed, {
     defaultManifestPath: DEFAULT_MANIFEST_PATH,

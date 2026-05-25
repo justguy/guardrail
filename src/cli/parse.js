@@ -273,7 +273,7 @@ export function parseArgs(argv) {
     return result;
   }
 
-  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify' && sub !== 'adapter' && sub !== 'lane' && sub !== 'repo' && sub !== 'session' && sub !== 'key') {
+  if (sub !== 'run' && sub !== 'demo' && sub !== 'pack' && sub !== 'recipe' && sub !== 'audit' && sub !== 'list' && sub !== 'create' && sub !== 'profile' && sub !== 'policy' && sub !== 'metrics' && sub !== 'approve' && sub !== 'export' && sub !== 'marketplace' && sub !== 'verify' && sub !== 'adapter' && sub !== 'lane' && sub !== 'repo' && sub !== 'mcp' && sub !== 'session' && sub !== 'key') {
     return { error: 'usage' };
   }
 
@@ -526,6 +526,49 @@ export function parseArgs(argv) {
     while (i < argv.length) {
       if (argv[i] === '--path') { i++; result.repoOpts.path = argv[i++]; continue; }
       if (argv[i] === '--json') { result.json = true; i++; continue; }
+      return { error: 'usage' };
+    }
+    return result;
+  }
+
+  if (sub === 'mcp') {
+    if (i >= argv.length || argv[i] !== 'serve') {
+      return { error: 'usage' };
+    }
+    i++;
+    result.subcommand = 'mcp-serve';
+    result.mcpOpts = {};
+    const readMcpFlagValue = () => {
+      const next = readFlagValue();
+      if (next.error) return next;
+      if (typeof next.value !== 'string' || next.value.startsWith('--')) return { error: 'usage' };
+      return next;
+    };
+    while (i < argv.length) {
+      if (argv[i] === '--grant') {
+        const next = readMcpFlagValue();
+        if (next.error) return next;
+        result.mcpOpts.grantPath = next.value;
+        continue;
+      }
+      if (argv[i] === '--agent') {
+        const next = readMcpFlagValue();
+        if (next.error) return next;
+        result.mcpOpts.agent = next.value;
+        continue;
+      }
+      if (argv[i] === '--cwd') {
+        const next = readMcpFlagValue();
+        if (next.error) return next;
+        result.mcpOpts.cwd = next.value;
+        continue;
+      }
+      if (argv[i] === '--audit-path') {
+        const next = readMcpFlagValue();
+        if (next.error) return next;
+        result.mcpOpts.auditPath = next.value;
+        continue;
+      }
       return { error: 'usage' };
     }
     return result;

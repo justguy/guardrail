@@ -441,3 +441,27 @@ The core docs already said Guardrail is not a sandbox, but the recipe-specific a
 
 **Files changed:** `src/recipe-supervisor.js`, `recipes/claude-exec.recipe.json`, `recipes/codex-exec.recipe.json`, `README.md`, `docs/agent-onboarding.md`, `tests/test-integration-runtime.js`
 **Status:** Resolved
+
+---
+
+### ISSUE-022: Delegated MCP approvals could outlive the active grant boundary
+
+**Found:** 2026-05-25, during delegated MCP server security review
+**Severity:** High — unattended agents could otherwise reuse delegated approvals outside the grant that justified them
+
+**Problem:**
+The initial delegated MCP recipe path wrote delegated approval into the normal recipe approved-manifest path. A later non-MCP non-interactive recipe run could potentially reuse that manifest after the grant expired or was removed. Recipe grants also authorized only recipe ID plus input constraints, so changed recipe content could be re-approved by the same grant.
+
+**Root cause:**
+Delegated approval was treated as a normal manifest acknowledgement, and grant evaluation did not bind the authorization to a specific recipe content hash.
+
+**Fix:**
+1. Delegated recipe grants now require `recipe_hash` pins.
+2. `runRecipeSupervisor()` verifies the active delegated grant hash pin against the resolved recipe hash before saving delegated approval.
+3. Delegated manifests are tagged with `riskAssessment.delegated` metadata and require an active delegated grant for non-interactive reuse.
+4. MCP repo containment now uses real paths to block symlink escapes.
+5. HTTP timeout/body bounds and git diff size bounds are grant-enforced.
+6. MCP requests are serialized per server runtime, and audit entries now include bounded action context.
+
+**Files changed:** `src/delegated-policy.js`, `src/delegated-tool-evaluators.js`, `src/mcp-server.js`, `src/mcp-runtime.js`, `src/mcp-framing.js`, `src/mcp-tools.js`, `src/recipe-supervisor.js`, `tests/test-mcp-policy.js`, `tests/test-mcp-server.js`
+**Status:** Resolved — focused MCP policy/server tests pass

@@ -67,6 +67,18 @@ describe('Git commit recipe', () => {
     assert.equal(parsed.messageFile, '.guardrail/commit-message.txt');
   });
 
+  it('parses expanded list path args from recipe rendering', () => {
+    const parsed = parseWrapperArgs([
+      '--repo-path', '.',
+      '--paths', 'src/a.js', 'src/b.js',
+      '--message-file', '.guardrail/commit-message.txt',
+    ]);
+
+    assert.equal(parsed.repoPath, '.');
+    assert.equal(parsed.paths, 'src/a.js,src/b.js');
+    assert.equal(parsed.messageFile, '.guardrail/commit-message.txt');
+  });
+
   it('builds git add and commit args from normalized options', () => {
     const addArgs = buildGitAddArgs({
       repoPath: '/tmp/project',

@@ -24,6 +24,7 @@ Commands:
   lane prune [flags]                    Classify and optionally remove dead resident-lane artifacts
   lane adapters                         List bundled resident lane adapters
   repo status [--path <repo>]          Show tracked and untracked repo changes
+  mcp serve --grant <path>              Start Guardrail's delegated stdio MCP server
   workflow run [flags]                  Run a workflow definition under Guardrail
   workflow lint --definition <path>     Lint a workflow definition for issues
   template lint --template <path>       Lint a template for issues
@@ -114,6 +115,7 @@ Examples:
   guardrail lane prune --json
   guardrail lane prune --include-failed --dry-run --json
   guardrail repo status --path .
+  guardrail mcp serve --grant .guardrail/mcp-grant.json --agent codex
   guardrail adapter mcp tools --tool cline
   guardrail adapter mcp batch --tool cline --calls-json '[{"tool":"echo","params":{"text":"hi"}}]'
   guardrail template lint --template ./templates/npm-publish.json
