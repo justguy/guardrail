@@ -102,6 +102,14 @@ describe('delegated MCP policy', () => {
     );
     assert.equal(commit.allowed, true);
     assert.equal(commit.allowUnverified, true);
+
+    const push = evaluateDelegatedTool(
+      { grantState, cwd: dir, agent: 'codex' },
+      'guardrail_git_push_feature_branch',
+      { branch: 'feature/test-branch', remote: 'origin', repo_path: '.' },
+    );
+    assert.equal(push.allowed, true);
+    assert.equal(push.recipeHash, 'c'.repeat(64));
   });
 
   it('denies undelegated inputs, remote HTTP, protected branches, and resource widening', () => {

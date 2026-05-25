@@ -248,7 +248,7 @@ export function evaluateGitPush(config, args) {
   if ((args.allow_unverified === true || args.allowUnverified === true) && !configAllowsUnverified(config)) {
     return decision(false, 'Unverified git push recipe execution is not delegated.', correction('Omit `allow_unverified`, or update the git push grant to allow unverified execution.'));
   }
-  return decision(true, 'allowed', { allowUnverified: configAllowsUnverified(config) });
+  return decision(true, 'allowed', { recipeHash, allowUnverified: configAllowsUnverified(config) });
 }
 
 export function serviceDefinitionsFromGrant(grantState) {
