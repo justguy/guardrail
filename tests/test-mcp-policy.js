@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, symlinkSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { loadDelegatedGrant, evaluateDelegatedTool } from '../src/delegated-policy.js';
+import { describeDelegatedGrant, loadDelegatedGrant, evaluateDelegatedTool } from '../src/delegated-policy.js';
 
 function tmpDir() {
   return realpathSync.native(mkdtempSync(join(tmpdir(), 'gr-mcp-policy-')));
@@ -60,6 +60,26 @@ function baseGrant(overrides = {}) {
 }
 
 describe('delegated MCP policy', () => {
+  it('describes grant capabilities and help for agent discovery', () => {
+    const dir = tmpDir();
+    const grantPath = join(dir, 'grant.json');
+    writeJson(grantPath, baseGrant());
+    const grantState = loadDelegatedGrant(grantPath, { cwd: dir });
+
+    const status = describeDelegatedGrant(grantState, { now: '2026-01-01T00:00:00.000Z' });
+
+    assert.equal(status.ok, true);
+    assert.ok(status.tools.includes('guardrail_http_request'));
+    assert.deepEqual(status.capabilities.guardrail_http_request.policy.hosts, ['127.0.0.1', 'localhost']);
+    assert.deepEqual(status.capabilities.guardrail_http_request.policy.ports, [4317]);
+    assert.deepEqual(status.capabilities.guardrail_http_request.policy.methods, ['GET']);
+    assert.equal(status.capabilities.guardrail_http_request.policy.maxBodyBytes, 128);
+    assert.equal(status.capabilities.guardrail_git_commit.policy.recipeHash, 'b'.repeat(64));
+    assert.deepEqual(status.capabilities.guardrail_git_commit.policy.allowedPaths, ['src', 'tests']);
+    assert.match(status.help.discovery, /guardrail_grant_status/);
+    assert.match(status.help.moreInfo, /correction\.expected/);
+  });
+
   it('loads a grant and allows constrained tool calls', () => {
     const dir = tmpDir();
     const grantPath = join(dir, 'grant.json');
@@ -104,12 +124,14 @@ describe('delegated MCP policy', () => {
     });
     assert.equal(remote.allowed, false);
     assert.match(remote.reason, /loopback/);
+    assert.match(remote.correction.expected, /loopback/);
 
     const protectedBranch = evaluateDelegatedTool(context, 'guardrail_git_push_feature_branch', {
       branch: 'main',
       remote: 'origin',
     });
     assert.equal(protectedBranch.allowed, false);
+    assert.match(protectedBranch.correction.expected, /non-protected/);
 
     const longHttp = evaluateDelegatedTool(context, 'guardrail_http_request', {
       url: 'http://127.0.0.1:4317/',
@@ -118,10 +140,12 @@ describe('delegated MCP policy', () => {
     });
     assert.equal(longHttp.allowed, false);
     assert.match(longHttp.reason, /timeout_ms/);
+    assert.match(longHttp.correction.expected, /5000 or less/);
 
     const largeDiff = evaluateDelegatedTool(context, 'guardrail_git_diff', { max_bytes: 1024 * 1024 });
     assert.equal(largeDiff.allowed, false);
     assert.match(largeDiff.reason, /max_bytes/);
+    assert.match(largeDiff.correction.expected, /65536 or less/);
   });
 
   it('denies expired grants, agent mismatch, and symlink repo escape', () => {

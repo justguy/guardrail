@@ -47,9 +47,16 @@ function audit(context, event, fields = {}) {
   }
 }
 
-function denied(context, toolName, reason) {
+function denied(context, toolName, denial) {
+  const reason = denial?.reason ?? String(denial || 'Delegated tool call was denied.');
   audit(context, 'mcp_tool_denied', { tool: toolName, decision: 'denied', reason });
-  return errorResult('delegation_denied', reason, { tool: toolName, grantHash: context.grantState?.hash ?? null });
+  return errorResult('delegation_denied', reason, {
+    tool: toolName,
+    grantHash: context.grantState?.hash ?? null,
+    correction: denial?.correction ?? {
+      expected: 'Call guardrail_grant_status to inspect delegated tools and policy limits, then retry within the active grant.',
+    },
+  });
 }
 
 function checkDelegation(context, toolName, args) {
@@ -187,7 +194,7 @@ export function createGuardrailMcpRuntime(options = {}) {
       return jsonText({ ok: true, grant: describeDelegatedGrant(grantState), server: { cwd, agent: context.agent } });
     }
     const delegation = checkDelegation(context, name, args || {});
-    if (!delegation.allowed) return denied(context, name, delegation.reason);
+    if (!delegation.allowed) return denied(context, name, delegation);
 
     try {
       if (name === 'guardrail_run_recipe' || name === 'guardrail_git_commit' || name === 'guardrail_git_push_feature_branch') {
@@ -213,10 +220,19 @@ export function createGuardrailMcpRuntime(options = {}) {
       if (name === 'guardrail_http_request') return jsonText({ ok: true, result: await performHttpRequest(delegation, args || {}) });
       if (name === 'guardrail_git_status') return jsonText({ ok: true, result: getRepoStatusSummary(delegation.repoPath || args.repo_path || '.') });
       if (name === 'guardrail_git_diff') return jsonText({ ok: true, result: runGitDiff(delegation.repoPath || args.repo_path || '.', delegation, args) });
-      return errorResult('unknown_tool', `Unknown tool: ${name}`);
+      return errorResult('unknown_tool', `Unknown tool: ${name}`, {
+        correction: {
+          expected: 'Call tools/list or guardrail_grant_status and use one of the advertised Guardrail MCP tools.',
+        },
+      });
     } catch (err) {
       audit(context, 'mcp_tool_failed', { tool: name, status: 'failed', reason: err.message });
-      return errorResult('tool_failed', err.message, { tool: name });
+      return errorResult('tool_failed', err.message, {
+        tool: name,
+        correction: {
+          expected: 'Fix the reported tool failure while staying inside the active grant. If the required action is not granted, stop and ask for a new grant.',
+        },
+      });
     }
   }
 

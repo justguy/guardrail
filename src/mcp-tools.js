@@ -5,7 +5,15 @@ export function jsonText(payload) {
 }
 
 export function errorResult(code, message, data = {}) {
-  return jsonText({ ok: false, code, message, ...data });
+  return jsonText({
+    ok: false,
+    code,
+    message,
+    ...data,
+    correction: data.correction ?? {
+      expected: 'Call guardrail_grant_status to inspect available tools, policy limits, and correction guidance before retrying.',
+    },
+  });
 }
 
 function toolDefinition(name, description, properties = {}, required = []) {
@@ -23,7 +31,7 @@ function toolDefinition(name, description, properties = {}, required = []) {
 
 export function listGuardrailMcpTools() {
   return [
-    toolDefinition('guardrail_grant_status', 'Describe the active delegated Guardrail grant.'),
+    toolDefinition('guardrail_grant_status', 'Describe the active delegated Guardrail grant, tool capabilities, policy limits, and correction guidance.'),
     toolDefinition('guardrail_run_recipe', 'Run a delegated Guardrail recipe through the recipe supervisor.', {
       recipe: { type: 'string' },
       inputs: { type: 'object' },

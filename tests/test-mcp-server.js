@@ -130,6 +130,26 @@ async function connectSdkClient({ grantPath, cwd }) {
 }
 
 describe('Guardrail MCP server', () => {
+  it('reports grant capabilities and help through grant status', async () => {
+    const dir = tmpDir();
+    const grantPath = join(dir, 'grant.json');
+    writeJson(grantPath, baseGrant());
+    const runtime = createGuardrailMcpRuntime({ grantPath, cwd: dir, agent: 'codex' });
+
+    const result = await runtime.callTool('guardrail_grant_status');
+    const payload = JSON.parse(result.content[0].text);
+
+    assert.equal(payload.ok, true);
+    assert.equal(payload.grant.ok, true);
+    assert.deepEqual(payload.grant.capabilities.guardrail_http_request.policy.hosts, ['127.0.0.1', 'localhost']);
+    assert.deepEqual(payload.grant.capabilities.guardrail_http_request.policy.ports, [4317]);
+    assert.equal(payload.grant.capabilities.guardrail_git_commit.policy.recipeHash, 'b'.repeat(64));
+    assert.deepEqual(payload.grant.capabilities.guardrail_git_commit.policy.allowedPaths, ['src', 'tests']);
+    assert.match(payload.grant.help.discovery, /instead of guessing/);
+    assert.equal(payload.server.agent, 'codex');
+    await runtime.close();
+  });
+
   it('is discoverable over stdio', async () => {
     const dir = tmpDir();
     const grantPath = join(dir, 'grant.json');
@@ -185,6 +205,8 @@ describe('Guardrail MCP server', () => {
       const payload = JSON.parse(result.content[0].text);
       assert.equal(payload.ok, false);
       assert.equal(payload.code, 'delegation_denied');
+      assert.equal(payload.tool, 'guardrail_http_request');
+      assert.match(payload.correction.expected, /loopback/);
     } finally {
       await client.close();
     }
@@ -205,6 +227,10 @@ describe('Guardrail MCP server', () => {
     const payload = JSON.parse(result.content[0].text);
     assert.equal(payload.ok, false);
     assert.equal(payload.code, 'delegation_denied');
+    assert.equal(payload.tool, 'guardrail_http_request');
+    assert.equal(typeof payload.grantHash, 'string');
+    assert.equal(payload.grantHash.length, 64);
+    assert.match(payload.correction.expected, /loopback/);
     await runtime.close();
   });
 

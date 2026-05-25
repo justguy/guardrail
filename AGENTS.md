@@ -51,6 +51,14 @@ When the operator explicitly delegates unattended work, agents may continue with
 
 Stop and wait for the operator if the next required step involves destructive Git, a worktree wipe, force push outside the shipped safe recipe, new external credentials, production infrastructure, ambiguous scope, conflicting dirty files, tracker write rejection that cannot be repaired safely, secrets exposure, failing tests outside task scope, subagent or lane conflict, or a policy change that would let agents execute arbitrary shell commands.
 
+## Delegated Guardrail MCP
+
+When a delegated Guardrail MCP server is available, treat it as the authority for allowed work. At session start, after reconnect, and after any delegated-tool denial, call `guardrail_grant_status` and inspect the advertised tool inventory, grant capabilities, policy limits, and help text before acting. Use those schemas and grant limits instead of guessing hidden flags, capabilities, paths, or approval state.
+
+Use Guardrail MCP tools for delegated Guardrail work when available: recipe execution, local service lifecycle, bounded HTTP probes, read-only git status/diff, and shipped Guardrail git wrapper recipes. Do not bypass a missing or denied MCP capability with raw shell, remote network, or raw mutating Git. If the required capability is not in the active grant or tool inventory, stop or request a new grant.
+
+Treat MCP errors as correction hints. Read structured error payloads such as `ok: false`, `code`, `message`, `tool`, `grantHash`, and `correction.expected`; adjust only the exact tool arguments that remain inside the grant; retry boundedly. A denial means the request is outside the active grant or policy, not permission to invent another execution path.
+
 ## Subagent and Token Usage
 
 Default to using subagents for non-trivial work, especially broad codebase exploration, test-failure triage, reviews, multi-file changes, or tasks requiring parallel investigation. Keep the main thread focused on decisions, concise summaries, and final implementation steps.
