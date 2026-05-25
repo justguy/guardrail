@@ -14,27 +14,35 @@ export class McpServerFrameReader {
     this.buffer = Buffer.alloc(0);
   }
 
+  findHeaderBoundary() {
+    const crlf = this.buffer.indexOf('\r\n\r\n');
+    const lf = this.buffer.indexOf('\n\n');
+    if (crlf === -1 && lf === -1) return null;
+    if (crlf !== -1 && (lf === -1 || crlf <= lf)) return { index: crlf, bytes: 4 };
+    return { index: lf, bytes: 2 };
+  }
+
   push(chunk) {
     this.buffer = Buffer.concat([this.buffer, Buffer.from(chunk)]);
     const messages = [];
     while (this.buffer.length > 0) {
-      const headerEnd = this.buffer.indexOf('\r\n\r\n');
-      if (headerEnd === -1) {
+      const boundary = this.findHeaderBoundary();
+      if (!boundary) {
         if (this.buffer.length > MAX_HEADER_BYTES) {
           throw new Error('MCP frame header exceeded maximum size.');
         }
         break;
       }
 
-      const headerText = this.buffer.subarray(0, headerEnd).toString('utf8');
-      const lengthLine = headerText.split('\r\n').find((line) => /^content-length:/i.test(line));
+      const headerText = this.buffer.subarray(0, boundary.index).toString('utf8');
+      const lengthLine = headerText.split(/\r?\n/).find((line) => /^content-length:/i.test(line));
       if (!lengthLine) throw new Error('MCP frame missing Content-Length header.');
 
       const length = Number.parseInt(lengthLine.split(':')[1], 10);
       if (!Number.isFinite(length) || length < 0) throw new Error('Invalid MCP Content-Length header.');
       if (length > MAX_MESSAGE_BYTES) throw new Error('MCP message exceeded maximum size.');
 
-      const bodyStart = headerEnd + 4;
+      const bodyStart = boundary.index + boundary.bytes;
       const bodyEnd = bodyStart + length;
       if (this.buffer.length < bodyEnd) break;
 

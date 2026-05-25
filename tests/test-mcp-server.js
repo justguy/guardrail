@@ -8,6 +8,7 @@ import {
   createGuardrailMcpRuntime,
   McpServerFrameReader,
   encodeMcpFrame,
+  handleJsonRpcMessage,
 } from '../src/mcp-server.js';
 import { runMcpStdioProbe } from '../src/adapter-mcp-stdio-probe.js';
 import { hashRecipe } from '../src/recipe.js';
@@ -108,6 +109,27 @@ describe('Guardrail MCP server', () => {
     const message = { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} };
     const decoded = reader.push(encodeMcpFrame(message));
     assert.deepEqual(decoded, [message]);
+  });
+
+  it('accepts LF-only MCP frame headers from strict stdio clients', () => {
+    const reader = new McpServerFrameReader();
+    const message = { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} };
+    const body = JSON.stringify(message);
+    const decoded = reader.push(Buffer.from(`Content-Length: ${Buffer.byteLength(body)}\n\n${body}`));
+    assert.deepEqual(decoded, [message]);
+  });
+
+  it('returns empty discovery lists for unsupported MCP surface families', async () => {
+    const runtime = { callTool: async () => assert.fail('tools/call should not run') };
+    const resources = await handleJsonRpcMessage(runtime, { jsonrpc: '2.0', id: 1, method: 'resources/list' });
+    const templates = await handleJsonRpcMessage(runtime, { jsonrpc: '2.0', id: 2, method: 'resources/templates/list' });
+    const prompts = await handleJsonRpcMessage(runtime, { jsonrpc: '2.0', id: 3, method: 'prompts/list' });
+    const ping = await handleJsonRpcMessage(runtime, { jsonrpc: '2.0', id: 4, method: 'ping' });
+
+    assert.deepEqual(resources.result, { resources: [] });
+    assert.deepEqual(templates.result, { resourceTemplates: [] });
+    assert.deepEqual(prompts.result, { prompts: [] });
+    assert.deepEqual(ping.result, {});
   });
 
   it('is discoverable over stdio', async () => {

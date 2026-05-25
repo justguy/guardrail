@@ -13,7 +13,7 @@ function jsonRpcError(id, code, message, data) {
   return { jsonrpc: '2.0', id: id ?? null, error: { code, message, data } };
 }
 
-async function handleJsonRpcMessage(runtime, message) {
+export async function handleJsonRpcMessage(runtime, message) {
   if (!message || typeof message !== 'object') return jsonRpcError(null, -32600, 'Invalid Request');
   if (message.id === undefined) return null;
   if (message.method === 'initialize') {
@@ -29,6 +29,18 @@ async function handleJsonRpcMessage(runtime, message) {
   }
   if (message.method === 'tools/list') {
     return { jsonrpc: '2.0', id: message.id, result: { tools: listGuardrailMcpTools() } };
+  }
+  if (message.method === 'resources/list') {
+    return { jsonrpc: '2.0', id: message.id, result: { resources: [] } };
+  }
+  if (message.method === 'resources/templates/list') {
+    return { jsonrpc: '2.0', id: message.id, result: { resourceTemplates: [] } };
+  }
+  if (message.method === 'prompts/list') {
+    return { jsonrpc: '2.0', id: message.id, result: { prompts: [] } };
+  }
+  if (message.method === 'ping') {
+    return { jsonrpc: '2.0', id: message.id, result: {} };
   }
   if (message.method === 'tools/call') {
     const params = message.params || {};
