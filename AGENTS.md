@@ -51,6 +51,14 @@ When the operator explicitly delegates unattended work, agents may continue with
 
 Stop and wait for the operator if the next required step involves destructive Git, a worktree wipe, force push outside the shipped safe recipe, new external credentials, production infrastructure, ambiguous scope, conflicting dirty files, tracker write rejection that cannot be repaired safely, secrets exposure, failing tests outside task scope, subagent or lane conflict, or a policy change that would let agents execute arbitrary shell commands.
 
+## Subagent and Token Usage
+
+Default to using subagents for non-trivial work, especially broad codebase exploration, test-failure triage, reviews, multi-file changes, or tasks requiring parallel investigation. Keep the main thread focused on decisions, concise summaries, and final implementation steps.
+
+Subagents should receive narrow task briefs and return compact findings: relevant files, key facts, risks, and recommended next actions. Avoid pasting large raw outputs into the main thread.
+
+For trivial, local, or single-command tasks, skip subagents when the overhead would exceed the benefit. Always be mindful of token usage.
+
 ## Validation
 
 When you change code, run the relevant focused tests after the change. Prefer the smallest test scope that proves the new behavior.

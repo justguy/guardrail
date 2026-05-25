@@ -119,9 +119,8 @@ src/
   adapter-cli.js         Adapter subcommand parsing and routing
   delegated-policy.js    Grant loading and authorization for delegated Guardrail MCP tools
   delegated-tool-evaluators.js  Tool-specific delegated MCP policy checks
-  mcp-server.js          Stdio JSON-RPC MCP server entrypoint and message dispatcher
+  mcp-server.js          SDK-backed stdio MCP server entrypoint and tool dispatcher
   mcp-runtime.js         Delegated MCP tool runtime over recipes, services, HTTP, and git wrappers
-  mcp-framing.js         MCP Content-Length frame codec
   mcp-tools.js           MCP tool schema inventory
   adapter-profile-install.js  Adapter profile install from path/URL/github://
   adapter-profiles/      Bundled profiles: openclaw (stdin-json), aider (env-shim), cline (mcp/blocked)

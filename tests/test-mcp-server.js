@@ -3,13 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-import {
-  createGuardrailMcpRuntime,
-  McpServerFrameReader,
-  encodeMcpFrame,
-  handleJsonRpcMessage,
-} from '../src/mcp-server.js';
+import { createGuardrailMcpRuntime } from '../src/mcp-server.js';
 import { runMcpStdioProbe } from '../src/adapter-mcp-stdio-probe.js';
 import { hashRecipe } from '../src/recipe.js';
 import { runRecipeSupervisor } from '../src/recipe-supervisor.js';
@@ -103,35 +100,36 @@ function makeEchoRecipe(overrides = {}) {
   };
 }
 
+async function connectSdkClient({ grantPath, cwd }) {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ['src/mcp-server.js', '--grant', grantPath, '--agent', 'codex', '--cwd', cwd],
+    cwd: process.cwd(),
+    stderr: 'pipe',
+  });
+  let stderr = '';
+  const stderrStream = transport.stderr;
+  if (stderrStream) {
+    stderrStream.on('data', (chunk) => {
+      stderr += chunk.toString('utf8');
+    });
+  }
+  const client = new Client(
+    { name: 'guardrail-mcp-test', version: '1.0.0' },
+    { capabilities: {} },
+  );
+
+  try {
+    await client.connect(transport);
+  } catch (err) {
+    await transport.close().catch(() => {});
+    throw new Error(`${err.message}${stderr ? `\n${stderr}` : ''}`);
+  }
+
+  return { client, stderr: () => stderr };
+}
+
 describe('Guardrail MCP server', () => {
-  it('round-trips Content-Length framed messages', () => {
-    const reader = new McpServerFrameReader();
-    const message = { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} };
-    const decoded = reader.push(encodeMcpFrame(message));
-    assert.deepEqual(decoded, [message]);
-  });
-
-  it('accepts LF-only MCP frame headers from strict stdio clients', () => {
-    const reader = new McpServerFrameReader();
-    const message = { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} };
-    const body = JSON.stringify(message);
-    const decoded = reader.push(Buffer.from(`Content-Length: ${Buffer.byteLength(body)}\n\n${body}`));
-    assert.deepEqual(decoded, [message]);
-  });
-
-  it('returns empty discovery lists for unsupported MCP surface families', async () => {
-    const runtime = { callTool: async () => assert.fail('tools/call should not run') };
-    const resources = await handleJsonRpcMessage(runtime, { jsonrpc: '2.0', id: 1, method: 'resources/list' });
-    const templates = await handleJsonRpcMessage(runtime, { jsonrpc: '2.0', id: 2, method: 'resources/templates/list' });
-    const prompts = await handleJsonRpcMessage(runtime, { jsonrpc: '2.0', id: 3, method: 'prompts/list' });
-    const ping = await handleJsonRpcMessage(runtime, { jsonrpc: '2.0', id: 4, method: 'ping' });
-
-    assert.deepEqual(resources.result, { resources: [] });
-    assert.deepEqual(templates.result, { resourceTemplates: [] });
-    assert.deepEqual(prompts.result, { prompts: [] });
-    assert.deepEqual(ping.result, {});
-  });
-
   it('is discoverable over stdio', async () => {
     const dir = tmpDir();
     const grantPath = join(dir, 'grant.json');
@@ -146,6 +144,50 @@ describe('Guardrail MCP server', () => {
     assert.equal(probe.ok, true);
     assert.ok(probe.server.tools.some((tool) => tool.name === 'guardrail_run_recipe'));
     assert.ok(probe.server.tools.some((tool) => tool.name === 'guardrail_git_push_feature_branch'));
+  });
+
+  it('initializes and discovers tools through the official MCP SDK client', async () => {
+    const dir = tmpDir();
+    const grantPath = join(dir, 'grant.json');
+    writeJson(grantPath, baseGrant());
+    const { client, stderr } = await connectSdkClient({ grantPath, cwd: dir });
+
+    try {
+      const tools = await client.listTools();
+      const resources = await client.listResources();
+      const templates = await client.listResourceTemplates();
+      const prompts = await client.listPrompts();
+
+      assert.ok(tools.tools.some((tool) => tool.name === 'guardrail_run_recipe'));
+      assert.deepEqual(resources.resources, []);
+      assert.deepEqual(templates.resourceTemplates, []);
+      assert.deepEqual(prompts.prompts, []);
+      assert.equal(stderr(), '');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('calls delegated tools through the official MCP SDK client', async () => {
+    const dir = tmpDir();
+    const grantPath = join(dir, 'grant.json');
+    writeJson(grantPath, baseGrant());
+    const { client } = await connectSdkClient({ grantPath, cwd: dir });
+
+    try {
+      const result = await client.callTool({
+        name: 'guardrail_http_request',
+        arguments: {
+          url: 'https://example.com/',
+          method: 'GET',
+        },
+      });
+      const payload = JSON.parse(result.content[0].text);
+      assert.equal(payload.ok, false);
+      assert.equal(payload.code, 'delegation_denied');
+    } finally {
+      await client.close();
+    }
   });
 
   it('denies tools outside the active grant', async () => {
