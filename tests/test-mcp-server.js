@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -249,6 +249,8 @@ describe('Guardrail MCP server', () => {
     assert.ok(payload.grant.toolInventory.callableTools.includes('guardrail_template'));
     assert.equal(payload.grant.tools.some((tool) => tool.startsWith('guardrail_git_')), false);
     assert.match(payload.grant.help.discovery, /instead of guessing/);
+    assert.match(payload.grant.help.grantLocation, /outside the delegated repo_path/);
+    assert.match(payload.grant.help.grantLocation, /per-repo\/per-agent/);
     assert.equal(payload.server.agent, 'codex');
     await runtime.close();
   });
@@ -860,6 +862,38 @@ describe('Guardrail MCP server', () => {
     assert.equal(payload.ok, true, JSON.stringify(payload, null, 2));
     assert.equal(payload.result.status, 'success');
     assert.ok(existsSync(join(dir, '.guardrail', 'templates', 'mcp-template.approved.json')));
+    await runtime.close();
+  });
+
+  it('executes delegated templates from the delegated repo path', async () => {
+    const dir = tmpDir();
+    mkdirSync(join(dir, '.guardrail', 'templates'), { recursive: true });
+    mkdirSync(join(dir, 'artifacts'), { recursive: true });
+    const template = makeTemplate({
+      run: {
+        command: process.execPath,
+        args: [
+          '-e',
+          'require("node:fs").writeFileSync("artifacts/template-cwd.txt", process.cwd())',
+        ],
+        mode: 'structured',
+        env: { allow: [] },
+      },
+    });
+    writeJson(join(dir, '.guardrail', 'templates', 'mcp-template.json'), template);
+    const grantPath = testGrantPath();
+    writeJson(grantPath, baseGrant({ templateHash: templateExecutionHash(template) }));
+
+    const runtime = createTestRuntime({ grantPath, cwd: dir, agent: 'codex' });
+    const result = await runtime.callTool('guardrail_run_template', {
+      template: 'mcp-template',
+      inputs: { target: 'src' },
+    });
+
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.ok, true, JSON.stringify(payload, null, 2));
+    assert.equal(payload.result.status, 'success');
+    assert.equal(readFileSync(join(dir, 'artifacts', 'template-cwd.txt'), 'utf8'), dir);
     await runtime.close();
   });
 

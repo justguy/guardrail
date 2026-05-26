@@ -290,6 +290,7 @@ async function executeRollback(rollbackSteps, envIntersection, cwd, logger, json
  * @param {boolean} [options.jsonOutput]     - Emit JSON output.
  * @param {string[]} [options.envAllow]      - Caller's env allow list.
  * @param {object} [options.delegatedApproval] - Active delegated MCP approval record.
+ * @param {string} [options.cwd]             - Directory to execute template steps from.
  * @returns {Promise<object>} Structured result.
  */
 export async function runTemplateSupervisor(options) {
@@ -302,11 +303,14 @@ export async function runTemplateSupervisor(options) {
     envAllow       = [],
     progressSink   = null,
     delegatedApproval = null,
+    cwd: rawExecutionCwd = null,
   } = options;
 
   const runId = generateRunId();
   const basePath = dirname(resolve(templatePath));
-  const stateDir = resolve(basePath, '.guardrail');
+  const executionCwd = resolve(rawExecutionCwd || basePath);
+  const stateRoot = rawExecutionCwd ? executionCwd : basePath;
+  const stateDir = resolve(stateRoot, '.guardrail');
   const logDir = resolve(stateDir, 'logs');
   const logger = createLogger(runId, logDir);
 
@@ -326,7 +330,7 @@ export async function runTemplateSupervisor(options) {
     return result;
   };
 
-  logger.info('template_supervisor_start', { templatePath, nonInteractive, jsonOutput });
+  logger.info('template_supervisor_start', { templatePath, executionCwd, nonInteractive, jsonOutput });
 
   let lockRelease = null;
 
@@ -417,7 +421,10 @@ export async function runTemplateSupervisor(options) {
     logger.info('risk_evaluated', { riskLevel: riskAssessment.riskLevel, reasons: riskAssessment.reasons });
 
     // ---- Manifest comparison -----------------------------------------------
-    const manifestPath = resolve(rawManifestPath || `.guardrail/templates/${def.name}.approved.json`);
+    const manifestRoot = rawExecutionCwd ? executionCwd : process.cwd();
+    const manifestPath = rawManifestPath
+      ? resolve(rawManifestPath)
+      : resolve(manifestRoot, '.guardrail', 'templates', `${def.name}.approved.json`);
     resultOpts.manifestPath = manifestPath;
 
     const candidate = createTemplateManifest(
@@ -641,7 +648,7 @@ export async function runTemplateSupervisor(options) {
     // ---- Execute steps -----------------------------------------------------
     const resolvedSteps = buildResolvedSteps(def, inputValidation.values);
     const rollbackSteps = buildResolvedRollbackSteps(def, inputValidation.values);
-    const cwd = resolve(basePath);
+    const cwd = executionCwd;
 
     let stepsExecuted = 0;
     let failedStep = null;

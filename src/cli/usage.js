@@ -95,6 +95,13 @@ MCP delegated approval:
   Actions: describe, prepare, request_approval, run; legacy template tools are aliases.
   Unpinned run tools require MCP host form elicitation approval or a CLI approval_request_id.
   Hosts without elicitation fail closed with host_approval_unavailable; normal args cannot self-approve.
+  Grants must be operator-owned files outside the repo. Prefer per-repo grants under
+  ~/.guardrail/mcp-grants/ over editing a broad shared/global grant.
+
+Template execution:
+  guardrail run --template executes child commands from the caller's current working directory.
+  Templates stored under .guardrail/templates therefore resolve relative paths from the repo
+  where guardrail was invoked, not from the template storage directory.
 
 Examples:
   guardrail run -- npm test
