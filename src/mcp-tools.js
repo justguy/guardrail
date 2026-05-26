@@ -29,16 +29,117 @@ function toolDefinition(name, description, properties = {}, required = []) {
   };
 }
 
+function schemaToolDefinition(name, description, inputSchema) {
+  return { name, description, inputSchema };
+}
+
+const TEMPLATE_ACTION_SCHEMA = {
+  type: 'object',
+  properties: {
+    action: {
+      type: 'string',
+      enum: ['describe', 'prepare', 'request_approval', 'run'],
+      description: 'Template action to perform. Use describe to inspect, prepare to validate without execution, request_approval for CLI fallback approval, or run for supervisor execution.',
+    },
+    template: {
+      type: 'string',
+      description: 'Template name or repo-relative template path. Required for prepare, request_approval, and run.',
+    },
+    inputs: {
+      type: 'object',
+      description: 'Template input values for prepare, request_approval, or run.',
+    },
+    env_allow: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Explicit environment variable allow-list for the template env handshake.',
+    },
+    repo_path: { type: 'string' },
+    templates_dir: { type: 'string' },
+    manifest_path: {
+      type: 'string',
+      description: 'Optional approved manifest path for request_approval or run.',
+    },
+    expires_in_seconds: {
+      type: 'number',
+      description: 'Optional CLI approval request expiry for request_approval.',
+    },
+    approval_request_id: {
+      type: 'string',
+      description: 'Previously approved CLI approval request id for run.',
+    },
+  },
+  required: ['action'],
+  additionalProperties: false,
+};
+
 export function listGuardrailMcpTools() {
   return [
     toolDefinition('guardrail_grant_status', 'Describe the active delegated Guardrail grant, tool capabilities, policy limits, and correction guidance.'),
+    toolDefinition('guardrail_recipe_describe', 'Describe available Guardrail recipes or one recipe without executing it.', {
+      recipe: { type: 'string' },
+      repo_path: { type: 'string' },
+      search_dirs: { type: 'array', items: { type: 'string' } },
+    }),
+    toolDefinition('guardrail_recipe_prepare', 'Resolve recipe inputs and return dry-run, setup, and grant guidance without executing it.', {
+      recipe: { type: 'string' },
+      inputs: { type: 'object' },
+      repo_path: { type: 'string' },
+      search_dirs: { type: 'array', items: { type: 'string' } },
+      allow_unverified: { type: 'boolean' },
+    }, ['recipe']),
+    toolDefinition('guardrail_recipe_request_approval', 'Create a pending CLI approval request for a prepared recipe execution without executing it.', {
+      recipe: { type: 'string' },
+      inputs: { type: 'object' },
+      repo_path: { type: 'string' },
+      search_dirs: { type: 'array', items: { type: 'string' } },
+      allow_unverified: { type: 'boolean' },
+      manifest_path: { type: 'string' },
+      expires_in_seconds: { type: 'number' },
+    }, ['recipe']),
     toolDefinition('guardrail_run_recipe', 'Run a delegated Guardrail recipe through the recipe supervisor.', {
       recipe: { type: 'string' },
       inputs: { type: 'object' },
       repo_path: { type: 'string' },
       manifest_path: { type: 'string' },
       allow_unverified: { type: 'boolean' },
+      approval_request_id: { type: 'string' },
     }, ['recipe']),
+    toolDefinition('guardrail_template_describe', 'Describe available Guardrail templates or one template without executing it.', {
+      template: { type: 'string' },
+      repo_path: { type: 'string' },
+      templates_dir: { type: 'string' },
+    }),
+    toolDefinition('guardrail_template_prepare', 'Validate template inputs and return simulation, setup, and grant guidance without executing it.', {
+      template: { type: 'string' },
+      inputs: { type: 'object' },
+      env_allow: { type: 'array', items: { type: 'string' } },
+      repo_path: { type: 'string' },
+      templates_dir: { type: 'string' },
+    }, ['template']),
+    toolDefinition('guardrail_template_request_approval', 'Create a pending CLI approval request for a prepared template execution without executing it.', {
+      template: { type: 'string' },
+      inputs: { type: 'object' },
+      env_allow: { type: 'array', items: { type: 'string' } },
+      repo_path: { type: 'string' },
+      templates_dir: { type: 'string' },
+      manifest_path: { type: 'string' },
+      expires_in_seconds: { type: 'number' },
+    }, ['template']),
+    toolDefinition('guardrail_run_template', 'Run a delegated Guardrail template through the template supervisor.', {
+      template: { type: 'string' },
+      inputs: { type: 'object' },
+      env_allow: { type: 'array', items: { type: 'string' } },
+      repo_path: { type: 'string' },
+      templates_dir: { type: 'string' },
+      manifest_path: { type: 'string' },
+      approval_request_id: { type: 'string' },
+    }, ['template']),
+    schemaToolDefinition(
+      'guardrail_template',
+      'Omnitool-style parent Guardrail template tool. Set action to describe, prepare, request_approval, or run. Legacy guardrail_template_* and guardrail_run_template tools remain callable compatibility aliases.',
+      TEMPLATE_ACTION_SCHEMA,
+    ),
     toolDefinition('guardrail_service_start', 'Start a grant-declared local service.', {
       service_id: { type: 'string' },
       repo_path: { type: 'string' },
@@ -59,29 +160,5 @@ export function listGuardrailMcpTools() {
       timeout_ms: { type: 'number' },
       repo_path: { type: 'string' },
     }, ['url']),
-    toolDefinition('guardrail_git_status', 'Return a read-only git status summary for a delegated repository path.', {
-      repo_path: { type: 'string' },
-    }),
-    toolDefinition('guardrail_git_diff', 'Return a bounded read-only git diff for a delegated repository path.', {
-      repo_path: { type: 'string' },
-      cached: { type: 'boolean' },
-      stat: { type: 'boolean' },
-      paths: { type: 'array', items: { type: 'string' } },
-      max_bytes: { type: 'number' },
-    }),
-    toolDefinition('guardrail_git_commit', 'Run the delegated git-commit recipe.', {
-      repo_path: { type: 'string' },
-      paths: { type: 'array', items: { type: 'string' } },
-      message_file: { type: 'string' },
-      manifest_path: { type: 'string' },
-      allow_unverified: { type: 'boolean' },
-    }, ['paths', 'message_file']),
-    toolDefinition('guardrail_git_push_feature_branch', 'Run the delegated git-push recipe for a topic branch.', {
-      repo_path: { type: 'string' },
-      remote: { type: 'string' },
-      branch: { type: 'string' },
-      manifest_path: { type: 'string' },
-      allow_unverified: { type: 'boolean' },
-    }, ['branch']),
   ];
 }

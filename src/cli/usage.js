@@ -62,6 +62,8 @@ Commands:
   key revoke <name> --state-dir <dir>   Revoke a stored key without deleting it
   policy list|inspect|validate          Manage and enforce policies
   metrics [--path <file>]               View execution metrics
+  approve list [--state-dir <dir>]      List pending approval requests
+  approve <id> [--state-dir <dir>]      Approve a pending request
   audit verify [--path <file>]           Verify audit log chain integrity
   audit query [--trace-id X] [filters]  Query audit log entries
   verify                                Run quick self-test verification
@@ -86,6 +88,13 @@ Flags:
   --env-allow <var>           Env var to allow for adapter auth/credential plumbing (repeatable)
   --help                      Show this help
   --version                   Show version
+
+MCP delegated approval:
+  Call guardrail_grant_status first, then use recipe/template describe or prepare.
+  For templates, prefer the omnitool-style parent guardrail_template action tool.
+  Actions: describe, prepare, request_approval, run; legacy template tools are aliases.
+  Unpinned run tools require MCP host form elicitation approval or a CLI approval_request_id.
+  Hosts without elicitation fail closed with host_approval_unavailable; normal args cannot self-approve.
 
 Examples:
   guardrail run -- npm test
@@ -115,7 +124,7 @@ Examples:
   guardrail lane prune --json
   guardrail lane prune --include-failed --dry-run --json
   guardrail repo status --path .
-  guardrail mcp serve --grant .guardrail/mcp-grant.json --agent codex
+  guardrail mcp serve --grant ~/.guardrail/mcp-grants/codex.json --agent codex
   guardrail adapter mcp tools --tool cline
   guardrail adapter mcp batch --tool cline --calls-json '[{"tool":"echo","params":{"text":"hi"}}]'
   guardrail template lint --template ./templates/npm-publish.json

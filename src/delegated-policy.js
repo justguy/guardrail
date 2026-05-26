@@ -1,18 +1,28 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { serializeStable } from './contract.js';
 import {
-  evaluateGitCommit,
-  evaluateGitDiff,
-  evaluateGitPush,
   evaluateHttp,
   evaluateRecipe,
+  evaluateRecipeDiscovery,
   evaluateService,
+  evaluateTemplate,
+  evaluateTemplateDiscovery,
+  evaluateTemplateParent,
   serviceDefinitionsFromGrant,
 } from './delegated-tool-evaluators.js';
+import { listGuardrailMcpTools } from './mcp-tools.js';
 
 export { serviceDefinitionsFromGrant };
+
+const TEMPLATE_ACTIONS = ['describe', 'prepare', 'request_approval', 'run'];
+const TEMPLATE_ACTION_LEGACY_TOOLS = {
+  describe: 'guardrail_template_describe',
+  prepare: 'guardrail_template_prepare',
+  request_approval: 'guardrail_template_request_approval',
+  run: 'guardrail_run_template',
+};
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -56,6 +66,22 @@ function isPathWithin(child, parent) {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
+function isPathTextWithin(child, parent) {
+  const rel = relative(resolve(parent), resolve(child));
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function findGitRoot(startPath) {
+  let current = realpathExisting(startPath);
+  if (!current) return null;
+  while (true) {
+    if (existsSync(resolve(current, '.git'))) return current;
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
 function resolveFrom(baseDir, value = '.') {
   return resolve(baseDir, String(value || '.'));
 }
@@ -68,6 +94,76 @@ function getToolConfig(grant, toolName) {
   if (config === true) return {};
   if (isObject(config)) return config;
   return null;
+}
+
+function summarizeRecipeConfig(config, requireHash = false) {
+  const recipes = config.recipes;
+  if (recipes === true) return { recipes: 'all' };
+  let delegatedRecipes = [];
+  if (Array.isArray(recipes)) {
+    delegatedRecipes = recipes.map((name) => ({ name: String(name), constraints: {} }));
+  } else if (isObject(recipes)) {
+    delegatedRecipes = Object.entries(recipes).map(([name, recipeConfig]) => {
+      const details = recipeConfig === true ? {} : recipeConfig;
+      return {
+        name,
+        recipeHash: details?.recipe_hash ?? details?.recipeHash ?? null,
+        hashRequired: requireHash,
+        approvalModes: requireHash ? ['recipe_hash', 'host_elicitation', 'approval_request_id'] : ['inspect', 'approval_request'],
+        allowUnverified: details?.allow_unverified === true || details?.allowUnverified === true || config.allow_unverified === true || config.allowUnverified === true,
+        inputs: details?.inputs ?? details?.input_constraints ?? {},
+      };
+    });
+  }
+  return { recipes: delegatedRecipes };
+}
+
+function summarizeTemplateConfig(config, requireHash = false) {
+  const templates = config.templates;
+  if (templates === true) return { templates: 'all' };
+  let delegatedTemplates = [];
+  if (Array.isArray(templates)) {
+    delegatedTemplates = templates.map((name) => ({ name: String(name), constraints: {} }));
+  } else if (isObject(templates)) {
+    delegatedTemplates = Object.entries(templates).map(([name, templateConfig]) => {
+      const details = templateConfig === true ? {} : templateConfig;
+      return {
+        name,
+        templateHash: details?.template_hash ?? details?.templateHash ?? null,
+        hashRequired: requireHash,
+        approvalModes: requireHash ? ['template_hash', 'host_elicitation', 'approval_request_id'] : ['inspect', 'approval_request'],
+        inputs: details?.inputs ?? details?.input_constraints ?? {},
+        envAllow: toArray(details?.env_allow ?? details?.envAllow),
+      };
+    });
+  }
+  return { templates: delegatedTemplates };
+}
+
+function getTemplateActionConfig(config, action) {
+  if (!isObject(config)) return {};
+  if (isObject(config.actions)) {
+    if (!(action in config.actions)) return null;
+    const actionConfig = config.actions[action];
+    return actionConfig === true ? {} : actionConfig;
+  }
+  if (isObject(config[action])) return config[action];
+  return config;
+}
+
+function summarizeTemplateParentConfig(config) {
+  const actions = {};
+  for (const action of TEMPLATE_ACTIONS) {
+    const actionConfig = getTemplateActionConfig(config, action);
+    actions[action] = actionConfig === null
+      ? { delegated: false, legacyAlias: TEMPLATE_ACTION_LEGACY_TOOLS[action] }
+      : {
+          delegated: true,
+          legacyAlias: TEMPLATE_ACTION_LEGACY_TOOLS[action],
+          policy: summarizeTemplateConfig(actionConfig, action === 'run'),
+        };
+  }
+  return { actions };
 }
 
 function summarizeToolConfig(toolName, config, grant) {
@@ -93,61 +189,42 @@ function summarizeToolConfig(toolName, config, grant) {
   }
 
   if (toolName === 'guardrail_run_recipe') {
-    const recipes = config.recipes;
-    let delegatedRecipes = [];
-    if (Array.isArray(recipes)) {
-      delegatedRecipes = recipes.map((name) => ({ name: String(name), constraints: {} }));
-    } else if (isObject(recipes)) {
-      delegatedRecipes = Object.entries(recipes).map(([name, recipeConfig]) => {
-        const details = recipeConfig === true ? {} : recipeConfig;
-        return {
-          name,
-          recipeHash: details?.recipe_hash ?? details?.recipeHash ?? null,
-          allowUnverified: details?.allow_unverified === true || details?.allowUnverified === true || config.allow_unverified === true || config.allowUnverified === true,
-          inputs: details?.inputs ?? details?.input_constraints ?? {},
-        };
-      });
-    }
     return {
       delegated: true,
-      policy: { recipes: delegatedRecipes },
-      usage: 'Use only delegated recipe names and inputs shown here. Recipe hashes are included so drift can fail closed.',
+      policy: summarizeRecipeConfig(config, true),
+      usage: 'Use only delegated recipe names and inputs shown here. Pinned recipe hashes run under the grant; unpinned runs require MCP host form elicitation approval or an approved CLI approval_request_id. Ordinary tool arguments cannot approve execution.',
     };
   }
 
-  if (toolName === 'guardrail_git_diff') {
+  if (toolName === 'guardrail_recipe_describe' || toolName === 'guardrail_recipe_prepare' || toolName === 'guardrail_recipe_request_approval') {
     return {
       delegated: true,
-      policy: {
-        allowedPaths: toArray(config.allowed_paths ?? config.allowedPaths),
-        maxBytes: Number.parseInt(config.max_bytes ?? config.maxBytes ?? 64 * 1024, 10),
-      },
-      usage: 'Use guardrail_git_diff for bounded read-only diff inspection. Keep paths repo-relative.',
+      policy: summarizeRecipeConfig(config, false),
+      usage: 'Use this recipe tool to inspect recipe inputs, hashes, dry-run output, and approval options before execution. Prefer the run tool host prompt when the MCP host supports elicitation; use request_approval only for the CLI fallback.',
     };
   }
 
-  if (toolName === 'guardrail_git_commit') {
+  if (toolName === 'guardrail_run_template') {
     return {
       delegated: true,
-      policy: {
-        recipeHash: config.recipe_hash ?? config.recipeHash ?? null,
-        allowedPaths: toArray(config.allowed_paths ?? config.allowedPaths),
-        allowUnverified: config.allow_unverified === true || config.allowUnverified === true,
-      },
-      usage: 'Use guardrail_git_commit for approved commits. Provide repo-relative paths and a repo-relative message_file.',
+      policy: summarizeTemplateConfig(config, true),
+      usage: 'Use only delegated template names and inputs shown here. Pinned template hashes run under the grant; unpinned runs require MCP host form elicitation approval or an approved CLI approval_request_id. Ordinary tool arguments cannot approve execution.',
     };
   }
 
-  if (toolName === 'guardrail_git_push_feature_branch') {
+  if (toolName === 'guardrail_template') {
     return {
       delegated: true,
-      policy: {
-        recipeHash: config.recipe_hash ?? config.recipeHash ?? null,
-        remote: config.remote ?? 'origin',
-        branchPattern: config.branch_pattern ?? config.branchPattern ?? '^(feature|bugfix|chore|docs|refactor|test|ci)/[A-Za-z0-9._/-]{1,96}$',
-        allowUnverified: config.allow_unverified === true || config.allowUnverified === true,
-      },
-      usage: 'Use guardrail_git_push_feature_branch only for delegated topic branches, never protected branches.',
+      policy: summarizeTemplateParentConfig(config),
+      usage: 'Preferred omnitool-style template surface for agents. Set action to describe, prepare, request_approval, or run. This is the parent entry point over the existing template supervisor, not a separate template runtime. Each action uses the same template allowlists, input constraints, env_allow constraints, hash checks, and approval semantics as its legacy compatibility tool.',
+    };
+  }
+
+  if (toolName === 'guardrail_template_describe' || toolName === 'guardrail_template_prepare' || toolName === 'guardrail_template_request_approval') {
+    return {
+      delegated: true,
+      policy: summarizeTemplateConfig(config, false),
+      usage: 'Use this template tool to inspect template inputs, env needs, hashes, simulation output, and approval options before execution. Prefer the run tool host prompt when the MCP host supports elicitation; use request_approval only for the CLI fallback.',
     };
   }
 
@@ -172,14 +249,39 @@ function summarizeToolConfig(toolName, config, grant) {
   };
 }
 
-function describeToolCapabilities(grant) {
+function mcpToolInventory(grant) {
+  const exposedTools = listGuardrailMcpTools().map((tool) => tool.name);
+  const exposedSet = new Set(exposedTools);
+  const grantDeclaredTools = isObject(grant?.tools) ? Object.keys(grant.tools) : toArray(grant?.tools);
+  const grantDeclaredSet = new Set(grantDeclaredTools);
+  const callableTools = grantDeclaredTools.filter((toolName) => exposedSet.has(toolName));
+  const grantOnlyTools = grantDeclaredTools.filter((toolName) => !exposedSet.has(toolName));
+  const exposedButNotGrantedTools = exposedTools.filter((toolName) => !grantDeclaredSet.has(toolName));
+  return {
+    exposedTools,
+    grantDeclaredTools,
+    callableTools,
+    grantOnlyTools,
+    exposedButNotGrantedTools,
+    warning: grantOnlyTools.length > 0
+      ? 'Some tools are declared by the grant but are not exposed by this MCP server. They are not callable; use tools/list or callableTools as the actionable inventory.'
+      : null,
+  };
+}
+
+function describeToolCapabilities(grant, callableToolNames = null) {
+  const callableSet = callableToolNames ? new Set(callableToolNames) : null;
   const tools = grant?.tools;
   if (Array.isArray(tools)) {
-    return Object.fromEntries(tools.map((toolName) => [toolName, { delegated: true, policy: 'No additional grant-level constraints.' }]));
+    return Object.fromEntries(tools
+      .filter((toolName) => !callableSet || callableSet.has(toolName))
+      .map((toolName) => [toolName, { delegated: true, policy: 'No additional grant-level constraints.' }]));
   }
   if (!isObject(tools)) return {};
   return Object.fromEntries(
-    Object.entries(tools).map(([toolName, config]) => [toolName, summarizeToolConfig(toolName, config, grant)]),
+    Object.entries(tools)
+      .filter(([toolName]) => !callableSet || callableSet.has(toolName))
+      .map(([toolName, config]) => [toolName, summarizeToolConfig(toolName, config, grant)]),
   );
 }
 
@@ -194,6 +296,30 @@ function validateGrantShape(grant) {
     errors.push('expires_at must be a valid ISO timestamp.');
   }
   return errors;
+}
+
+function validateGrantLocation(resolvedPath, grant, options = {}) {
+  const cwdRoot = resolve(options.cwd || process.cwd());
+  const delegatedRoot = resolveFrom(cwdRoot, grant.repo_path ?? grant.repoPath ?? '.');
+  if (!realpathExisting(delegatedRoot)) {
+    return [`Delegated repo_path does not exist or cannot be resolved: ${delegatedRoot}`];
+  }
+  const protectedRoots = [
+    { label: 'delegated repo_path', path: delegatedRoot },
+    { label: 'MCP server working directory', path: cwdRoot },
+  ];
+  const gitRoot = findGitRoot(delegatedRoot) ?? findGitRoot(cwdRoot);
+  if (gitRoot) protectedRoots.push({ label: 'Git worktree root', path: gitRoot });
+
+  for (const root of protectedRoots) {
+    if (isPathTextWithin(resolvedPath, root.path) || isPathWithin(resolvedPath, root.path)) {
+      return [
+        `Delegated MCP grant file must be outside the ${root.label}.`,
+        'Store MCP grants in an operator-controlled location such as ~/.guardrail/mcp-grants/<agent>.json, not in a directory an agent can edit.',
+      ];
+    }
+  }
+  return [];
 }
 
 export function loadDelegatedGrant(grantPath, options = {}) {
@@ -212,6 +338,8 @@ export function loadDelegatedGrant(grantPath, options = {}) {
   }
   const errors = validateGrantShape(grant);
   if (errors.length > 0) return { ok: false, grant, hash: null, path: resolvedPath, errors };
+  const locationErrors = validateGrantLocation(resolvedPath, grant, options);
+  if (locationErrors.length > 0) return { ok: false, grant, hash: null, path: resolvedPath, errors: locationErrors };
   return { ok: true, grant, hash: grantHash(grant), path: resolvedPath, errors: [] };
 }
 
@@ -219,7 +347,7 @@ export function describeDelegatedGrant(grantState, options = {}) {
   const now = options.now ? new Date(options.now) : new Date();
   const grant = grantState?.grant;
   const expired = !!grant?.expires_at && Date.parse(grant.expires_at) <= now.getTime();
-  const tools = isObject(grant?.tools) ? Object.keys(grant.tools) : toArray(grant?.tools);
+  const inventory = mcpToolInventory(grant);
   return {
     ok: !!grantState?.ok && !expired,
     hash: grantState?.hash ?? null,
@@ -228,12 +356,15 @@ export function describeDelegatedGrant(grantState, options = {}) {
     repoPath: grant?.repo_path ?? grant?.repoPath ?? '.',
     expiresAt: grant?.expires_at ?? null,
     expired,
-    tools,
-    capabilities: describeToolCapabilities(grant),
+    tools: inventory.callableTools,
+    grantDeclaredTools: inventory.grantDeclaredTools,
+    toolInventory: inventory,
+    capabilities: describeToolCapabilities(grant, inventory.callableTools),
     help: {
-      discovery: 'Call guardrail_grant_status before autonomous work to inspect delegated tools, policies, limits, and examples. Use this status instead of guessing what is allowed.',
-      moreInfo: 'Tool schemas are available from MCP tools/list. This status response summarizes the active grant. Denied tool calls include correction.expected with the next valid action.',
-      failClosed: 'If the needed action is not listed here, stop and ask the operator to update the grant or provide a bounded Guardrail recipe.',
+      discovery: 'Call guardrail_grant_status before autonomous work to inspect delegated tools, policies, limits, and examples instead of guessing. Use `tools` or `toolInventory.callableTools` as the actionable inventory.',
+      moreInfo: 'Tool schemas are available from MCP tools/list. For templates, prefer the omnitool-style parent guardrail_template tool with action=describe, prepare, request_approval, or run; legacy template tools are aliases. If guardrail_template appears under toolInventory.exposedButNotGrantedTools, the server exposes it but the active grant cannot use it yet. Use recipe/template describe and prepare actions to gather hashes, required inputs, env/auth setup, and grant snippets before execution. Unpinned run actions require MCP host form elicitation approval or an approved CLI approval_request_id.',
+      failClosed: 'If the needed action is not listed here, or if host elicitation is unavailable, declined, cancelled, or malformed, execution fails closed before the supervisor runs. Ask the operator to update the grant or use the CLI approval fallback when appropriate.',
+      staleGrantEntries: inventory.warning ?? 'No grant-declared tools are missing from the MCP tools/list inventory.',
     },
     errors: grantState?.errors ?? [],
   };
@@ -289,11 +420,12 @@ export function evaluateDelegatedTool(context, toolName, args = {}) {
   if (!common.allowed) return common;
   const config = common.config;
   const grant = context.grantState.grant;
+  if (toolName === 'guardrail_recipe_describe' || toolName === 'guardrail_recipe_prepare' || toolName === 'guardrail_recipe_request_approval') return combine(common, evaluateRecipeDiscovery(config, args));
   if (toolName === 'guardrail_run_recipe') return combine(common, evaluateRecipe(config, args));
+  if (toolName === 'guardrail_template') return combine(common, evaluateTemplateParent(config, args));
+  if (toolName === 'guardrail_template_describe' || toolName === 'guardrail_template_prepare' || toolName === 'guardrail_template_request_approval') return combine(common, evaluateTemplateDiscovery(config, args));
+  if (toolName === 'guardrail_run_template') return combine(common, evaluateTemplate(config, args));
   if (toolName === 'guardrail_http_request') return combine(common, evaluateHttp(config, args));
-  if (toolName === 'guardrail_git_diff') return combine(common, evaluateGitDiff(config, args));
   if (toolName.startsWith('guardrail_service_')) return combine(common, evaluateService(config, grant, args));
-  if (toolName === 'guardrail_git_commit') return combine(common, evaluateGitCommit(config, args));
-  if (toolName === 'guardrail_git_push_feature_branch') return combine(common, evaluateGitPush(config, args));
   return common;
 }

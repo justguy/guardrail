@@ -1,9 +1,13 @@
-import { isAbsolute } from 'node:path';
-
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
-const DEFAULT_MAX_DIFF_BYTES = 64 * 1024;
 const DEFAULT_MAX_HTTP_TIMEOUT_MS = 5000;
+const TEMPLATE_ACTIONS = new Set(['describe', 'prepare', 'request_approval', 'run']);
+const TEMPLATE_ACTION_FIELDS = {
+  describe: new Set(['action', 'template', 'repo_path', 'templates_dir']),
+  prepare: new Set(['action', 'template', 'inputs', 'env_allow', 'repo_path', 'templates_dir']),
+  request_approval: new Set(['action', 'template', 'inputs', 'env_allow', 'repo_path', 'templates_dir', 'manifest_path', 'expires_in_seconds']),
+  run: new Set(['action', 'template', 'inputs', 'env_allow', 'repo_path', 'templates_dir', 'manifest_path', 'approval_request_id']),
+};
 
 function decision(allowed, reason, details = {}) {
   return { allowed, reason, ...details };
@@ -44,31 +48,90 @@ function matchesValue(value, rule) {
   return true;
 }
 
-function pathIsRelativeSafe(path) {
-  return typeof path === 'string'
-    && path.length > 0
-    && !isAbsolute(path)
-    && !path.split('/').includes('..');
+function configAllowsUnverified(config) {
+  return config?.allow_unverified === true || config?.allowUnverified === true;
 }
 
-function validateAllowedPaths(paths, allowedPaths, label) {
-  for (const path of paths) {
-    if (!pathIsRelativeSafe(path)) {
-      return decision(false, `Path "${path}" is not a safe repo-relative path.`, correction('Use only non-empty repo-relative paths without `..` segments.'));
+function getTemplateActionConfig(config, action) {
+  if (!isObject(config)) return {};
+  if (isObject(config.actions)) {
+    if (!(action in config.actions)) {
+      return decision(false, `Template action "${action}" is not delegated.`, correction('Use one of the template actions listed for guardrail_template by guardrail_grant_status, or update the delegated grant.'));
+    }
+    const actionConfig = config.actions[action];
+    return actionConfig === true ? {} : actionConfig;
+  }
+  if (isObject(config[action])) {
+    return config[action];
+  }
+  return config;
+}
+
+function validateTemplateActionArgs(args) {
+  const action = args.action;
+  if (typeof action !== 'string' || !TEMPLATE_ACTIONS.has(action)) {
+    return decision(false, 'Template action must be one of describe, prepare, request_approval, or run.', correction('Call guardrail_template with an `action` of `describe`, `prepare`, `request_approval`, or `run`.'));
+  }
+  const allowedFields = TEMPLATE_ACTION_FIELDS[action];
+  const unexpected = Object.keys(args || {}).filter((key) => !allowedFields.has(key));
+  if (unexpected.length > 0) {
+    return decision(false, `Unsupported argument(s) for template action "${action}": ${unexpected.join(', ')}.`, correction('Use only the fields allowed by the guardrail_template action schema from tools/list.', { unexpected, action }));
+  }
+  if (action !== 'describe') {
+    const template = args.template ?? args.template_id ?? args.templateId;
+    if (typeof template !== 'string' || !template) {
+      return decision(false, `template is required for template action "${action}".`, correction('Provide the template name or repo-relative path in the `template` argument.'));
     }
   }
-  if (allowedPaths.length === 0) return decision(true, 'allowed');
-  for (const path of paths) {
-    const allowed = allowedPaths.some((entry) => path === entry || path.startsWith(`${entry}/`));
-    if (!allowed) {
-      return decision(false, `Path "${path}" is outside delegated ${label} paths.`, correction(`Use paths under delegated ${label} paths listed by guardrail_grant_status.`, { allowed: allowedPaths }));
+  return decision(true, 'allowed', { action });
+}
+
+function getDelegatedItem(config, collectionKey, itemName, label) {
+  const collection = config[collectionKey];
+  if (collection === true || collection === undefined) return {};
+  if (Array.isArray(collection)) {
+    if (!collection.includes(itemName)) {
+      return decision(false, `${label} "${itemName}" is not delegated.`, correction(`Use one of the ${collectionKey} listed by guardrail_grant_status, or update the delegated grant.`));
+    }
+    return {};
+  }
+  if (isObject(collection)) {
+    if (!(itemName in collection)) {
+      return decision(false, `${label} "${itemName}" is not delegated.`, correction(`Use one of the ${collectionKey} listed by guardrail_grant_status, or update the delegated grant.`));
+    }
+    return collection[itemName] === true ? {} : collection[itemName];
+  }
+  return decision(false, `Tool grant must declare delegated ${collectionKey}.`, correction(`Add a \`${collectionKey}\` allowlist for this tool in the delegated grant.`));
+}
+
+function validateConstrainedInputs(constraints, inputs, itemName, label) {
+  if (!isObject(constraints) || Object.keys(constraints).length === 0) return decision(true, 'allowed');
+  for (const [key, value] of Object.entries(inputs || {})) {
+    if (!(key in constraints)) {
+      return decision(false, `Input "${key}" is not delegated for ${label} "${itemName}".`, correction(`Use only input keys listed for this ${label} by guardrail_grant_status, or update the delegated grant.`));
+    }
+    if (!matchesValue(value, constraints[key])) {
+      return decision(false, `Input "${key}" is outside delegated constraints for ${label} "${itemName}".`, correction('Change the input value to match the constraints shown by guardrail_grant_status, or update the delegated grant.'));
     }
   }
   return decision(true, 'allowed');
 }
 
-function configAllowsUnverified(config) {
-  return config?.allow_unverified === true || config?.allowUnverified === true;
+export function evaluateRecipeDiscovery(config, args) {
+  const recipe = args.recipe ?? args.recipe_id ?? args.recipeId;
+  if (recipe === undefined || recipe === null || recipe === '') {
+    return decision(true, 'allowed');
+  }
+  const recipeConfig = getDelegatedItem(config, 'recipes', recipe, 'Recipe');
+  if (recipeConfig?.allowed === false) return recipeConfig;
+  const constraints = recipeConfig?.inputs ?? recipeConfig?.input_constraints ?? {};
+  const inputs = isObject(args.inputs) ? args.inputs : {};
+  const inputDecision = validateConstrainedInputs(constraints, inputs, recipe, 'recipe');
+  if (!inputDecision.allowed) return inputDecision;
+  return decision(true, 'allowed', {
+    recipeHash: recipeConfig?.recipe_hash ?? recipeConfig?.recipeHash ?? null,
+    allowUnverified: configAllowsUnverified(recipeConfig) || configAllowsUnverified(config),
+  });
 }
 
 export function evaluateRecipe(config, args) {
@@ -76,25 +139,9 @@ export function evaluateRecipe(config, args) {
   if (typeof recipe !== 'string' || !recipe) {
     return decision(false, 'recipe is required.', correction('Provide the recipe name in the `recipe` argument.'));
   }
-  const recipes = config.recipes;
-  let recipeConfig = null;
-  if (Array.isArray(recipes)) {
-    if (!recipes.includes(recipe)) {
-      return decision(false, `Recipe "${recipe}" is not delegated.`, correction('Use one of the recipes listed by guardrail_grant_status, or update the delegated grant.'));
-    }
-    recipeConfig = {};
-  } else if (isObject(recipes)) {
-    if (!(recipe in recipes)) {
-      return decision(false, `Recipe "${recipe}" is not delegated.`, correction('Use one of the recipes listed by guardrail_grant_status, or update the delegated grant.'));
-    }
-    recipeConfig = recipes[recipe] === true ? {} : recipes[recipe];
-  } else {
-    return decision(false, 'Tool grant must declare delegated recipes.', correction('Add a `recipes` allowlist for guardrail_run_recipe in the delegated grant.'));
-  }
-  const recipeHash = recipeConfig?.recipe_hash ?? recipeConfig?.recipeHash;
-  if (typeof recipeHash !== 'string' || !/^[a-f0-9]{64}$/i.test(recipeHash)) {
-    return decision(false, `Recipe "${recipe}" must be pinned by recipe_hash in the delegated grant.`, correction('Pin the delegated recipe with a 64-character `recipe_hash`.'));
-  }
+  const approvalRequestId = args.approval_request_id ?? args.approvalRequestId;
+  const recipeConfig = getDelegatedItem(config, 'recipes', recipe, 'Recipe');
+  if (recipeConfig?.allowed === false) return recipeConfig;
 
   const allowUnverified = configAllowsUnverified(recipeConfig) || configAllowsUnverified(config);
   if ((args.allow_unverified === true || args.allowUnverified === true) && !allowUnverified) {
@@ -103,15 +150,103 @@ export function evaluateRecipe(config, args) {
 
   const constraints = recipeConfig?.inputs ?? recipeConfig?.input_constraints ?? {};
   const inputs = isObject(args.inputs) ? args.inputs : {};
-  for (const [key, value] of Object.entries(inputs)) {
-    if (!(key in constraints)) {
-      return decision(false, `Input "${key}" is not delegated for recipe "${recipe}".`, correction('Use only input keys listed for this recipe by guardrail_grant_status, or update the delegated grant.'));
-    }
-    if (!matchesValue(value, constraints[key])) {
-      return decision(false, `Input "${key}" is outside delegated constraints for recipe "${recipe}".`, correction('Change the input value to match the constraints shown by guardrail_grant_status, or update the delegated grant.'));
-    }
+  const inputDecision = validateConstrainedInputs(constraints, inputs, recipe, 'recipe');
+  if (!inputDecision.allowed) return inputDecision;
+  if (approvalRequestId !== undefined && approvalRequestId !== null && String(approvalRequestId) !== '') {
+    return decision(true, 'allowed', {
+      approvalMode: 'approval_request',
+      approvalRequestId: String(approvalRequestId),
+      recipeHash: null,
+      allowUnverified,
+    });
+  }
+  const recipeHash = recipeConfig?.recipe_hash ?? recipeConfig?.recipeHash;
+  if (typeof recipeHash !== 'string' || !/^[a-f0-9]{64}$/i.test(recipeHash)) {
+    return decision(true, 'allowed', {
+      approvalMode: 'host_elicitation',
+      recipeHash: null,
+      allowUnverified,
+    });
   }
   return decision(true, 'allowed', { recipeHash, allowUnverified });
+}
+
+export function evaluateTemplateDiscovery(config, args) {
+  const template = args.template ?? args.template_id ?? args.templateId;
+  if (template === undefined || template === null || template === '') {
+    return decision(true, 'allowed');
+  }
+  const templateConfig = getDelegatedItem(config, 'templates', template, 'Template');
+  if (templateConfig?.allowed === false) return templateConfig;
+  const constraints = templateConfig?.inputs ?? templateConfig?.input_constraints ?? {};
+  const inputs = isObject(args.inputs) ? args.inputs : {};
+  const inputDecision = validateConstrainedInputs(constraints, inputs, template, 'template');
+  if (!inputDecision.allowed) return inputDecision;
+  const envAllow = toArray(args.env_allow ?? args.envAllow).map(String);
+  const allowedEnv = toArray(templateConfig?.env_allow ?? templateConfig?.envAllow).map(String);
+  if (envAllow.length > 0 && allowedEnv.length > 0) {
+    const denied = envAllow.filter((entry) => !allowedEnv.includes(entry));
+    if (denied.length > 0) {
+      return decision(false, `Environment access is outside delegated template env_allow for "${template}".`, correction('Use only env_allow entries listed for this template by guardrail_grant_status, or update the delegated grant.', { denied, allowed: allowedEnv }));
+    }
+  }
+  return decision(true, 'allowed', {
+    templateHash: templateConfig?.template_hash ?? templateConfig?.templateHash ?? null,
+    envAllow: allowedEnv,
+  });
+}
+
+export function evaluateTemplate(config, args) {
+  const template = args.template ?? args.template_id ?? args.templateId;
+  if (typeof template !== 'string' || !template) {
+    return decision(false, 'template is required.', correction('Provide the template name or repo-relative path in the `template` argument.'));
+  }
+  const approvalRequestId = args.approval_request_id ?? args.approvalRequestId;
+  const templateConfig = getDelegatedItem(config, 'templates', template, 'Template');
+  if (templateConfig?.allowed === false) return templateConfig;
+  const constraints = templateConfig?.inputs ?? templateConfig?.input_constraints ?? {};
+  const inputs = isObject(args.inputs) ? args.inputs : {};
+  const inputDecision = validateConstrainedInputs(constraints, inputs, template, 'template');
+  if (!inputDecision.allowed) return inputDecision;
+  const envAllow = toArray(args.env_allow ?? args.envAllow).map(String);
+  const allowedEnv = toArray(templateConfig?.env_allow ?? templateConfig?.envAllow).map(String);
+  if (envAllow.length > 0 && allowedEnv.length > 0) {
+    const denied = envAllow.filter((entry) => !allowedEnv.includes(entry));
+    if (denied.length > 0) {
+      return decision(false, `Environment access is outside delegated template env_allow for "${template}".`, correction('Use only env_allow entries listed for this template by guardrail_grant_status, or update the delegated grant.', { denied, allowed: allowedEnv }));
+    }
+  }
+  if (approvalRequestId !== undefined && approvalRequestId !== null && String(approvalRequestId) !== '') {
+    return decision(true, 'allowed', {
+      approvalMode: 'approval_request',
+      approvalRequestId: String(approvalRequestId),
+      templateHash: null,
+      envAllow: allowedEnv,
+    });
+  }
+  const templateHash = templateConfig?.template_hash ?? templateConfig?.templateHash;
+  if (typeof templateHash !== 'string' || !/^[a-f0-9]{64}$/i.test(templateHash)) {
+    return decision(true, 'allowed', {
+      approvalMode: 'host_elicitation',
+      templateHash: null,
+      envAllow: allowedEnv,
+    });
+  }
+  return decision(true, 'allowed', { templateHash, envAllow: allowedEnv });
+}
+
+export function evaluateTemplateParent(config, args) {
+  const actionDecision = validateTemplateActionArgs(args || {});
+  if (!actionDecision.allowed) return actionDecision;
+  const action = actionDecision.action;
+  const actionConfig = getTemplateActionConfig(config, action);
+  if (actionConfig?.allowed === false) return actionConfig;
+  if (action === 'run') {
+    const runDecision = evaluateTemplate(actionConfig, args);
+    return runDecision.allowed ? { ...runDecision, action } : runDecision;
+  }
+  const discoveryDecision = evaluateTemplateDiscovery(actionConfig, args);
+  return discoveryDecision.allowed ? { ...discoveryDecision, action } : discoveryDecision;
 }
 
 export function evaluateHttp(config, args) {
@@ -184,71 +319,6 @@ export function evaluateService(config, grant, args) {
   }
   if (!declared) return decision(false, `Service "${serviceId}" is not declared by the grant.`, correction('Use a service declared in the grant `services` map, or update the grant.'));
   return decision(true, 'allowed');
-}
-
-export function evaluateGitCommit(config, args) {
-  const recipeHash = config.recipe_hash ?? config.recipeHash;
-  if (typeof recipeHash !== 'string' || !/^[a-f0-9]{64}$/i.test(recipeHash)) {
-    return decision(false, 'guardrail_git_commit must be pinned by recipe_hash in the delegated grant.', correction('Pin the git-commit recipe with a 64-character `recipe_hash`.'));
-  }
-  const paths = Array.isArray(args.paths) ? args.paths : [];
-  if (paths.length === 0) {
-    return decision(false, 'paths must include at least one repo-relative path.', correction('Provide at least one safe repo-relative path in the `paths` array.'));
-  }
-  const allowedPaths = toArray(config.allowed_paths ?? config.allowedPaths);
-  const pathDecision = validateAllowedPaths(paths, allowedPaths, 'commit');
-  if (!pathDecision.allowed) return pathDecision;
-  const messageFile = args.message_file ?? args.messageFile;
-  if (!pathIsRelativeSafe(messageFile)) {
-    return decision(false, 'message_file must be a safe repo-relative path.', correction('Provide `message_file` as a non-empty repo-relative path without `..` segments.'));
-  }
-  if ((args.allow_unverified === true || args.allowUnverified === true) && !configAllowsUnverified(config)) {
-    return decision(false, 'Unverified git commit recipe execution is not delegated.', correction('Omit `allow_unverified`, or update the git commit grant to allow unverified execution.'));
-  }
-  return decision(true, 'allowed', { recipeHash, allowUnverified: configAllowsUnverified(config) });
-}
-
-export function evaluateGitDiff(config, args) {
-  const paths = Array.isArray(args.paths) ? args.paths : [];
-  const allowedPaths = toArray(config.allowed_paths ?? config.allowedPaths);
-  const pathDecision = validateAllowedPaths(paths, allowedPaths, 'diff');
-  if (!pathDecision.allowed) return pathDecision;
-  const requestedMax = Number.parseInt(args.max_bytes ?? args.maxBytes ?? DEFAULT_MAX_DIFF_BYTES, 10);
-  const delegatedMax = Number.parseInt(config.max_bytes ?? config.maxBytes ?? DEFAULT_MAX_DIFF_BYTES, 10);
-  if (!Number.isFinite(requestedMax) || requestedMax < 0) {
-    return decision(false, 'max_bytes must be a non-negative number.', correction(`Set max_bytes to a non-negative number no greater than ${delegatedMax}.`));
-  }
-  if (requestedMax > delegatedMax) {
-    return decision(false, `max_bytes exceeds delegated limit ${delegatedMax}.`, correction(`Set max_bytes to ${delegatedMax} or less, or update max_bytes in the grant.`));
-  }
-  return decision(true, 'allowed', { maxBytes: requestedMax });
-}
-
-export function evaluateGitPush(config, args) {
-  const recipeHash = config.recipe_hash ?? config.recipeHash;
-  if (typeof recipeHash !== 'string' || !/^[a-f0-9]{64}$/i.test(recipeHash)) {
-    return decision(false, 'guardrail_git_push_feature_branch must be pinned by recipe_hash in the delegated grant.', correction('Pin the git-push recipe with a 64-character `recipe_hash`.'));
-  }
-  const remote = args.remote ?? 'origin';
-  const allowedRemote = config.remote ?? 'origin';
-  if (remote !== allowedRemote) {
-    return decision(false, `Remote "${remote}" is not delegated.`, correction(`Use remote "${allowedRemote}", or update the delegated grant.`));
-  }
-  const branch = args.branch;
-  if (typeof branch !== 'string' || !branch) {
-    return decision(false, 'branch is required.', correction('Provide a branch matching the branch_pattern listed by guardrail_grant_status.'));
-  }
-  const pattern = config.branch_pattern ?? config.branchPattern ?? '^(feature|bugfix|chore|docs|refactor|test|ci)/[A-Za-z0-9._/-]{1,96}$';
-  if (/^(main|master|production|prod|staging|release\/.+)$/.test(branch)) {
-    return decision(false, `Branch "${branch}" is protected.`, correction('Use a non-protected feature, bugfix, chore, docs, refactor, test, or ci branch.'));
-  }
-  if (!new RegExp(pattern).test(branch)) {
-    return decision(false, `Branch "${branch}" is outside delegated branch pattern.`, correction('Use a branch matching the delegated branch_pattern.', { pattern }));
-  }
-  if ((args.allow_unverified === true || args.allowUnverified === true) && !configAllowsUnverified(config)) {
-    return decision(false, 'Unverified git push recipe execution is not delegated.', correction('Omit `allow_unverified`, or update the git push grant to allow unverified execution.'));
-  }
-  return decision(true, 'allowed', { recipeHash, allowUnverified: configAllowsUnverified(config) });
 }
 
 export function serviceDefinitionsFromGrant(grantState) {

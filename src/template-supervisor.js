@@ -289,6 +289,7 @@ async function executeRollback(rollbackSteps, envIntersection, cwd, logger, json
  * @param {boolean} [options.nonInteractive] - Fail closed, no prompts.
  * @param {boolean} [options.jsonOutput]     - Emit JSON output.
  * @param {string[]} [options.envAllow]      - Caller's env allow list.
+ * @param {object} [options.delegatedApproval] - Active delegated MCP approval record.
  * @returns {Promise<object>} Structured result.
  */
 export async function runTemplateSupervisor(options) {
@@ -300,6 +301,7 @@ export async function runTemplateSupervisor(options) {
     jsonOutput     = false,
     envAllow       = [],
     progressSink   = null,
+    delegatedApproval = null,
   } = options;
 
   const runId = generateRunId();
@@ -432,6 +434,7 @@ export async function runTemplateSupervisor(options) {
 
     let needsApproval = false;
     let driftDiffs = [];
+    let delegatedManifestReason = '';
 
     if (approved === null) {
       needsApproval = true;
@@ -444,6 +447,24 @@ export async function runTemplateSupervisor(options) {
         needsApproval = true;
         driftDiffs = comparison.diffs;
         logger.warn('drift_detected', { diffs: driftDiffs });
+      }
+    }
+
+    if (!needsApproval && approved?.riskAssessment?.delegated) {
+      const delegatedRecord = approved.riskAssessment.delegated;
+      if (delegatedApproval?.allowed !== true) {
+        delegatedManifestReason = 'Approved template manifest was created by a delegated grant and requires an active delegated grant for reuse.';
+        needsApproval = true;
+      } else if (delegatedRecord.tool && delegatedRecord.tool !== delegatedApproval.tool) {
+        delegatedManifestReason = 'Approved template manifest was created by a different delegated MCP tool and must be re-approved for this tool.';
+        needsApproval = true;
+      }
+      if (delegatedManifestReason) {
+        logger.warn('template_delegated_manifest_reapproval_required', {
+          templateName: def.name,
+          manifestPath,
+          reason: delegatedManifestReason,
+        });
       }
     }
 
@@ -464,6 +485,50 @@ export async function runTemplateSupervisor(options) {
     }
 
     // ---- Approval flow -----------------------------------------------------
+    if (needsApproval) {
+      if (delegatedApproval?.allowed === true) {
+        const expectedTemplateHash = delegatedApproval.templateHash ?? delegatedApproval.expectedTemplateHash ?? null;
+        if (!expectedTemplateHash) {
+          const reason = 'Delegated template approval requires a template_hash pinned in the active grant.';
+          if (!jsonOutput) {
+            printResult({ success: false, exitCode: 16, message: reason });
+          }
+          return emitFinalResult('policy_violation', { ...resultOpts, reason });
+        }
+        if (expectedTemplateHash !== templateHash) {
+          const reason = 'Delegated template approval grant does not match the resolved template execution hash.';
+          if (!jsonOutput) {
+            printResult({ success: false, exitCode: 16, message: reason });
+          }
+          return emitFinalResult('policy_violation', { ...resultOpts, reason });
+        }
+        candidate.riskAssessment.acknowledgedBy = delegatedApproval.actor || 'delegated_grant';
+        candidate.riskAssessment.acknowledgedAt = new Date().toISOString();
+        candidate.riskAssessment.delegated = {
+          grantHash: delegatedApproval.grantHash ?? null,
+          templateHash,
+          tool: delegatedApproval.tool ?? null,
+          reason: delegatedApproval.reason ?? 'delegated approval',
+        };
+        try {
+          saveManifest(candidate, manifestPath);
+          approved = candidate;
+          needsApproval = false;
+          logger.info('template_delegated_approval', {
+            templateName: def.name,
+            manifestPath,
+            grantHash: delegatedApproval.grantHash ?? null,
+          });
+        } catch (err) {
+          const reason = `Failed to save delegated template approval manifest: ${err.message}`;
+          if (!jsonOutput) {
+            printResult({ success: false, exitCode: 19, message: 'Failed to save manifest.' });
+          }
+          return emitFinalResult('internal_error', { ...resultOpts, reason });
+        }
+      }
+    }
+
     if (needsApproval) {
       if (nonInteractive) {
         if (approved === null) {
