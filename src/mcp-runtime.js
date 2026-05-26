@@ -959,6 +959,7 @@ async function runDelegatedTemplate(context, args, delegation, callContext = {})
     templatePath,
     inputs: args.inputs || {},
     manifestPath,
+    cwd: repoPath,
     nonInteractive: true,
     jsonOutput: true,
     envAllow: toStringArray(args.env_allow ?? args.envAllow),

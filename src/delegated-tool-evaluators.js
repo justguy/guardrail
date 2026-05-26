@@ -56,7 +56,7 @@ function getTemplateActionConfig(config, action) {
   if (!isObject(config)) return {};
   if (isObject(config.actions)) {
     if (!(action in config.actions)) {
-      return decision(false, `Template action "${action}" is not delegated.`, correction('Use one of the template actions listed for guardrail_template by guardrail_grant_status, or update the delegated grant.'));
+      return decision(false, `Template action "${action}" is not delegated.`, correction('Use one of the template actions listed for guardrail_template by guardrail_grant_status, or ask the operator to issue an updated operator-controlled grant.'));
     }
     const actionConfig = config.actions[action];
     return actionConfig === true ? {} : actionConfig;
@@ -91,27 +91,27 @@ function getDelegatedItem(config, collectionKey, itemName, label) {
   if (collection === true || collection === undefined) return {};
   if (Array.isArray(collection)) {
     if (!collection.includes(itemName)) {
-      return decision(false, `${label} "${itemName}" is not delegated.`, correction(`Use one of the ${collectionKey} listed by guardrail_grant_status, or update the delegated grant.`));
+      return decision(false, `${label} "${itemName}" is not delegated.`, correction(`Use one of the ${collectionKey} listed by guardrail_grant_status, or ask the operator to issue an updated operator-controlled grant.`));
     }
     return {};
   }
   if (isObject(collection)) {
     if (!(itemName in collection)) {
-      return decision(false, `${label} "${itemName}" is not delegated.`, correction(`Use one of the ${collectionKey} listed by guardrail_grant_status, or update the delegated grant.`));
+      return decision(false, `${label} "${itemName}" is not delegated.`, correction(`Use one of the ${collectionKey} listed by guardrail_grant_status, or ask the operator to issue an updated operator-controlled grant.`));
     }
     return collection[itemName] === true ? {} : collection[itemName];
   }
-  return decision(false, `Tool grant must declare delegated ${collectionKey}.`, correction(`Add a \`${collectionKey}\` allowlist for this tool in the delegated grant.`));
+  return decision(false, `Tool grant must declare delegated ${collectionKey}.`, correction(`Ask the operator to add a \`${collectionKey}\` allowlist for this tool in an operator-controlled grant.`));
 }
 
 function validateConstrainedInputs(constraints, inputs, itemName, label) {
   if (!isObject(constraints) || Object.keys(constraints).length === 0) return decision(true, 'allowed');
   for (const [key, value] of Object.entries(inputs || {})) {
     if (!(key in constraints)) {
-      return decision(false, `Input "${key}" is not delegated for ${label} "${itemName}".`, correction(`Use only input keys listed for this ${label} by guardrail_grant_status, or update the delegated grant.`));
+      return decision(false, `Input "${key}" is not delegated for ${label} "${itemName}".`, correction(`Use only input keys listed for this ${label} by guardrail_grant_status, or ask the operator to update the grant constraints.`));
     }
     if (!matchesValue(value, constraints[key])) {
-      return decision(false, `Input "${key}" is outside delegated constraints for ${label} "${itemName}".`, correction('Change the input value to match the constraints shown by guardrail_grant_status, or update the delegated grant.'));
+      return decision(false, `Input "${key}" is outside delegated constraints for ${label} "${itemName}".`, correction('Change the input value to match the constraints shown by guardrail_grant_status, or ask the operator to update the grant constraints.'));
     }
   }
   return decision(true, 'allowed');
@@ -145,7 +145,7 @@ export function evaluateRecipe(config, args) {
 
   const allowUnverified = configAllowsUnverified(recipeConfig) || configAllowsUnverified(config);
   if ((args.allow_unverified === true || args.allowUnverified === true) && !allowUnverified) {
-    return decision(false, `Unverified recipe execution is not delegated for recipe "${recipe}".`, correction('Omit `allow_unverified`, or update the grant to explicitly allow unverified execution for this recipe.'));
+    return decision(false, `Unverified recipe execution is not delegated for recipe "${recipe}".`, correction('Omit `allow_unverified`, or ask the operator to update the grant to explicitly allow unverified execution for this recipe.'));
   }
 
   const constraints = recipeConfig?.inputs ?? recipeConfig?.input_constraints ?? {};
@@ -187,7 +187,7 @@ export function evaluateTemplateDiscovery(config, args) {
   if (envAllow.length > 0 && allowedEnv.length > 0) {
     const denied = envAllow.filter((entry) => !allowedEnv.includes(entry));
     if (denied.length > 0) {
-      return decision(false, `Environment access is outside delegated template env_allow for "${template}".`, correction('Use only env_allow entries listed for this template by guardrail_grant_status, or update the delegated grant.', { denied, allowed: allowedEnv }));
+      return decision(false, `Environment access is outside delegated template env_allow for "${template}".`, correction('Use only env_allow entries listed for this template by guardrail_grant_status, or ask the operator to update the grant constraints.', { denied, allowed: allowedEnv }));
     }
   }
   return decision(true, 'allowed', {
@@ -213,7 +213,7 @@ export function evaluateTemplate(config, args) {
   if (envAllow.length > 0 && allowedEnv.length > 0) {
     const denied = envAllow.filter((entry) => !allowedEnv.includes(entry));
     if (denied.length > 0) {
-      return decision(false, `Environment access is outside delegated template env_allow for "${template}".`, correction('Use only env_allow entries listed for this template by guardrail_grant_status, or update the delegated grant.', { denied, allowed: allowedEnv }));
+      return decision(false, `Environment access is outside delegated template env_allow for "${template}".`, correction('Use only env_allow entries listed for this template by guardrail_grant_status, or ask the operator to update the grant constraints.', { denied, allowed: allowedEnv }));
     }
   }
   if (approvalRequestId !== undefined && approvalRequestId !== null && String(approvalRequestId) !== '') {
@@ -260,7 +260,7 @@ export function evaluateHttp(config, args) {
     return decision(false, 'Only http and https URLs are supported.', correction('Use an `http://` or `https://` URL.'));
   }
   if (!LOOPBACK_HOSTS.has(url.hostname) && config.allow_remote_hosts !== true && config.allowRemoteHosts !== true) {
-    return decision(false, 'HTTP requests are limited to loopback hosts unless allow_remote_hosts is explicitly true.', correction('Use a loopback host such as `127.0.0.1`, `localhost`, or `::1`, or explicitly update the grant to allow remote hosts.'));
+    return decision(false, 'HTTP requests are limited to loopback hosts unless allow_remote_hosts is explicitly true.', correction('Use a loopback host such as `127.0.0.1`, `localhost`, or `::1`, or ask the operator to explicitly update the grant to allow remote hosts.'));
   }
 
   const hosts = toArray(config.hosts);
@@ -277,13 +277,13 @@ export function evaluateHttp(config, args) {
   const port = url.port ? Number.parseInt(url.port, 10) : defaultPort;
   const ports = toArray(config.ports).map((entry) => Number.parseInt(entry, 10));
   if (ports.length > 0 && !ports.includes(port)) {
-    return decision(false, `Port "${port}" is not delegated.`, correction('Use one of the delegated ports listed by guardrail_grant_status, or update the grant.', { allowed: ports }));
+    return decision(false, `Port "${port}" is not delegated.`, correction('Use one of the delegated ports listed by guardrail_grant_status, or ask the operator to update the grant.', { allowed: ports }));
   }
 
   const body = args.body === undefined || args.body === null ? '' : String(args.body);
   const maxBodyBytes = Number.parseInt(config.max_body_bytes ?? config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES, 10);
   if (Buffer.byteLength(body) > maxBodyBytes) {
-    return decision(false, `HTTP request body exceeds ${maxBodyBytes} bytes.`, correction(`Send a request body of ${maxBodyBytes} bytes or less, or update max_body_bytes in the grant.`));
+    return decision(false, `HTTP request body exceeds ${maxBodyBytes} bytes.`, correction(`Send a request body of ${maxBodyBytes} bytes or less, or ask the operator to update max_body_bytes in the grant.`));
   }
   const requestedTimeout = Number.parseInt(args.timeout_ms ?? args.timeoutMs ?? DEFAULT_MAX_HTTP_TIMEOUT_MS, 10);
   const maxTimeoutMs = Number.parseInt(config.max_timeout_ms ?? config.maxTimeoutMs ?? DEFAULT_MAX_HTTP_TIMEOUT_MS, 10);
@@ -291,17 +291,17 @@ export function evaluateHttp(config, args) {
     return decision(false, 'timeout_ms must be a positive number.', correction(`Set timeout_ms to a positive number no greater than ${maxTimeoutMs}.`));
   }
   if (requestedTimeout > maxTimeoutMs) {
-    return decision(false, `timeout_ms exceeds delegated limit ${maxTimeoutMs}.`, correction(`Set timeout_ms to ${maxTimeoutMs} or less, or update max_timeout_ms in the grant.`));
+    return decision(false, `timeout_ms exceeds delegated limit ${maxTimeoutMs}.`, correction(`Set timeout_ms to ${maxTimeoutMs} or less, or ask the operator to update max_timeout_ms in the grant.`));
   }
 
   const headers = isObject(args.headers) ? Object.keys(args.headers) : [];
   const allowedHeaders = toArray(config.allowed_headers ?? config.allowedHeaders).map((h) => String(h).toLowerCase());
   if (headers.length > 0 && allowedHeaders.length === 0) {
-    return decision(false, 'Custom headers are not delegated.', correction('Remove custom headers, or add allowed_headers to the delegated grant.'));
+    return decision(false, 'Custom headers are not delegated.', correction('Remove custom headers, or ask the operator to add allowed_headers to the delegated grant.'));
   }
   for (const header of headers) {
     if (!allowedHeaders.includes(header.toLowerCase())) {
-      return decision(false, `Header "${header}" is not delegated.`, correction('Use only delegated headers listed by guardrail_grant_status, or update allowed_headers in the grant.', { allowed: allowedHeaders }));
+      return decision(false, `Header "${header}" is not delegated.`, correction('Use only delegated headers listed by guardrail_grant_status, or ask the operator to update allowed_headers in the grant.', { allowed: allowedHeaders }));
     }
   }
   return decision(true, 'allowed', { method, url: url.toString(), maxBodyBytes, timeoutMs: requestedTimeout });
@@ -317,7 +317,7 @@ export function evaluateService(config, grant, args) {
   if (serviceList.length > 0 && !serviceList.includes(serviceId)) {
     return decision(false, `Service "${serviceId}" is not delegated.`, correction('Use one of the delegated service IDs listed by guardrail_grant_status.', { allowed: serviceList }));
   }
-  if (!declared) return decision(false, `Service "${serviceId}" is not declared by the grant.`, correction('Use a service declared in the grant `services` map, or update the grant.'));
+  if (!declared) return decision(false, `Service "${serviceId}" is not declared by the grant.`, correction('Use a service declared in the grant `services` map, or ask the operator to update the grant.'));
   return decision(true, 'allowed');
 }
 

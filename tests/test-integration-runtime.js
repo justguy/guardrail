@@ -1078,6 +1078,43 @@ describe('Integration: Template Supervisor Runtime Policy', () => {
     assert.notEqual(result.status, 'policy_violation');
   });
 
+  it('executes template steps from explicit runtime cwd instead of template directory', async () => {
+    const dir = tmpDir();
+    mkdirSync(join(dir, '.guardrail', 'templates'), { recursive: true });
+    mkdirSync(join(dir, 'artifacts'), { recursive: true });
+    const tmplPath = join(dir, '.guardrail', 'templates', 'test-tmpl.json');
+    const manifestPath = join(dir, '.guardrail', 'templates', 'test-tmpl.approved.json');
+    const tmpl = {
+      ...makeTemplate(),
+      run: {
+        command: process.execPath,
+        args: [
+          '-e',
+          'require("node:fs").writeFileSync("artifacts/template-cwd.txt", process.cwd())',
+        ],
+        mode: 'structured',
+      },
+    };
+    writeFileSync(tmplPath, JSON.stringify(tmpl));
+    createApprovedTemplateManifest(tmpl, {
+      inputValues: { name: 'hello' },
+      manifestPath,
+    });
+
+    const result = await runTemplateSupervisor({
+      templatePath: tmplPath,
+      inputs: { name: 'hello' },
+      manifestPath,
+      cwd: dir,
+      nonInteractive: true,
+      jsonOutput: true,
+    });
+
+    assert.equal(result.status, 'success');
+    assert.equal(readFileSync(join(dir, 'artifacts', 'template-cwd.txt'), 'utf8'), dir);
+    assert.equal(existsSync(join(dir, '.guardrail', 'templates', 'artifacts', 'template-cwd.txt')), false);
+  });
+
   it('emits stable template progress events for JSON-stream', async () => {
     const dir = tmpDir();
     const tmplPath = join(dir, 'tmpl.json');
