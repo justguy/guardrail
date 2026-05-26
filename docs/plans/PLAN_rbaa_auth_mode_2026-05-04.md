@@ -361,7 +361,7 @@ The auth-mode root is explicit because command, template, workflow, recipe, lane
 - Repo-scoped default: `<repo>/.guardrail/auth/`, where `<repo>` is the resolved Guardrail project/repo root, not the template/workflow definition directory unless that is also the project root.
 - Host/lane default: `<hostStateDir>/auth/` only for resident-lane and portfolio operations that already receive a host state directory.
 - Test/managed override: `GUARDRAIL_AUTH_ROOT`, allowed only when it resolves inside an approved Guardrail state area.
-- Execution state remains separate: existing `stateDir` values such as `cwd/.guardrail`, `dirname(templatePath)/.guardrail`, `dirname(workflowPath)/.guardrail`, and `resolvedCwd/.guardrail` continue to hold checkpoints, logs, manifests, and audit writes. They do not own auth-mode config unless they are also the resolved `authConfigRoot`.
+- Execution state remains separate: existing `stateDir` values such as `cwd/.guardrail`, explicit template execution cwd `.guardrail`, legacy programmatic `dirname(templatePath)/.guardrail`, `dirname(workflowPath)/.guardrail`, and `resolvedCwd/.guardrail` continue to hold checkpoints, logs, manifests, and audit writes. They do not own auth-mode config unless they are also the resolved `authConfigRoot`.
 - Per-environment override root: `<authConfigRoot>/environments/<env>/`, where `<env>` comes from `GUARDRAIL_ENV`, `<executionStateDir>/current-env`, or default `dev` via `getCurrentEnv()`. Workflow inputs cannot select the auth environment.
 
 ```

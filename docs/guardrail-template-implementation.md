@@ -318,6 +318,8 @@ guardrail run \
 guardrail template diff --template ./templates/npm-publish.json
 ```
 
+Template execution uses the caller's runtime working directory, not the directory containing the template file. For normal CLI usage, run `guardrail run --template` from the repo/workspace where relative paths should resolve. For delegated MCP usage, template child processes run from the delegated `repo_path`; `.guardrail/templates` remains only the template and manifest storage location.
+
 ### 5.2 `guardrail template lint` — What It Checks
 
 In order:

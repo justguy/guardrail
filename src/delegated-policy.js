@@ -363,7 +363,8 @@ export function describeDelegatedGrant(grantState, options = {}) {
     help: {
       discovery: 'Call guardrail_grant_status before autonomous work to inspect delegated tools, policies, limits, and examples instead of guessing. Use `tools` or `toolInventory.callableTools` as the actionable inventory.',
       moreInfo: 'Tool schemas are available from MCP tools/list. For templates, prefer the omnitool-style parent guardrail_template tool with action=describe, prepare, request_approval, or run; legacy template tools are aliases. If guardrail_template appears under toolInventory.exposedButNotGrantedTools, the server exposes it but the active grant cannot use it yet. Use recipe/template describe and prepare actions to gather hashes, required inputs, env/auth setup, and grant snippets before execution. Unpinned run actions require MCP host form elicitation approval or an approved CLI approval_request_id.',
-      failClosed: 'If the needed action is not listed here, or if host elicitation is unavailable, declined, cancelled, or malformed, execution fails closed before the supervisor runs. Ask the operator to update the grant or use the CLI approval fallback when appropriate.',
+      grantLocation: 'The active grant file must be operator-controlled and outside the delegated repo_path, MCP server cwd, and Git worktree root. Repo-local grants and symlinks are rejected. Use per-repo/per-agent files under ~/.guardrail/mcp-grants/ when scope should differ by project; do not let agents edit a broad shared/global grant to approve their own work.',
+      failClosed: 'If the needed action is not listed here, or if host elicitation is unavailable, declined, cancelled, or malformed, execution fails closed before the supervisor runs. Ask the operator to issue or update an operator-controlled grant, or use the CLI approval fallback when appropriate.',
       staleGrantEntries: inventory.warning ?? 'No grant-declared tools are missing from the MCP tools/list inventory.',
     },
     errors: grantState?.errors ?? [],
@@ -385,10 +386,10 @@ function evaluateCommon(context, toolName, args) {
   }
   const config = getToolConfig(grant, toolName);
   if (!config) {
-    return decision(false, `Tool "${toolName}" is not delegated by the grant.`, correction('Call guardrail_grant_status and use one of the delegated tools, or update the grant.'));
+    return decision(false, `Tool "${toolName}" is not delegated by the grant.`, correction('Call guardrail_grant_status and use one of the delegated tools, or ask the operator to issue an updated operator-controlled grant.'));
   }
   if (config.enabled === false) {
-    return decision(false, `Tool "${toolName}" is disabled by the grant.`, correction('Use an enabled delegated tool, or update the grant to enable this tool.'));
+    return decision(false, `Tool "${toolName}" is disabled by the grant.`, correction('Use an enabled delegated tool, or ask the operator to update the grant to enable this tool.'));
   }
 
   const root = resolveFrom(context.cwd || process.cwd(), grant.repo_path ?? grant.repoPath ?? '.');

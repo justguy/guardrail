@@ -142,6 +142,7 @@ export async function handleExecutionSubcommand(parsed, { statusExitCodes }) {
       templatePath: parsed.template,
       inputs: parsed.inputs,
       manifestPath: parsed.manifest || null,
+      cwd: process.cwd(),
       nonInteractive: parsed.nonInteractive,
       jsonOutput: parsed.json || parsed.jsonStream,
       envAllow: parsed.envAllow,
