@@ -1047,22 +1047,53 @@ See [docs/adapter-implementation-plan.md](docs/adapter-implementation-plan.md) f
 Guardrail can also run as a stdio MCP server for unattended agents that need a bounded set of pre-approved operations:
 
 ```bash
-guardrail mcp serve --grant .guardrail/mcp-grant.json --agent codex
+guardrail mcp serve --grant ~/.guardrail/mcp-grants/codex.json --agent codex
 ```
 
-The server is fail-closed. It does not expose arbitrary shell execution. Every tool call must be allowed by the active grant, the grant must match the agent id, the grant must be unexpired, and repository paths are resolved with real paths before containment checks.
+The server is fail-closed. It does not expose arbitrary shell execution. Every tool call must be allowed by the active grant, the grant must match the agent id, the grant must be unexpired, and repository paths are resolved with real paths before containment checks. The grant file itself must live outside the delegated `repo_path`, the MCP server working directory, and the discovered Git worktree root, in an operator-controlled location such as `~/.guardrail/mcp-grants/`; repo-local grants and repo-local symlinks to grants are rejected because a repo-writing agent could otherwise approve itself.
 
 Current MCP tools:
 
 - `guardrail_grant_status`
+- `guardrail_recipe_describe`, `guardrail_recipe_prepare`, `guardrail_recipe_request_approval`
 - `guardrail_run_recipe`
+- `guardrail_template` omnitool-style parent surface with `action: "describe" | "prepare" | "request_approval" | "run"`
+- `guardrail_template_describe`, `guardrail_template_prepare`, `guardrail_template_request_approval`
+- `guardrail_run_template`
 - `guardrail_service_start`, `guardrail_service_stop`, `guardrail_service_status`
 - `guardrail_http_request`
-- `guardrail_git_status`, `guardrail_git_diff`
-- `guardrail_git_commit`
-- `guardrail_git_push_feature_branch`
 
-Delegated recipe execution still goes through the recipe supervisor, so manifest creation, drift detection, runtime policy, audit, and locks remain in force. A grant must pin delegated recipe execution by `recipe_hash`; recipe drift after grant issuance is blocked instead of silently re-approved. Delegated manifests are marked with grant metadata and require an active delegated grant for later non-interactive reuse.
+Delegated recipe and template execution still goes through the existing supervisors, so manifest creation, drift detection, runtime policy, audit, and locks remain in force. The template omnitool is the parent `guardrail_template` MCP tool: use its `action` field for `describe`, `prepare`, `request_approval`, or `run`. It is an agent-facing parent entry point over the existing template supervisor, not a separate template runtime or a bypass around template manifests. The older `guardrail_template_describe`, `guardrail_template_prepare`, `guardrail_template_request_approval`, and `guardrail_run_template` tools remain callable compatibility aliases and use the same policy. Execution can be approved in three bounded ways: a grant can pin recipe execution by `recipe_hash` / template execution by `template_hash`; an unpinned but otherwise delegated run can ask the MCP host for form elicitation approval; or MCP can create a pending CLI approval request that a human approves with `guardrail approve`. In every mode, drift after approval is blocked instead of silently re-approved. Delegated/request-backed manifests are marked with approval metadata and require an active delegated approval path for later non-interactive reuse.
+
+Use recipe describe/prepare tools and template `describe`/`prepare` actions before asking for approval. They do not execute commands. They resolve available recipes/templates, show inputs and env/auth needs, calculate hashes, run dry-run or simulation logic, and return the next approval action. For normal MCP hosts that support form elicitation, an unpinned `guardrail_run_recipe` call or `guardrail_template` `run` action presents a host approval prompt before supervisor execution. That prompt is the approval boundary; normal tool arguments such as `inputs`, `manifest_path`, or any agent-invented approval field cannot approve execution by themselves.
+
+Agent guidance: call `guardrail_grant_status` first, stay inside the advertised tool schemas and grant policy, and treat any `host_approval_*` or policy denial as a correction hint rather than permission to switch to raw shell or raw Git. If `guardrail_grant_status.toolInventory.grantOnlyTools` is non-empty, those entries are stale grant declarations, not callable MCP tools. If `toolInventory.exposedButNotGrantedTools` includes `guardrail_template`, the server exposes the template omnitool but the active grant cannot use it yet. Use `tools` or `toolInventory.callableTools` as the actionable inventory.
+
+The host elicitation prompt includes the exact approval subject: tool name, agent id, grant hash, repo path, recipe/template name, recipe/template execution hashes, resolved inputs, requested env allow-list, manifest path, source path, and risk/setup summary. The host app must support MCP form elicitation. Unsupported hosts fail closed with `host_approval_unavailable`, and declined/cancelled responses, malformed responses, or choosing `decline` fail closed before any supervisor execution.
+
+Short recipe flow:
+
+```text
+Agent -> guardrail_recipe_prepare { recipe: "test-api", inputs: { base_url: "http://127.0.0.1:4317" } }
+MCP   -> returns hashes, env/auth needs, dry-run steps, and next approval action
+Agent -> guardrail_run_recipe { recipe: "test-api", inputs: { base_url: "http://127.0.0.1:4317" } }
+Host  -> shows "Guardrail MCP host approval requested" with the bound approval subject
+Human -> chooses approve or decline in the host form
+MCP   -> on approve, runs the recipe supervisor; on decline/cancel/unsupported/malformed, returns a host_approval_* failure before execution
+```
+
+Short template omnitool flow:
+
+```text
+Agent -> guardrail_template { action: "prepare", template: "standard-test", inputs: { package: "@acme/api" }, env_allow: ["NPM_TOKEN"] }
+MCP   -> returns validation, simulation, hashes, env needs, and next approval action
+Agent -> guardrail_template { action: "run", template: "standard-test", inputs: { package: "@acme/api" }, env_allow: ["NPM_TOKEN"] }
+Host  -> shows "Guardrail MCP host approval requested" with the bound template approval subject
+Human -> chooses approve or decline in the host form
+MCP   -> on approve, runs the template supervisor; on decline/cancel/unsupported/malformed, returns a host_approval_* failure before execution
+```
+
+The CLI approval queue remains the compatibility fallback. Call `guardrail_recipe_request_approval` or `guardrail_template_request_approval`; the response includes a request id and the exact `guardrail approve ... --state-dir ...` command for the human. The approve command requires an interactive TTY and the literal `APPROVE` token. Then call the run tool with `approval_request_id`.
 
 Minimal grant shape:
 
@@ -1073,8 +1104,17 @@ Minimal grant shape:
   "repo_path": ".",
   "expires_at": "2026-06-01T00:00:00.000Z",
   "tools": {
-    "guardrail_run_recipe": {
-      "recipes": {
+    "guardrail_recipe_describe": {
+      "recipes": true
+    },
+	    "guardrail_recipe_prepare": {
+	      "recipes": true
+	    },
+	    "guardrail_recipe_request_approval": {
+	      "recipes": true
+	    },
+	    "guardrail_run_recipe": {
+	      "recipes": {
         "test-api": {
           "recipe_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "allow_unverified": true,
@@ -1084,23 +1124,62 @@ Minimal grant shape:
         }
       }
     },
+    "guardrail_template_describe": {
+      "templates": true
+    },
+	    "guardrail_template_prepare": {
+	      "templates": true
+	    },
+	    "guardrail_template_request_approval": {
+	      "templates": true
+	    },
+    "guardrail_template": {
+      "actions": {
+        "describe": {
+          "templates": true
+        },
+        "prepare": {
+          "templates": true
+        },
+        "request_approval": {
+          "templates": true
+        },
+        "run": {
+          "templates": {
+            "standard-test": {
+              "template_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "inputs": {
+                "package": { "exact": "@acme/api" }
+              },
+              "env_allow": ["NPM_TOKEN"]
+            }
+          }
+        }
+      }
+    },
+    "guardrail_run_template": {
+      "templates": {
+        "standard-test": {
+          "template_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "inputs": {
+            "package": { "exact": "@acme/api" }
+          },
+          "env_allow": ["NPM_TOKEN"]
+        }
+      }
+    },
     "guardrail_http_request": {
       "hosts": ["127.0.0.1", "localhost"],
       "ports": [4317],
       "methods": ["GET", "POST"],
       "max_body_bytes": 4096,
       "max_timeout_ms": 5000
-    },
-    "guardrail_git_status": true,
-    "guardrail_git_diff": {
-      "allowed_paths": ["src", "tests"],
-      "max_bytes": 65536
     }
   }
 }
 ```
 
-HTTP requests are loopback-only unless a grant explicitly sets `allow_remote_hosts: true`. Git mutation surfaces are wrappers around shipped Guardrail recipes, not raw `git push` or arbitrary git commands.
+HTTP requests are loopback-only unless a grant explicitly sets `allow_remote_hosts: true`. Git workflows are not special MCP tools; expose them, when appropriate, as ordinary hash-pinned recipes through `guardrail_run_recipe`.
 
 ---
 

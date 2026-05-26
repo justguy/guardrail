@@ -176,7 +176,8 @@ export async function handleGovernanceSubcommand(parsed) {
 
   if (parsed.subcommand === 'approve-list') {
     const { listRequests, formatRequest } = await import('../approval-queue.js');
-    const requests = listRequests('.guardrail');
+    const stateDir = parsed.approveOpts?.stateDir || '.guardrail';
+    const requests = listRequests(stateDir);
     if (parsed.json) console.log(JSON.stringify(requests, null, 2));
     else if (requests.length === 0) console.log('No pending approvals.');
     else for (const r of requests) { console.log(formatRequest(r)); console.log(); }
@@ -186,11 +187,25 @@ export async function handleGovernanceSubcommand(parsed) {
   if (parsed.subcommand === 'approve' && parsed.approveOpts?.id) {
     const { loadRequest, saveRequest, approveRequest, rejectRequest } = await import('../approval-queue.js');
     try {
-      const req = loadRequest(parsed.approveOpts.id, '.guardrail');
-      const result = parsed.approveOpts.action === 'reject'
-        ? rejectRequest(req, process.env.USER || 'cli-user', 'Rejected via CLI')
-        : approveRequest(req, process.env.USER || 'cli-user');
-      saveRequest(req, '.guardrail');
+      const stateDir = parsed.approveOpts?.stateDir || '.guardrail';
+      const req = loadRequest(parsed.approveOpts.id, stateDir);
+      let result;
+      if (parsed.approveOpts.action === 'reject') {
+        result = rejectRequest(req, process.env.USER || 'cli-user', 'Rejected via CLI');
+      } else {
+        if (!process.stdin.isTTY) {
+          console.error('Interactive approval requires a TTY. Re-run this command in a terminal and type APPROVE.');
+          process.exit(17);
+        }
+        const { promptApproval } = await import('../supervisor.js');
+        const approved = await promptApproval(req.risk_level === 'high' ? 'red' : req.risk_level);
+        if (!approved) {
+          console.error(`Approval denied: ${req.id}`);
+          process.exit(11);
+        }
+        result = approveRequest(req, process.env.USER || 'cli-user');
+      }
+      saveRequest(req, stateDir);
       console.log(`${result.status === 'approved' ? 'Approved' : result.status === 'rejected' ? 'Rejected' : 'Advanced'}: ${req.id}`);
       if (result.nextStage) console.log(`  Next stage: ${result.nextStage}`);
     } catch (err) {

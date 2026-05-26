@@ -7,12 +7,13 @@
         "id": "enterprise",
         "label": "Enterprise",
         "description": "Enterprise delivery items, rollout work, and capability gaps.",
-        "collapsed": false
+        "collapsed": true
       },
       {
         "id": "rbaa-auth-plan",
         "label": "RBAA Auth Plan",
-        "description": "Plan repair and implementation-prep tasks for Guardrail static/rbaa authorization mode."
+        "description": "Plan repair and implementation-prep tasks for Guardrail static/rbaa authorization mode.",
+        "collapsed": true
       },
       {
         "id": "runtime",
@@ -29,7 +30,8 @@
       {
         "id": "platform",
         "label": "Platform",
-        "description": "Registry, distribution, and non-enterprise platform capabilities."
+        "description": "Registry, distribution, and non-enterprise platform capabilities.",
+        "collapsed": true
       },
       {
         "id": "deferred",
@@ -56,9 +58,9 @@
         "label": "P3"
       }
     ],
-    "scratchpad": "rbaa-auth-000 completed on feature/rbaa-auth-000: RBAA/Auth plan repaired; implementation remains gated by sign-off, tests, envelope enforcement, and identity readiness.",
-    "rev": 26,
-    "updatedAt": "2026-05-05T00:33:15.886Z"
+    "scratchpad": "Completed parent-template runtime dispatch. Tests/docs rows are now unblocked; focused MCP policy/server tests are green.",
+    "rev": 82,
+    "updatedAt": "2026-05-26T00:25:23.437Z"
   },
   "tasks": [
     {
@@ -734,7 +736,7 @@
       "id": "flight-recorder-audit-trail",
       "title": "Flight Recorder audit trail and explainability surface",
       "goal": "Close the gap between the current hash-chained audit/query surface and a compliance-grade flight recorder that can explain what each agent requested, how Guardrail resolved it, why it was allowed/required approval/blocked, what actually ran, what output was produced, and what files/resources changed.",
-      "status": "not_started",
+      "status": "in_progress",
       "placement": {
         "swimlaneId": "enterprise",
         "priorityId": "p1"
@@ -808,7 +810,9 @@
           "guardrail audit timeline"
         ],
         "source_question": "User requested a Flight Recorder for auditing and compliance after gap review on 2026-04-29."
-      }
+      },
+      "assignee": null,
+      "blocker_reason": null
     },
     {
       "dependencies": [],
@@ -1165,6 +1169,938 @@
           "docs/plans/PLAN_rbaa_auth_mode_2026-05-04.md"
         ],
         "notes": "Added implementation sign-off checklist and strengthened stop conditions for the repo-specific gaps."
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "guardrail-mcp-recipes-templates",
+      "title": "Replace git-specific MCP tools with recipe and template tooling",
+      "goal": "Revise the Guardrail MCP server so agents discover, prepare, and execute hash-pinned recipe/template work through expandable Guardrail-native tools, while removing git-named MCP surfaces.",
+      "status": "complete",
+      "assignee": "codex",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "definition_of_done": [
+        "MCP tools/list no longer advertises git-named tools.",
+        "Grant status summarizes recipe and template capabilities with approval guidance.",
+        "Recipe/template describe and prepare paths return hashes, inputs, env/auth needs, and grant snippets without executing commands.",
+        "Template execution supports delegated approval with template_hash drift protection.",
+        "Focused MCP policy/server/template tests pass."
+      ],
+      "allowed_paths": [
+        "src/",
+        "tests/",
+        "README.md",
+        "docs/"
+      ],
+      "context": {
+        "files_touched": [
+          "src/mcp-tools.js",
+          "src/mcp-runtime.js",
+          "src/delegated-policy.js",
+          "src/delegated-tool-evaluators.js",
+          "src/template-supervisor.js",
+          "tests/test-mcp-policy.js",
+          "tests/test-mcp-server.js",
+          "README.md",
+          "docs/technical-status.md",
+          ".llm-tracker/trackers/guardrail-roadmap.json"
+        ],
+        "notes": "Adding grant-location enforcement and docs/tests for operator-owned grants outside repo_path.",
+        "verification": [
+          "node --check src/mcp-runtime.js",
+          "node --check src/delegated-tool-evaluators.js",
+          "node --check src/approval-queue.js",
+          "node --check src/cli/governance-commands.js",
+          "node --check src/cli/parse.js",
+          "node --test tests/test-mcp-policy.js tests/test-mcp-server.js tests/test-bucket6.js: 83 passing",
+          "node --test tests/test-template.js tests/test-mcp-policy.js tests/test-mcp-server.js tests/test-bucket6.js: 173 passing"
+        ],
+        "enforcement_followup": "Repo-local MCP grants are rejected by default in loadDelegatedGrant; the MCP runtime only forwards allowRepoLocalGrant when explicitly provided by internal test harnesses. CLI/docs point humans to ~/.guardrail/mcp-grants/<agent>.json.",
+        "focused_result": "105 passing focused template/MCP tests, including repo-local grant rejection and delegated recipe/template drift coverage.",
+        "active_grant_note": "Current session guardrail_grant_status still reflects an older running MCP server/grant surface until the MCP server is restarted against this worktree.",
+        "subagent_review_findings": [
+          "Repo-local grant could pass by setting repo_path to a child directory that does not contain the grant file.",
+          "Repo-local grant symlink to an outside target could pass because the previous check only used realpath containment."
+        ],
+        "enforcement_followup_status": "complete",
+        "enforcement_controls": [
+          "loadDelegatedGrant rejects grant files inside delegated repo_path, MCP server working directory, or discovered Git worktree root by default.",
+          "Grant-location rejection checks both path text and realpath target, so repo-local symlinks to outside files are still denied.",
+          "The public allowRepoLocalGrant option was removed; no CLI/stdio/runtime option now permits repo-local grants."
+        ],
+        "remaining_note": "Full npm test was not rerun after this enforcement patch; earlier full run failed in unrelated recipe/feature-acceptance tests, not MCP/template tests.",
+        "approval_flow_followup": "complete",
+        "approval_flow_controls": [
+          "Added guardrail_recipe_request_approval and guardrail_template_request_approval MCP tools.",
+          "Run tools accept approval_request_id as an alternative to grant hash pinning.",
+          "Approved request validation rechecks status, expiry, agent, tool, repo_path, manifest_path, recipe/template hash, exact inputs, env_allow, and allow_unverified before executing.",
+          "Approval requests are stored in an operator-controlled state dir by default (~/.guardrail) and request responses include guardrail approve/list commands with --state-dir.",
+          "guardrail approve now requires an interactive TTY and literal APPROVE token for approvals."
+        ],
+        "option1_elicitation_smoke_test": {
+          "date": "2026-05-25",
+          "result": "pass",
+          "scope": "no product code changes; in-memory SDK smoke test only",
+          "evidence": [
+            "accepting host: EXECUTED after host approval; executed=true",
+            "declining host: DENIED before execution; executed=false",
+            "no elicitation capability: Client does not support form elicitation.; executed=false"
+          ],
+          "subagent": "019e6123-d8d9-7cc2-afe0-ff6e1a83325e verified SDK/client support and current repo fit"
+        },
+        "option1_implementation": {
+          "status": "planned",
+          "task_ids": [
+            "guardrail-mcp-elicitation-contract",
+            "guardrail-mcp-elicitation-policy",
+            "guardrail-mcp-elicitation-runtime",
+            "guardrail-mcp-elicitation-tests",
+            "guardrail-mcp-elicitation-docs",
+            "guardrail-mcp-elicitation-verify"
+          ],
+          "subagent_findings_integrated": true
+        }
+      },
+      "references": [
+        "src/mcp-tools.js:32",
+        "src/mcp-runtime.js:1",
+        "src/delegated-policy.js:1",
+        "src/delegated-tool-evaluators.js:1",
+        "src/template-supervisor.js:294",
+        "tests/test-mcp-policy.js:1",
+        "tests/test-mcp-server.js:1",
+        "README.md:1040",
+        "docs/technical-status.md:542"
+      ],
+      "comment": "Original recipe/template MCP task remains complete. Option 1 host-approval implementation has been split into follow-up tasks: contract, policy, runtime, tests, docs, and verify."
+    },
+    {
+      "dependencies": [],
+      "id": "guardrail-mcp-elicitation-contract",
+      "title": "Define MCP host approval contract",
+      "goal": "Specify the option 1 approval flow for recipe/template execution: MCP host receives an elicitation prompt, the response is bound to prepared request details, and unsupported/declined approval fails closed.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "related": [
+        "guardrail-mcp-recipes-templates"
+      ],
+      "references": [
+        "src/mcp-server.js:18",
+        "src/mcp-runtime.js:401",
+        "src/mcp-runtime.js:663",
+        "src/mcp-tools.js:56",
+        "src/mcp-tools.js:85"
+      ],
+      "definition_of_done": [
+        "Approval contract identifies the exact prompt fields shown to the host: tool, repo path, recipe/template name, hashes, inputs, env, manifest path, and risk/setup summary.",
+        "Contract states that agent-provided args cannot satisfy approval by themselves.",
+        "Contract preserves existing CLI approval_request_id path as compatibility/fallback.",
+        "Contract states unsupported MCP elicitation and declined/cancelled responses fail closed before supervisor execution."
+      ],
+      "constraints": [
+        "Do not add arbitrary shell execution.",
+        "Do not remove existing CLI approval_request_id compatibility.",
+        "Do not allow the agent to self-approve through a normal tool argument."
+      ],
+      "expected_changes": [
+        "src/mcp-server.js",
+        "src/mcp-runtime.js",
+        "README.md"
+      ],
+      "allowed_paths": [
+        "src/mcp-server.js",
+        "src/mcp-runtime.js",
+        "src/mcp-tools.js",
+        "tests/test-mcp-server.js",
+        "README.md",
+        "docs/technical-status.md"
+      ],
+      "approval_required_for": [
+        "Changing the trust boundary or allowing non-host approval to execute recipes/templates"
+      ],
+      "comment": "Host approval contract landed: prompt subject includes tool, repo path, recipe/template name, hashes, inputs, env, manifest path, and risk/setup summary; normal args cannot self-approve; CLI approval_request_id remains a fallback; unsupported/declined host elicitation fails closed before supervisor execution.",
+      "blocker_reason": null,
+      "context": {
+        "files_touched": [
+          "src/mcp-server.js",
+          "src/mcp-runtime.js",
+          "src/delegated-policy.js",
+          "src/delegated-tool-evaluators.js",
+          "tests/test-mcp-policy.js",
+          "tests/test-mcp-server.js",
+          "README.md",
+          "docs/technical-status.md"
+        ],
+        "verification": "node --check src/mcp-server.js; node --check src/mcp-runtime.js; node --check src/delegated-policy.js; node --check src/delegated-tool-evaluators.js; node --test tests/test-mcp-policy.js tests/test-mcp-server.js (25 pass)"
+      }
+    },
+    {
+      "dependencies": [
+        "guardrail-mcp-elicitation-policy"
+      ],
+      "id": "guardrail-mcp-elicitation-runtime",
+      "title": "Wire host elicitation approval gate",
+      "goal": "Implement the MCP host approval gate for guardrail_run_recipe and guardrail_run_template so execution proceeds only after an accepted host elicitation response or an already-approved approval_request_id.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "related": [
+        "guardrail-mcp-recipes-templates"
+      ],
+      "references": [
+        "src/mcp-server.js:36",
+        "src/mcp-runtime.js:401",
+        "src/mcp-runtime.js:663",
+        "src/delegated-tool-evaluators.js:96",
+        "src/delegated-tool-evaluators.js:154"
+      ],
+      "definition_of_done": [
+        "src/mcp-server.js provides an approval callback backed by server.elicitInput for recipe/template run tools.",
+        "src/mcp-runtime.js accepts the approval callback without becoming transport-specific.",
+        "Recipe execution fails closed before runRecipeSupervisor when host approval is unsupported, declined, cancelled, malformed, or mismatched.",
+        "Template execution fails closed before runTemplateSupervisor under the same conditions.",
+        "Host approval failures return structured codes such as host_approval_unavailable, host_approval_denied, host_approval_invalid, or host_approval_failed instead of generic tool_failed.",
+        "Accepted host approvals produce delegatedApproval metadata identifying host elicitation and the bound recipe/template hash.",
+        "Existing approval_request_id flows still work without requiring a second host prompt."
+      ],
+      "constraints": [
+        "Fail closed on any elicitation SDK error unless approval_request_id validation already succeeded.",
+        "Keep recipe/template hash and input/env checks before execution.",
+        "Do not broaden delegated grant policy evaluation."
+      ],
+      "expected_changes": [
+        "src/mcp-server.js",
+        "src/mcp-runtime.js"
+      ],
+      "allowed_paths": [
+        "src/mcp-server.js",
+        "src/mcp-runtime.js",
+        "src/mcp-tools.js"
+      ],
+      "approval_required_for": [
+        "Any behavior that allows execution without host approval or approved request id"
+      ],
+      "comment": "Runtime gate landed: server.elicitInput is wired through callTool, runtime builds bound approval subjects, unsupported/declined host approval returns host_approval_* codes before supervisors, and approval_request_id remains a no-second-prompt path.",
+      "blocker_reason": null,
+      "context": {
+        "files_touched": [
+          "src/mcp-server.js",
+          "src/mcp-runtime.js"
+        ],
+        "verification": "node --check src/mcp-server.js; node --check src/mcp-runtime.js; node --test tests/test-mcp-policy.js tests/test-mcp-server.js (25 pass)"
+      }
+    },
+    {
+      "dependencies": [
+        "guardrail-mcp-elicitation-policy",
+        "guardrail-mcp-elicitation-runtime"
+      ],
+      "id": "guardrail-mcp-elicitation-tests",
+      "title": "Cover host approval outcomes",
+      "goal": "Add focused MCP SDK tests proving host elicitation gates recipe/template execution and fails closed when the host cannot or will not approve.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "related": [
+        "guardrail-mcp-recipes-templates"
+      ],
+      "references": [
+        "tests/test-mcp-policy.js:145",
+        "tests/test-mcp-server.js:164",
+        "tests/test-mcp-server.js:378",
+        "tests/test-mcp-server.js:432"
+      ],
+      "definition_of_done": [
+        "Policy tests cover unpinned recipe/template runs allowed only when host approval is available.",
+        "Tests cover recipe host approval accepted path and verify supervisor execution succeeds.",
+        "Tests cover template host approval accepted path and verify supervisor execution succeeds.",
+        "Tests cover declined/cancelled host response and verify no manifest/output side effect is created.",
+        "Tests cover client without elicitation capability and verify host_approval_unavailable fail-closed behavior.",
+        "Tests cover malformed host response and verify host_approval_invalid fail-closed behavior.",
+        "Tests cover approval_request_id compatibility so approved queue requests do not call host approval or regress."
+      ],
+      "constraints": [
+        "Use official MCP SDK client/server path for elicitation tests where possible.",
+        "Keep tests local-only and avoid network egress.",
+        "Do not rely on raw shell approval prompts for unit tests."
+      ],
+      "expected_changes": [
+        "tests/test-mcp-server.js"
+      ],
+      "allowed_paths": [
+        "tests/test-mcp-policy.js",
+        "tests/test-mcp-server.js"
+      ],
+      "approval_required_for": [],
+      "comment": "Host approval test coverage landed and focused MCP policy/server tests pass.",
+      "blocker_reason": null,
+      "context": {
+        "files_touched": [
+          "tests/test-mcp-policy.js",
+          "tests/test-mcp-server.js",
+          "src/mcp-runtime.js"
+        ],
+        "verification": "TPF_LLM_TOOL=codex tpf node --check src/mcp-runtime.js; TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-policy.js tests/test-mcp-server.js -> 26 tests pass, 0 fail.",
+        "notes": "Covers host elicitation mode, accepted recipe/template paths, unavailable host elicitation, declined host response, malformed host response via host_approval_invalid, and approval_request_id compatibility."
+      }
+    },
+    {
+      "dependencies": [
+        "guardrail-mcp-elicitation-runtime"
+      ],
+      "id": "guardrail-mcp-elicitation-docs",
+      "title": "Document simple host approval flow",
+      "goal": "Update agent-facing docs so agents can discover, prepare, request host approval, and understand fail-closed behavior without hand-editing grants or running a separate MCP server.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      },
+      "assignee": "codex",
+      "related": [
+        "guardrail-mcp-recipes-templates"
+      ],
+      "references": [
+        "README.md:1040",
+        "docs/technical-status.md:542"
+      ],
+      "definition_of_done": [
+        "README explains the preferred flow: describe/prepare, run tool triggers host approval prompt, human accepts/declines in the host, execution proceeds or fails closed.",
+        "Docs clearly distinguish host elicitation approval from CLI approval_request_id fallback.",
+        "Docs state host apps must support MCP elicitation; unsupported hosts fail closed with host_approval_unavailable.",
+        "Docs include a short example transcript for recipe execution.",
+        "Docs do not instruct normal users to hand-place grant files or restart MCP servers for the preferred path."
+      ],
+      "constraints": [
+        "Keep the docs short and practical.",
+        "Do not instruct normal users to hand-place grant files or restart MCP servers for the preferred path."
+      ],
+      "expected_changes": [
+        "README.md",
+        "docs/technical-status.md"
+      ],
+      "allowed_paths": [
+        "README.md",
+        "docs/technical-status.md"
+      ],
+      "approval_required_for": [
+        "Changing recommended user/operator workflow"
+      ],
+      "comment": "Host elicitation docs landed with preferred flow, fallback, fail-closed behavior, and recipe transcript.",
+      "blocker_reason": null,
+      "context": {
+        "files_touched": [
+          "README.md",
+          "docs/technical-status.md"
+        ],
+        "verification": "Reviewed README.md and docs/technical-status.md for host elicitation preferred flow, CLI approval_request_id fallback, host_approval_unavailable wording, and short recipe transcript.",
+        "notes": "README now explains describe/prepare, host prompt approval/decline, unsupported host fail-closed behavior, and a short recipe execution transcript without telling normal users to hand-place grant files or restart MCP servers."
+      }
+    },
+    {
+      "dependencies": [
+        "guardrail-mcp-elicitation-tests",
+        "guardrail-mcp-elicitation-docs"
+      ],
+      "id": "guardrail-mcp-elicitation-verify",
+      "title": "Verify and close host approval rollout",
+      "goal": "Run the focused checks for the option 1 implementation, record evidence, and close the tracker only after code, tests, and docs match the approval intent.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "related": [
+        "guardrail-mcp-recipes-templates"
+      ],
+      "references": [
+        "tests/test-mcp-server.js:1"
+      ],
+      "definition_of_done": [
+        "Focused MCP server tests pass.",
+        "Focused MCP policy tests pass.",
+        "Relevant syntax checks pass for changed source files.",
+        "Tracker records files touched and verification evidence.",
+        "All subagents used for implementation are closed after their findings are integrated.",
+        "Final summary states exactly where enforcement lives and what host support is required."
+      ],
+      "constraints": [
+        "Do not mark complete if tests cannot run or if unsupported-host fail-closed behavior is untested.",
+        "Do not leave subagents running."
+      ],
+      "expected_changes": [
+        ".llm-tracker/trackers/guardrail-roadmap.json"
+      ],
+      "allowed_paths": [
+        ".llm-tracker/trackers/guardrail-roadmap.json",
+        "tests/test-mcp-server.js",
+        "src/mcp-server.js",
+        "src/mcp-runtime.js",
+        "README.md",
+        "docs/technical-status.md"
+      ],
+      "approval_required_for": [],
+      "comment": "Final focused verification is green and subagents are closed.",
+      "blocker_reason": null,
+      "context": {
+        "files_touched": [
+          ".llm-tracker/trackers/guardrail-roadmap.json",
+          "src/mcp-server.js",
+          "src/mcp-runtime.js",
+          "src/delegated-policy.js",
+          "src/delegated-tool-evaluators.js",
+          "tests/test-mcp-policy.js",
+          "tests/test-mcp-server.js",
+          "README.md",
+          "docs/technical-status.md"
+        ],
+        "verification": "Syntax: node --check src/mcp-server.js, src/mcp-runtime.js, src/delegated-policy.js, src/delegated-tool-evaluators.js all pass. Tests: TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-policy.js tests/test-mcp-server.js -> 26 tests pass, 0 fail.",
+        "subagents": "Closed explorer subagents 019e6164-f489-7ac1-8980-332b91baeaf5 and 019e6164-f878-7062-ab4b-5da02ba6d1b0 after integrating findings.",
+        "notes": "Unsupported-host fail-closed behavior is covered by host_approval_unavailable, malformed accepted responses return host_approval_invalid, and final docs identify required MCP form elicitation support."
+      }
+    },
+    {
+      "dependencies": [
+        "guardrail-mcp-elicitation-contract"
+      ],
+      "id": "guardrail-mcp-elicitation-policy",
+      "title": "Add host approval policy mode",
+      "goal": "Teach delegated policy evaluation that unpinned recipe/template runs may proceed only through explicit host elicitation approval when the MCP host supports it, while preserving all grant allowlists, input constraints, env constraints, and hash-pinned behavior.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "assignee": "codex",
+      "related": [
+        "guardrail-mcp-recipes-templates"
+      ],
+      "references": [
+        "src/delegated-tool-evaluators.js:96",
+        "src/delegated-tool-evaluators.js:154",
+        "src/delegated-policy.js:347",
+        "tests/test-mcp-policy.js:145"
+      ],
+      "definition_of_done": [
+        "Policy returns approvalMode host_elicitation only when the tool is granted, no explicit approval_request_id was supplied, and host approval is available.",
+        "Policy denies the same unpinned run when host approval is unavailable.",
+        "Policy does not let host approval bypass recipe/template allowlists, input constraints, env constraints, or configured hash checks.",
+        "Grant status/help advertises host approval availability and fail-closed behavior clearly.",
+        "Policy tests cover recipe and template allowed/denied host approval paths."
+      ],
+      "constraints": [
+        "Do not treat host elicitation as arbitrary shell execution permission.",
+        "Do not fall back to host approval after an explicit approval_request_id validation failure.",
+        "Hash-pinned grants must keep existing behavior."
+      ],
+      "expected_changes": [
+        "src/delegated-tool-evaluators.js",
+        "src/delegated-policy.js",
+        "tests/test-mcp-policy.js"
+      ],
+      "allowed_paths": [
+        "src/delegated-tool-evaluators.js",
+        "src/delegated-policy.js",
+        "tests/test-mcp-policy.js"
+      ],
+      "approval_required_for": [
+        "Any policy broadening beyond host_elicitation for granted recipe/template tools"
+      ],
+      "comment": "Policy mode landed: unpinned but granted recipe/template runs return approvalMode host_elicitation, CLI approval_request_id still wins explicitly, hash-pinned grants keep existing behavior, and allowlist/input/env checks remain before approval.",
+      "blocker_reason": null,
+      "context": {
+        "files_touched": [
+          "src/delegated-tool-evaluators.js",
+          "src/delegated-policy.js",
+          "tests/test-mcp-policy.js"
+        ],
+        "verification": "node --check src/delegated-policy.js; node --check src/delegated-tool-evaluators.js; node --test tests/test-mcp-policy.js tests/test-mcp-server.js (25 pass)"
+      }
+    },
+    {
+      "dependencies": [],
+      "id": "guardrail-mcp-template-subtools-contract",
+      "title": "Define template subtool contract",
+      "goal": "Define the agent-facing contract for a single Guardrail MCP template tool that exposes template operations as subtools/actions instead of separate template-named MCP tools.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "related": [
+        "guardrail-mcp-recipes-templates",
+        "guardrail-mcp-elicitation-runtime"
+      ],
+      "references": [
+        "src/mcp-tools.js:64",
+        "src/mcp-runtime.js:954",
+        "README.md:1057",
+        "AGENTS.md:56"
+      ],
+      "definition_of_done": [
+        "The public tool shape names the parent tool and the supported subtools/actions for describe, prepare, request approval, and run.",
+        "Input schemas describe required fields for each subtool without allowing action-specific args to bypass validation.",
+        "The contract states whether legacy separate template tools remain available, become aliases, or are deprecated.",
+        "The contract preserves host elicitation and CLI approval_request_id approval semantics for run actions."
+      ],
+      "constraints": [
+        "Do not broaden template execution permissions while consolidating the tool surface.",
+        "Do not remove legacy tool names without an explicit compatibility decision."
+      ],
+      "expected_changes": [
+        "src/mcp-tools.js",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "allowed_paths": [
+        "src/mcp-tools.js",
+        "README.md",
+        "AGENTS.md",
+        "docs/technical-status.md"
+      ],
+      "approval_required_for": [],
+      "comment": "Parent `guardrail_template` action contract landed additively: actions are describe, prepare, request_approval, and run; legacy template tools remain callable compatibility aliases.",
+      "context": {
+        "notes": "Schema uses action-specific oneOf branches; docs state parent tool is preferred and legacy template tools remain compatibility aliases.",
+        "files_touched": [
+          "src/mcp-tools.js",
+          "README.md",
+          "AGENTS.md",
+          "docs/technical-status.md",
+          "tests/test-mcp-server.js"
+        ],
+        "verification": "TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-policy.js; TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-server.js"
+      },
+      "assignee": "codex",
+      "blocker_reason": null
+    },
+    {
+      "dependencies": [
+        "guardrail-mcp-template-subtools-contract"
+      ],
+      "id": "guardrail-mcp-template-subtools-policy",
+      "title": "Map template subtools to grant policy",
+      "goal": "Teach delegated policy evaluation to authorize the parent template tool by subtool/action while preserving all existing template allowlists, input constraints, env constraints, hash checks, and approval modes.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "related": [
+        "guardrail-mcp-recipes-templates",
+        "guardrail-mcp-elicitation-policy"
+      ],
+      "references": [
+        "src/delegated-policy.js:171",
+        "src/delegated-policy.js:179",
+        "src/delegated-policy.js:353",
+        "src/delegated-tool-evaluators.js:134"
+      ],
+      "definition_of_done": [
+        "Grant status advertises the parent template tool and subtool/action capabilities clearly.",
+        "Policy accepts only delegated template subtools/actions and denies unknown actions fail-closed.",
+        "Describe/prepare/request-approval actions use discovery policy and never execute templates.",
+        "Run action uses existing template execution policy including env_allow constraints, template_hash matching, host_elicitation, and approval_request_id fallback.",
+        "Policy tests cover allowed and denied parent-tool subtools without regressing legacy template tool behavior."
+      ],
+      "constraints": [
+        "Do not let a parent-tool action bypass template name allowlists, input constraints, env constraints, or configured hash checks.",
+        "Do not treat host elicitation as arbitrary shell approval."
+      ],
+      "expected_changes": [
+        "src/delegated-policy.js",
+        "src/delegated-tool-evaluators.js",
+        "tests/test-mcp-policy.js"
+      ],
+      "allowed_paths": [
+        "src/delegated-policy.js",
+        "src/delegated-tool-evaluators.js",
+        "tests/test-mcp-policy.js"
+      ],
+      "assignee": "codex",
+      "blocker_reason": null,
+      "comment": "Parent template action policy landed: grant status advertises action capabilities and evaluator maps describe/prepare/request_approval/run through existing template constraints and approval modes.",
+      "context": {
+        "files_touched": [
+          "src/delegated-policy.js",
+          "src/delegated-tool-evaluators.js",
+          "tests/test-mcp-policy.js"
+        ],
+        "verification": "TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-policy.js; TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-server.js",
+        "notes": "Policy rejects unknown parent actions and action-inappropriate fields fail-closed; run action preserves template_hash, env_allow, host_elicitation, and approval_request_id handling."
+      }
+    },
+    {
+      "dependencies": [
+        "guardrail-mcp-template-subtools-contract",
+        "guardrail-mcp-template-subtools-policy"
+      ],
+      "id": "guardrail-mcp-template-subtools-runtime",
+      "title": "Dispatch template subtools in runtime",
+      "goal": "Implement runtime dispatch for the parent template MCP tool so each subtool/action routes to the same describe, prepare, approval request, and run implementations used by the existing template tools.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "related": [
+        "guardrail-mcp-recipes-templates",
+        "guardrail-mcp-elicitation-runtime"
+      ],
+      "references": [
+        "src/mcp-tools.js:64",
+        "src/mcp-runtime.js:954",
+        "src/mcp-runtime.js:957",
+        "src/mcp-server.js:36"
+      ],
+      "definition_of_done": [
+        "MCP tools/list exposes the parent template tool with subtool/action schema and useful descriptions.",
+        "Runtime dispatch routes describe, prepare, request approval, and run subtools to existing implementation paths without duplicating business logic.",
+        "Run subtool preserves server.elicitInput host approval wiring and approval_request_id compatibility.",
+        "Unknown or malformed subtool/action requests return structured fail-closed errors with correction hints.",
+        "Legacy separate template tools either still work as aliases or follow the explicit compatibility decision from the contract task."
+      ],
+      "constraints": [
+        "Keep runtime transport-neutral except for the existing callContext elicitation callback.",
+        "Do not change recipe tool behavior as part of this template-only slice."
+      ],
+      "expected_changes": [
+        "src/mcp-tools.js",
+        "src/mcp-runtime.js",
+        "src/mcp-server.js"
+      ],
+      "allowed_paths": [
+        "src/mcp-tools.js",
+        "src/mcp-runtime.js",
+        "src/mcp-server.js"
+      ],
+      "assignee": "codex",
+      "blocker_reason": null,
+      "comment": "Runtime dispatch landed: parent `guardrail_template` action dispatch routes describe/prepare/request_approval/run into existing template implementations and approval paths.",
+      "context": {
+        "files_touched": [
+          "src/mcp-tools.js",
+          "src/mcp-runtime.js",
+          "src/mcp-server.js",
+          "tests/test-mcp-server.js"
+        ],
+        "verification": "TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-policy.js; TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-server.js",
+        "notes": "Malformed parent action arguments fail closed through policy/runtime correction hints; legacy template tools remain callable aliases."
+      }
+    },
+    {
+      "dependencies": [
+        "guardrail-mcp-template-subtools-runtime"
+      ],
+      "id": "guardrail-mcp-template-subtools-tests",
+      "title": "Cover template subtool MCP behavior",
+      "goal": "Add focused MCP SDK and policy tests proving the parent template tool subtools are discoverable, authorized, routed correctly, and fail closed under invalid input or approval conditions.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "related": [
+        "guardrail-mcp-recipes-templates",
+        "guardrail-mcp-elicitation-tests"
+      ],
+      "references": [
+        "tests/test-mcp-policy.js:100",
+        "tests/test-mcp-policy.js:168",
+        "tests/test-mcp-server.js:247",
+        "tests/test-mcp-server.js:370",
+        "tests/test-mcp-server.js:606"
+      ],
+      "definition_of_done": [
+        "Policy tests cover parent template tool describe/prepare/request approval/run subtools under delegated grants.",
+        "Server tests prove tools/list exposes the parent tool and its action schema.",
+        "Server tests prove prepare and run subtools route through existing template simulation/supervisor behavior.",
+        "Tests cover host elicitation accepted, declined, unavailable, and malformed paths for the run subtool or prove these existing shared paths are reused exactly.",
+        "Tests cover invalid/unknown subtool/action fail-closed behavior.",
+        "Focused MCP policy/server tests pass."
+      ],
+      "constraints": [
+        "Use official MCP SDK client/server path where practical.",
+        "Keep tests local-only and avoid network egress.",
+        "Do not rely on raw shell approval prompts in unit tests."
+      ],
+      "expected_changes": [
+        "tests/test-mcp-policy.js",
+        "tests/test-mcp-server.js"
+      ],
+      "allowed_paths": [
+        "tests/test-mcp-policy.js",
+        "tests/test-mcp-server.js"
+      ],
+      "assignee": "codex",
+      "blocker_reason": null,
+      "comment": "Parent template action coverage landed: policy and server tests cover discovery, grant status, delegated authorization, parent action dispatch, CLI approval fallback, host elicitation reuse, stale grant inventory separation, and fail-closed invalid action behavior. Verification: `TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-policy.js tests/test-mcp-server.js` passed 29/29 tests across 2 suites.",
+      "context": {
+        "files_touched": [
+          "tests/test-mcp-policy.js",
+          "tests/test-mcp-server.js"
+        ],
+        "verification": [
+          "TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-policy.js tests/test-mcp-server.js -> pass 29, fail 0, suites 2"
+        ],
+        "subagent_evidence": [
+          "Copernicus audited template subtool gaps before implementation.",
+          "McClintock audited grant status callable-vs-stale inventory gaps before implementation."
+        ],
+        "dod_evidence": [
+          "Policy tests cover parent guardrail_template action grants for prepare/run and invalid action denial.",
+          "Server tests cover tools/list and SDK discovery for guardrail_template action schema.",
+          "Server tests cover parent describe/prepare/request_approval/run dispatch through existing paths.",
+          "Host elicitation accepted/declined/unavailable/malformed shared paths remain covered, with parent run on accepted path.",
+          "Invalid unknown parent actions fail closed with correction hints."
+        ]
+      }
+    },
+    {
+      "dependencies": [
+        "guardrail-mcp-template-subtools-runtime"
+      ],
+      "id": "guardrail-mcp-template-subtools-docs",
+      "title": "Document template subtool workflow",
+      "goal": "Update agent-facing docs and help text so agents know to use the parent template tool subtools, understand compatibility with existing template tool names, and retain the approval/fail-closed workflow.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p1"
+      },
+      "related": [
+        "guardrail-mcp-recipes-templates",
+        "guardrail-mcp-elicitation-docs"
+      ],
+      "references": [
+        "README.md:1057",
+        "README.md:1067",
+        "AGENTS.md:56",
+        "src/delegated-policy.js:293"
+      ],
+      "definition_of_done": [
+        "README shows the parent template tool and subtools/actions with a short prepare/run example.",
+        "AGENTS.md guidance tells agents to inspect grant status and use template subtools within advertised policy.",
+        "Grant status/help text describes parent-tool subtools, approval_request_id fallback, host elicitation requirement, and fail-closed behavior.",
+        "Docs state the compatibility behavior for legacy separate template tools.",
+        "Docs do not instruct users to bypass Guardrail with raw shell, raw Git, or hand-edited grant files."
+      ],
+      "constraints": [
+        "Keep docs short and operational.",
+        "Do not present deprecated tool names as preferred if the new parent tool is the intended surface."
+      ],
+      "expected_changes": [
+        "README.md",
+        "AGENTS.md",
+        "src/delegated-policy.js",
+        "docs/technical-status.md"
+      ],
+      "allowed_paths": [
+        "README.md",
+        "AGENTS.md",
+        "src/delegated-policy.js",
+        "docs/technical-status.md"
+      ],
+      "assignee": "codex",
+      "blocker_reason": null,
+      "comment": "Agent-facing docs now prefer the parent `guardrail_template` action surface, document legacy aliases, grant-status callable inventory, approval_request_id fallback, host elicitation, and fail-closed behavior. Verification: focused MCP policy/server tests passed after docs/help updates.",
+      "context": {
+        "files_touched": [
+          "README.md",
+          "AGENTS.md",
+          "src/delegated-policy.js",
+          "docs/technical-status.md"
+        ],
+        "verification": [
+          "TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-policy.js tests/test-mcp-server.js -> pass 29, fail 0, suites 2"
+        ],
+        "dod_evidence": [
+          "README lists parent guardrail_template actions and includes short prepare/run example.",
+          "AGENTS.md tells agents to inspect callable grant inventory and not treat grantOnlyTools as callable.",
+          "Grant status help text describes parent actions, compatibility aliases, host approval, approval_request_id fallback, and fail-closed guidance.",
+          "Technical status records parent template rollout and stale grant inventory separation.",
+          "Docs continue to direct agents through Guardrail MCP/recipes rather than raw shell or raw Git bypasses."
+        ]
+      }
+    },
+    {
+      "dependencies": [
+        "guardrail-mcp-template-subtools-tests",
+        "guardrail-mcp-template-subtools-docs"
+      ],
+      "id": "guardrail-mcp-template-subtools-verify",
+      "title": "Verify template subtool rollout",
+      "goal": "Run focused checks and close the template-subtools rollout only after code, policy, tests, docs, and tracker evidence match the intended parent-tool behavior.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "related": [
+        "guardrail-mcp-recipes-templates"
+      ],
+      "references": [
+        "tests/test-mcp-server.js:1",
+        "tests/test-mcp-policy.js:1"
+      ],
+      "definition_of_done": [
+        "Focused MCP server tests pass.",
+        "Focused MCP policy tests pass.",
+        "Relevant syntax checks pass for changed source files.",
+        "Tracker records files touched and verification evidence.",
+        "Final summary states the parent template tool name, subtools/actions, compatibility behavior, and host approval requirements."
+      ],
+      "constraints": [
+        "Do not mark complete if tests cannot run or if approval fail-closed behavior is untested or unproven.",
+        "Do not leave compatibility behavior ambiguous."
+      ],
+      "expected_changes": [
+        ".llm-tracker/trackers/guardrail-roadmap.json"
+      ],
+      "allowed_paths": [
+        ".llm-tracker/trackers/guardrail-roadmap.json",
+        "src/mcp-tools.js",
+        "src/mcp-runtime.js",
+        "src/delegated-policy.js",
+        "src/delegated-tool-evaluators.js",
+        "tests/test-mcp-policy.js",
+        "tests/test-mcp-server.js",
+        "README.md",
+        "AGENTS.md",
+        "docs/technical-status.md"
+      ],
+      "assignee": "codex",
+      "comment": "Template subtool rollout verified complete. Parent `guardrail_template` supports `describe`, `prepare`, `request_approval`, and `run`; legacy template-specific tools remain callable aliases; unpinned runs require MCP host elicitation or an approved CLI `approval_request_id` and fail closed otherwise. Focused policy/server tests and syntax checks passed.",
+      "context": {
+        "verification_started_at": "2026-05-26T00:23:57Z",
+        "files_touched": [
+          "src/mcp-tools.js",
+          "src/mcp-runtime.js",
+          "src/delegated-policy.js",
+          "src/delegated-tool-evaluators.js",
+          "tests/test-mcp-policy.js",
+          "tests/test-mcp-server.js",
+          "README.md",
+          "AGENTS.md",
+          "docs/technical-status.md",
+          ".llm-tracker/trackers/guardrail-roadmap.json"
+        ],
+        "verification": [
+          "TPF_LLM_TOOL=codex tpf node --check src/mcp-tools.js -> pass",
+          "TPF_LLM_TOOL=codex tpf node --check src/mcp-runtime.js -> pass",
+          "TPF_LLM_TOOL=codex tpf node --check src/delegated-policy.js -> pass",
+          "TPF_LLM_TOOL=codex tpf node --check src/delegated-tool-evaluators.js -> pass",
+          "TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-policy.js tests/test-mcp-server.js -> pass 29, fail 0, suites 2"
+        ],
+        "parent_template_tool": {
+          "name": "guardrail_template",
+          "actions": [
+            "describe",
+            "prepare",
+            "request_approval",
+            "run"
+          ],
+          "legacy_aliases": [
+            "guardrail_template_describe",
+            "guardrail_template_prepare",
+            "guardrail_template_request_approval",
+            "guardrail_run_template"
+          ],
+          "approval_requirements": "Pinned runs require matching template_hash; otherwise run requires MCP host form elicitation approval or an already approved CLI approval_request_id; declined, unavailable, malformed, or invalid approval fails closed before supervisor execution."
+        },
+        "grant_status_inventory": {
+          "callable_inventory": "grant.tools and grant.toolInventory.callableTools are actionable.",
+          "stale_inventory": "grant.toolInventory.grantOnlyTools identifies stale grant declarations that are not exposed by tools/list and are not callable."
+        },
+        "dod_evidence": [
+          "Focused MCP server tests pass.",
+          "Focused MCP policy tests pass.",
+          "Syntax checks pass for changed source files.",
+          "Tracker rows record files touched and verification evidence.",
+          "Final summary will state parent tool name, actions, compatibility behavior, and host approval requirements."
+        ]
+      }
+    },
+    {
+      "dependencies": [
+        "guardrail-mcp-template-subtools-contract"
+      ],
+      "id": "guardrail-mcp-tool-inventory-grant-status",
+      "title": "Align grant status with MCP tool inventory",
+      "goal": "Make guardrail_grant_status report only actionable MCP tools, or clearly separate unsupported/stale grant entries from callable server tools, so agents do not infer that grant-declared but unexposed tools like guardrail_git_* are available.",
+      "status": "complete",
+      "placement": {
+        "swimlaneId": "enterprise",
+        "priorityId": "p0"
+      },
+      "related": [
+        "guardrail-mcp-recipes-templates",
+        "guardrail-mcp-template-subtools-policy"
+      ],
+      "references": [
+        "src/mcp-tools.js:32",
+        "src/delegated-policy.js:292",
+        "tests/test-mcp-policy.js:102",
+        "tests/test-mcp-server.js:213",
+        "docs/technical-status.md:12"
+      ],
+      "definition_of_done": [
+        "guardrail_grant_status distinguishes callable MCP tools from grant-declared entries that are not in tools/list, or filters unsupported entries from the actionable tools list.",
+        "Grant status does not present guardrail_git_* entries as delegated callable tools when the MCP server catalog does not expose them.",
+        "Agents still receive correction guidance for denied recipe/template discovery when the active grant omits those tools.",
+        "Tests cover a grant containing stale guardrail_git_* entries and prove tools/list and grant status do not contradict each other.",
+        "Docs or help text explain that recipes are the supported path for Git workflows, not git-named MCP tools."
+      ],
+      "constraints": [
+        "Do not reintroduce git-named MCP tools.",
+        "Do not silently grant recipe/template discovery when the active grant omits it.",
+        "Do not edit operator grant files as part of code verification."
+      ],
+      "expected_changes": [
+        "src/delegated-policy.js",
+        "src/mcp-tools.js",
+        "tests/test-mcp-policy.js",
+        "tests/test-mcp-server.js",
+        "README.md",
+        "docs/technical-status.md"
+      ],
+      "allowed_paths": [
+        "src/delegated-policy.js",
+        "src/mcp-tools.js",
+        "tests/test-mcp-policy.js",
+        "tests/test-mcp-server.js",
+        "README.md",
+        "docs/technical-status.md"
+      ],
+      "assignee": "codex",
+      "blocker_reason": null,
+      "comment": "Grant status now reports callable tools separately from grant-only stale entries, and filters capabilities to actual MCP tools/list inventory.",
+      "context": {
+        "files_touched": [
+          "src/delegated-policy.js",
+          "src/mcp-tools.js",
+          "tests/test-mcp-policy.js",
+          "tests/test-mcp-server.js",
+          "README.md",
+          "AGENTS.md",
+          "docs/technical-status.md"
+        ],
+        "verification": "TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-policy.js; TPF_LLM_TOOL=codex tpf node --test tests/test-mcp-server.js",
+        "notes": "`tools`/`toolInventory.callableTools` are actionable; `toolInventory.grantOnlyTools` exposes stale entries such as guardrail_git_* without advertising them as callable."
       }
     }
   ]

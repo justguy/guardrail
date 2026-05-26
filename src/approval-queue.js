@@ -16,11 +16,18 @@ export function createApprovalRequest(opts) {
     id:            opts.id || randomBytes(8).toString('hex'),
     status:        'pending',
     recipe_id:     opts.recipeId ?? null,
+    template_name: opts.templateName ?? null,
+    kind:          opts.kind ?? 'generic',
+    tool:          opts.tool ?? null,
+    agent:         opts.agent ?? null,
+    repo_path:     opts.repoPath ?? null,
     command:       opts.command ?? null,
     risk_level:    opts.riskLevel ?? 'medium',
     requester:     opts.requester ?? 'unknown',
     execution_plan: opts.executionPlan ?? [],
     diff_preview:  opts.diffPreview ?? null,
+    payload:       opts.payload ?? null,
+    expires_at:    opts.expiresAt ?? null,
     created_at:    new Date().toISOString(),
     updated_at:    new Date().toISOString(),
     approvals:     [],
@@ -149,8 +156,12 @@ export function currentStage(chain) {
  */
 export function formatRequest(req) {
   const lines = [];
-  lines.push(`[${req.id}] ${req.status.toUpperCase()} — ${req.recipe_id || req.command || 'unknown'}`);
+  lines.push(`[${req.id}] ${req.status.toUpperCase()} — ${req.recipe_id || req.template_name || req.command || 'unknown'}`);
   lines.push(`  Risk: ${req.risk_level}  Requester: ${req.requester}  Created: ${req.created_at}`);
+  if (req.kind && req.kind !== 'generic') lines.push(`  Kind: ${req.kind}`);
+  if (req.tool) lines.push(`  Tool: ${req.tool}`);
+  if (req.repo_path) lines.push(`  Repo: ${req.repo_path}`);
+  if (req.expires_at) lines.push(`  Expires: ${req.expires_at}`);
   if (req.chain) {
     const stage = currentStage(req.chain) || 'complete';
     lines.push(`  Chain: ${req.chain.stages.join(' → ')}  Current: ${stage}`);

@@ -35,7 +35,9 @@ export function createGuardrailMcpSdkServer(options = {}) {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const params = request.params || {};
-    return await runtime.callTool(params.name, params.arguments || {});
+    return await runtime.callTool(params.name, params.arguments || {}, {
+      elicitInput: (elicitationParams, requestOptions) => server.elicitInput(elicitationParams, requestOptions),
+    });
   });
 
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));

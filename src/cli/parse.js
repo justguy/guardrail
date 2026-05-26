@@ -346,6 +346,12 @@ export function parseArgs(argv) {
     while (i < argv.length) {
       if (argv[i] === '--reject') { result.approveOpts.action = 'reject'; i++; continue; }
       if (argv[i] === '--json') { result.json = true; i++; continue; }
+      if (argv[i] === '--state-dir') {
+        i++;
+        if (i >= argv.length) return { error: 'usage' };
+        result.approveOpts.stateDir = argv[i++];
+        continue;
+      }
       return { error: 'usage' };
     }
     return result;
