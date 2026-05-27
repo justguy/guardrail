@@ -58,9 +58,9 @@
         "label": "P3"
       }
     ],
-    "scratchpad": "Completed parent-template runtime dispatch. Tests/docs rows are now unblocked; focused MCP policy/server tests are green.",
-    "rev": 82,
-    "updatedAt": "2026-05-26T00:25:23.437Z"
+    "scratchpad": "rbaa-auth-000 completed on feature/rbaa-auth-000: RBAA/Auth plan repaired; implementation remains gated by sign-off, tests, envelope enforcement, and identity readiness.",
+    "rev": 83,
+    "updatedAt": "2026-05-26T22:13:40.413Z"
   },
   "tasks": [
     {
@@ -736,7 +736,7 @@
       "id": "flight-recorder-audit-trail",
       "title": "Flight Recorder audit trail and explainability surface",
       "goal": "Close the gap between the current hash-chained audit/query surface and a compliance-grade flight recorder that can explain what each agent requested, how Guardrail resolved it, why it was allowed/required approval/blocked, what actually ran, what output was produced, and what files/resources changed.",
-      "status": "in_progress",
+      "status": "not_started",
       "placement": {
         "swimlaneId": "enterprise",
         "priorityId": "p1"
