@@ -1,0 +1,93 @@
+{
+  "id": "git-force-push-safe",
+  "name": "Git Force Push (Lease-Bound)",
+  "description": "Force push the current HEAD to an explicit topic branch with --force-with-lease and explicit remote-head validation.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "guardrail_repo": {
+      "type": "string",
+      "description": "Path to the Guardrail checkout that contains the force-push wrapper",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 8
+      }
+    },
+    "repo_path": {
+      "type": "string",
+      "description": "Relative path to the target git repository",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "remote": {
+      "type": "string",
+      "description": "Git remote name",
+      "enum": ["origin"]
+    },
+    "branch": {
+      "type": "string",
+      "description": "Feature-style destination branch name",
+      "pattern": "^(feature|bugfix|chore|docs|refactor|test|ci)\\/[A-Za-z0-9._/-]{1,96}$"
+    },
+    "expected_head": {
+      "type": "string",
+      "description": "Expected local HEAD SHA (full or abbreviated) before pushing",
+      "pattern": "^[0-9a-fA-F]{7,40}$"
+    },
+    "expected_remote_oid": {
+      "type": "string",
+      "description": "Expected full remote branch oid for --force-with-lease",
+      "pattern": "^[0-9a-fA-F]{40}$"
+    }
+  },
+  "steps": [
+    {
+      "id": "push",
+      "description": "Validate lease preconditions and push current HEAD with --force-with-lease.",
+      "run": {
+        "command": "node",
+        "args": [
+          "{{bundled_wrapper.git_force_push_safe}}",
+          "--repo-path", "{{inputs.repo_path}}",
+          "--remote", "{{inputs.remote}}",
+          "--branch", "{{inputs.branch}}",
+          "--expected-head", "{{inputs.expected_head}}",
+          "--expected-remote-oid", "{{inputs.expected_remote_oid}}"
+        ],
+        "mode": "structured"
+      },
+      "idempotent": false
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Only --force-with-lease is used for force-push",
+      "remote is fixed to origin",
+      "branch must be an explicit topic branch and cannot be protected",
+      "The wrapper requires expected_head and expected_remote_oid for lease safety",
+      "The wrapper validates current HEAD and current remote branch OID before push"
+    ],
+    "invariants": [
+      "The recipe only performs one bounded git push invocation via the bundled wrapper",
+      "A lease token mismatch fails before push side effects",
+      "Detached-head and upstream branch mismatch are blocked before push"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "git",
+  "tags": ["git", "push", "branch", "force-with-lease"],
+  "channel": "verified",
+  "signature": null
+}

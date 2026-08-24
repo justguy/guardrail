@@ -1,0 +1,42 @@
+{
+  "id": "dep-upgrade-safe",
+  "name": "Safe Dependency Upgrade",
+  "description": "Upgrade dependencies within patch range only.",
+  "version": "1.0.0",
+  "author": "test-team",
+  "category": "packages",
+  "tags": ["upgrade", "patch"],
+  "channel": "verified",
+  "inputs": {
+    "scope": {
+      "type": "string",
+      "enum": ["patch", "minor"]
+    }
+  },
+  "steps": [
+    {
+      "id": "check-outdated",
+      "description": "Check for outdated packages",
+      "run": {
+        "command": "npm",
+        "args": ["outdated", "--json"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "update",
+      "description": "Update packages",
+      "run": {
+        "command": "npm",
+        "args": ["update"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": ["patch/minor scope only"],
+    "invariants": ["no major bumps"]
+  },
+  "approval_required": false,
+  "risk_level": "medium"
+}

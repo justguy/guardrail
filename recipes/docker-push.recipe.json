@@ -1,0 +1,46 @@
+{
+  "id": "docker-push",
+  "name": "Docker Push",
+  "description": "Push an explicit container image reference to a bounded registry destination.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "image": {
+      "type": "string",
+      "description": "Container image reference including registry and tag",
+      "pattern": "^[a-z0-9.-]+(?:/[a-z0-9._-]+)+:[A-Za-z0-9._-]{1,80}$"
+    }
+  },
+  "steps": [
+    {
+      "id": "push",
+      "description": "Push the Docker image to the approved registry destination",
+      "run": {
+        "command": "docker",
+        "args": ["push", "{{inputs.image}}"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "The image reference must include an explicit registry host and tag",
+      "No extra docker flags or alternate subcommands are allowed",
+      "Approval binds the exact pushed image reference"
+    ],
+    "invariants": [
+      "The recipe only performs docker push",
+      "No implicit public-registry fallback without an explicit host is possible",
+      "Structured argv prevents hidden shell expansion"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "packages",
+  "tags": ["docker", "container", "push"],
+  "channel": "verified",
+  "signature": null
+}

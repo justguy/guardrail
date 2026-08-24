@@ -1,0 +1,61 @@
+{
+  "id": "git-branch-cleanup",
+  "name": "Git Branch Cleanup",
+  "description": "List and delete local branches that have already been merged into the default branch.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "repo_path": {
+      "type": "string",
+      "description": "Path to the git repository",
+      "pattern": "^[a-zA-Z0-9_./-]+$"
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "If true, only list branches that would be deleted without actually deleting them",
+      "default": true
+    }
+  },
+  "steps": [
+    {
+      "id": "list-merged",
+      "description": "List all local branches that have been merged into the default branch",
+      "run": {
+        "command": "git",
+        "args": ["-C", "{{inputs.repo_path}}", "branch", "--merged", "HEAD"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "delete-merged",
+      "description": "Delete the merged branches (skipped if dry_run is true)",
+      "skip_if": "{{inputs.dry_run}}",
+      "run": {
+        "command": "git",
+        "args": ["-C", "{{inputs.repo_path}}", "branch", "-d"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Never delete the default branch (main, master, or configured default)",
+      "Only branches fully merged into HEAD are eligible for deletion",
+      "Preview the list of branches before any deletion occurs"
+    ],
+    "invariants": [
+      "No unmerged branch is ever deleted",
+      "Default branch is always preserved regardless of input",
+      "Dry run mode never modifies any branch state"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "git",
+  "tags": ["git", "cleanup", "branches"],
+  "channel": "verified",
+  "signature": null
+}

@@ -1,0 +1,46 @@
+{
+  "id": "openclaw-safe-edit",
+  "name": "OpenClaw Safe Edit",
+  "description": "Run an OpenClaw-style edit task within bounded scope.",
+  "version": "1.0.0",
+  "author": "test-team",
+  "category": "openclaw",
+  "tags": ["agent", "bounded", "edit"],
+  "channel": "community",
+  "inputs": {
+    "target_file": {
+      "type": "string",
+      "pattern": "^src/[a-zA-Z0-9_/-]+\\.(js|ts)$"
+    },
+    "task": {
+      "type": "string",
+      "enum": ["lint-fix", "format", "add-types"]
+    }
+  },
+  "steps": [
+    {
+      "id": "edit",
+      "description": "Apply bounded edit",
+      "run": {
+        "command": "node",
+        "args": ["scripts/openclaw-edit.js", "{{inputs.target_file}}", "--task", "{{inputs.task}}"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "verify",
+      "description": "Verify edit result",
+      "run": {
+        "command": "node",
+        "args": ["scripts/verify-edit.js", "{{inputs.target_file}}"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": ["src/ directory only", "approved tasks only"],
+    "invariants": ["no shell execution", "scope bounded"]
+  },
+  "approval_required": false,
+  "risk_level": "medium"
+}

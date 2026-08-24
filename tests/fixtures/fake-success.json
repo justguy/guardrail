@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "kind": "workflow_definition",
+  "name": "stress-fake-success",
+  "projectRoot": ".",
+  "entryStep": "flaky_test",
+  "maxIterations": 1,
+  "services": [],
+  "steps": [
+    {
+      "id": "flaky_test",
+      "type": "task",
+      "run": {
+        "command": "npm",
+        "args": ["run", "flaky-tests"],
+        "cwd": ".",
+        "mode": "structured"
+      },
+      "validator": "exit_code",
+      "on": {
+        "success": "done",
+        "validation_failed": "done"
+      }
+    }
+  ]
+}

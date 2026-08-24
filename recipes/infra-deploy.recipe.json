@@ -1,0 +1,69 @@
+{
+  "id": "infra-deploy",
+  "name": "Infrastructure Deploy",
+  "description": "Validate, plan, and apply infrastructure changes using Terraform, scoped to a specific environment.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "environment": {
+      "type": "string",
+      "description": "Target deployment environment",
+      "enum": ["staging", "production"]
+    },
+    "config_path": {
+      "type": "string",
+      "description": "Path to the Terraform configuration directory",
+      "pattern": "^[a-zA-Z0-9_./-]+$"
+    }
+  },
+  "steps": [
+    {
+      "id": "validate",
+      "description": "Validate the Terraform configuration for syntax and internal consistency",
+      "run": {
+        "command": "terraform",
+        "args": ["-chdir={{inputs.config_path}}", "validate"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "plan",
+      "description": "Generate an execution plan showing what changes will be applied",
+      "run": {
+        "command": "terraform",
+        "args": ["-chdir={{inputs.config_path}}", "plan", "-var", "environment={{inputs.environment}}", "-out=tfplan"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "apply",
+      "description": "Apply the planned infrastructure changes to the target environment",
+      "run": {
+        "command": "terraform",
+        "args": ["-chdir={{inputs.config_path}}", "apply", "tfplan"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "All changes are scoped to the declared environment only",
+      "Production deploys require explicit human approval at the apply step",
+      "Plan output must be reviewed before apply executes"
+    ],
+    "invariants": [
+      "No cross-environment resource modification is possible",
+      "The apply step only executes the exact plan generated in the plan step",
+      "Terraform state is never manually edited or bypassed"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "infra",
+  "tags": ["deploy", "infrastructure", "terraform"],
+  "channel": "verified",
+  "signature": null
+}

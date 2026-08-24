@@ -1,0 +1,80 @@
+{
+  "id": "npm-install",
+  "name": "NPM Install",
+  "description": "Run a lockfile-bound npm ci with scripts disabled through a bundled wrapper.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "guardrail_repo": {
+      "type": "string",
+      "description": "Path to the Guardrail checkout that contains the npm install wrapper helper",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 8
+      }
+    },
+    "package_dir": {
+      "type": "string",
+      "description": "Relative path to the package directory containing package.json",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 8
+      }
+    },
+    "lockfile": {
+      "type": "string",
+      "description": "Relative path to package-lock.json or npm-shrinkwrap.json. File contents are content-hash bound at approval time.",
+      "approval_mode": "path_policy",
+      "content_hash": true,
+      "base_dir_input": "package_dir",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "allowed_extensions": [".json"],
+        "max_depth": 4
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "run-npm-ci",
+      "description": "Run npm ci with scripts disabled against the approved package_dir and lockfile",
+      "run": {
+        "command": "node",
+        "args": [
+          "{{bundled_wrapper.npm_install_safe}}",
+          "--package-dir", "{{inputs.package_dir}}",
+          "--lockfile", "{{inputs.lockfile}}"
+        ],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Execution is fixed to npm ci with --ignore-scripts, --audit=false, and --fund=false",
+      "The approved lockfile content is content-hash bound at approval time",
+      "No extra registries, tags, or arbitrary npm flags are allowed through this recipe"
+    ],
+    "invariants": [
+      "Only package-lock.json or npm-shrinkwrap.json are accepted as the lockfile",
+      "The lockfile must live inside package_dir",
+      "The recipe never runs npm install or any postinstall/build scripts"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "packages",
+  "tags": ["packages", "npm", "install", "lockfile"],
+  "channel": "verified",
+  "signature": null
+}

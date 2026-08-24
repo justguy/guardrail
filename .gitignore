@@ -1,0 +1,17 @@
+node_modules/
+.guardrail/
+.llm-tracker/
+.agents/
+.claude/backups/
+.claude/projects/
+.claude/sessions/
+.claude/telemetry/
+.claude/worktrees/
+.claude/.claude.json
+sessions/
+projects/
+mcp-needs-auth-cache.json
+/a.txt
+/msg.txt
+*.log
+.DS_Store

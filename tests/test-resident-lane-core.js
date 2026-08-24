@@ -1,0 +1,207 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+import {
+  getResidentLaneStatus,
+  getResidentLaneTimeline,
+  lanePaths,
+  listResidentLanes,
+  residentLanePortfolioAuditPath,
+  runResidentLaneRequest,
+} from '../src/resident-lane-core.js';
+import { createAuditLog } from '../src/audit.js';
+
+function tmpLaneDir() {
+  return mkdtempSync(join(tmpdir(), 'gr-lane-core-'));
+}
+
+describe('Resident lane core', () => {
+  it('runs a non-Claude adapter through the generic request contract', async () => {
+    const adapter = {
+      adapterId: 'echo',
+      async runRequest(options, request, state) {
+        return {
+          requestId: request.id,
+          prompt: request.prompt,
+          lifecycle: state.startedConversation ? 'continue' : 'start',
+          ok: true,
+          exitCode: 0,
+          stdout: `${options.prefix}:${request.prompt.toUpperCase()}\n`,
+          stderr: '',
+          startedAt: '2026-04-10T00:00:00.000Z',
+          completedAt: '2026-04-10T00:00:01.000Z',
+        };
+      },
+    };
+
+    const result = await runResidentLaneRequest(
+      adapter,
+      { adapterId: 'echo', prefix: 'ECHO' },
+      { id: 'req-1', prompt: 'hello' },
+      { startedConversation: false },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.lifecycle, 'start');
+    assert.equal(result.stdout, 'ECHO:HELLO\n');
+  });
+
+  it('surfaces adapter identity through status and lane listing', () => {
+    const dir = tmpLaneDir();
+    const laneDir = join(dir, '.guardrail', 'lanes', 'echo-live');
+    mkdirSync(laneDir, { recursive: true });
+    const paths = lanePaths(laneDir);
+
+    writeFileSync(paths.identityPath, JSON.stringify({
+      adapterId: 'echo',
+      laneId: 'echo-live',
+      laneDir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-echo',
+    }), 'utf8');
+    writeFileSync(paths.statePath, JSON.stringify({
+      adapterId: 'echo',
+      pid: 12345,
+      status: 'failed',
+      laneId: 'echo-live',
+      sessionName: 'echo-live',
+      failureReason: 'boom',
+      failureStage: 'runtime',
+    }), 'utf8');
+
+    const status = getResidentLaneStatus({ guardrailRepo: dir, laneDir });
+    const listing = listResidentLanes({ guardrailRepo: dir });
+
+    assert.equal(status.adapterId, 'echo');
+    assert.equal(listing.lanes.length, 1);
+    assert.equal(listing.lanes[0].adapterId, 'echo');
+  });
+
+  it('surfaces overlapping scope conflicts in lane status and list output', () => {
+    const dir = tmpLaneDir();
+    const lanesDir = join(dir, '.guardrail', 'lanes');
+    const laneADir = join(lanesDir, 'lane-a');
+    const laneBDir = join(lanesDir, 'lane-b');
+    mkdirSync(laneADir, { recursive: true });
+    mkdirSync(laneBDir, { recursive: true });
+    const pathsA = lanePaths(laneADir);
+    const pathsB = lanePaths(laneBDir);
+
+    writeFileSync(pathsA.identityPath, JSON.stringify({
+      adapterId: 'claude',
+      laneId: 'lane-a',
+      laneDir: laneADir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-a',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['src'],
+    }), 'utf8');
+    writeFileSync(pathsB.identityPath, JSON.stringify({
+      adapterId: 'codex',
+      laneId: 'lane-b',
+      laneDir: laneBDir,
+      guardrailRepo: dir,
+      identityNonce: 'nonce-b',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: ['src/utils'],
+    }), 'utf8');
+    writeFileSync(pathsA.statePath, JSON.stringify({
+      adapterId: 'claude',
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'lane-a',
+      sessionName: 'lane-a',
+      scopeType: 'paths',
+      scopeMode: 'warn',
+      scopePaths: ['src'],
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+    writeFileSync(pathsB.statePath, JSON.stringify({
+      adapterId: 'codex',
+      pid: process.pid,
+      status: 'ready',
+      laneId: 'lane-b',
+      sessionName: 'lane-b',
+      scopeType: 'paths',
+      scopeMode: 'block',
+      scopePaths: ['src/utils'],
+      lastActivityAt: new Date().toISOString(),
+    }), 'utf8');
+
+    const status = getResidentLaneStatus({ guardrailRepo: dir, laneDir: laneADir });
+    const listing = listResidentLanes({ guardrailRepo: dir });
+
+    assert.equal(status.scopeType, 'paths');
+    assert.deepEqual(status.scopePaths, ['src']);
+    assert.equal(status.scopeConflicts.length, 1);
+    assert.equal(status.scopeConflicts[0].laneId, 'lane-b');
+    assert.equal(status.scopeConflicts[0].enforcement, 'block');
+    assert.equal(listing.lanes.length, 2);
+    assert.equal(listing.lanes[0].scopeConflicts.length, 1);
+    assert.equal(listing.lanes[1].scopeConflicts.length, 1);
+  });
+
+  it('builds a repo or host portfolio timeline from resident-lane audit entries', () => {
+    const dir = tmpLaneDir();
+    const repoAudit = createAuditLog(join(dir, '.guardrail', 'audit.jsonl'));
+    repoAudit.append({
+      event: 'lane_start',
+      lane_id: 'repo-lane',
+      lane_dir: join(dir, '.guardrail', 'lanes', 'repo-lane'),
+      guardrail_repo: dir,
+      tool: 'claude',
+      status: 'success',
+    });
+    const hostAuditPath = residentLanePortfolioAuditPath({ hostStateDir: join(dir, '.host') });
+    const hostAudit = createAuditLog(hostAuditPath);
+    hostAudit.append({
+      event: 'lane_prune',
+      lane_id: 'host-lane',
+      lane_dir: '/tmp/host-lane',
+      guardrail_repo: '/tmp/other-repo',
+      tool: 'codex',
+      status: 'success',
+      prune_reason: 'dead_artifacts_present',
+    });
+
+    const repoTimeline = getResidentLaneTimeline({ guardrailRepo: dir });
+    const hostTimeline = getResidentLaneTimeline({ hostStateDir: join(dir, '.host'), allRepos: true });
+
+    assert.equal(repoTimeline.allRepos, false);
+    assert.equal(repoTimeline.totalMatches, 1);
+    assert.equal(repoTimeline.entries[0].lane_id, 'repo-lane');
+    assert.equal(hostTimeline.allRepos, true);
+    assert.equal(hostTimeline.totalMatches, 1);
+    assert.equal(hostTimeline.entries[0].lane_id, 'host-lane');
+    assert.equal(hostTimeline.eventCounts.lane_prune, 1);
+  });
+
+  it('includes repo-local tombstones in the repo portfolio timeline', () => {
+    const dir = tmpLaneDir();
+    const tombstoneDir = join(dir, '.guardrail', 'lane-tombstones');
+    mkdirSync(tombstoneDir, { recursive: true });
+    writeFileSync(join(tombstoneDir, 'cleanup.json'), JSON.stringify({
+      cleanedAt: '2026-04-11T00:00:00.000Z',
+      action: 'cleanup',
+      reason: 'manual_cleanup',
+      laneId: 'math-dead',
+      laneDir: join(dir, '.guardrail', 'lanes', 'math-dead'),
+      guardrailRepo: dir,
+      tool: 'claude',
+      status: 'failed',
+    }), 'utf8');
+
+    const timeline = getResidentLaneTimeline({ guardrailRepo: dir, limit: 10 });
+    assert.equal(timeline.allRepos, false);
+    assert.equal(timeline.totalMatches, 1);
+    assert.equal(timeline.entries[0].event, 'lane_cleanup');
+    assert.equal(timeline.entries[0].reason, 'manual_cleanup');
+    assert.ok(timeline.entries[0].tombstone_path);
+    assert.equal(timeline.summary.byEvent.lane_cleanup, 1);
+  });
+});

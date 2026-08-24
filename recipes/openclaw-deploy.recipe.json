@@ -1,0 +1,80 @@
+{
+  "id": "openclaw-deploy",
+  "name": "OpenClaw Deploy",
+  "description": "Run the fixed OpenClaw deploy flow with a bounded environment plus approved service and release manifests.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "environment": {
+      "type": "string",
+      "description": "Bounded deploy environment",
+      "enum": ["preview", "staging"]
+    },
+    "service_manifest": {
+      "type": "string",
+      "description": "Relative service manifest that defines the approved deploy target",
+      "approval_mode": "path_policy",
+      "content_hash": true,
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "allowed_extensions": [".json", ".yaml", ".yml"],
+        "max_depth": 8
+      }
+    },
+    "release_file": {
+      "type": "string",
+      "description": "Relative release or artifact manifest file bound by content hash",
+      "approval_mode": "path_policy",
+      "content_hash": true,
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "allowed_extensions": [".json", ".yaml", ".yml", ".txt"],
+        "max_depth": 8
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "run-task",
+      "description": "Run the bounded OpenClaw deploy task via the dedicated task wrapper",
+      "run": {
+        "command": "node",
+        "args": [
+          "{{bundled_wrapper.openclaw_task}}",
+          "--flow", "deploy",
+          "--scope", "write",
+          "--environment", "{{inputs.environment}}",
+          "--service-manifest", "{{inputs.service_manifest}}",
+          "--release-file", "{{inputs.release_file}}",
+          "--no-escalate"
+        ],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "The flow id is fixed to deploy",
+      "Execution is fixed to write scope with no escalation",
+      "Only preview or staging are allowed deploy environments",
+      "The deploy target and artifact are bound to approved content-hash inputs",
+      "Outputs must pass OpenClaw verification before the recipe completes"
+    ],
+    "invariants": [
+      "No alternate OpenClaw flow can be substituted at runtime",
+      "No scope other than write is allowed for this recipe",
+      "Deploy verification must refer to the same environment, service manifest, and release file tuple"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "openclaw",
+  "tags": ["openclaw", "deploy", "task-specific"],
+  "channel": "verified",
+  "signature": null
+}

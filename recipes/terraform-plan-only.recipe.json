@@ -1,0 +1,60 @@
+{
+  "id": "terraform-plan-only",
+  "name": "Terraform Plan Only",
+  "description": "Validate and plan Terraform changes without applying or destroying infrastructure.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "config_path": {
+      "type": "string",
+      "description": "Relative path to the Terraform configuration directory",
+      "approval_mode": "path_policy",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 8
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "validate",
+      "description": "Validate the Terraform configuration for syntax and internal consistency",
+      "run": {
+        "command": "terraform",
+        "args": ["-chdir={{inputs.config_path}}", "validate"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "plan",
+      "description": "Generate a Terraform execution plan without applying changes",
+      "run": {
+        "command": "terraform",
+        "args": ["-chdir={{inputs.config_path}}", "plan", "-input=false"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Only Terraform validate and plan are allowed in this recipe",
+      "The Terraform configuration path stays inside the caller-approved workspace scope",
+      "This recipe never produces an apply-ready plan artifact or mutation command"
+    ],
+    "invariants": [
+      "No terraform apply, destroy, import, or state mutation command is present",
+      "Every step runs in structured mode with deterministic terraform argv",
+      "Approval covers the exact relative Terraform configuration path"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "infra",
+  "tags": ["terraform", "plan", "infrastructure"],
+  "channel": "verified",
+  "signature": null
+}

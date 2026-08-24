@@ -1,0 +1,257 @@
+{
+  "id": "claude-exec",
+  "name": "Claude Exec",
+  "description": "DEPRECATED COMPATIBILITY SURFACE: run claude --print through a Guardrail-managed wrapper with inline prompt text, input_files prompt context, working-directory control, and structured flag wiring. This recipe is the bounded one-shot Claude path. It remains available for compatibility, narrow probes, and explicit continuation-state flows, but it is no longer a recommended primary execution model. For live back-and-forth, operator feedback, questions, packet fire trials, and normal Guardrail-managed Claude work, use a resident FIFO lane (`guardrail lane start`, then `lane chat` / `lane send`). This recipe declares the shell/runtime environment it needs; standalone recipe execution must allow those vars explicitly with repeated --env-allow flags, and that env contract is part of approval drift. Because secure-store-backed Claude auth can also depend on opaque host-runtime state beyond the declared config vars, this recipe now preserves the full current runtime env during the actual bounded probe/invoke path while still binding the declared env subset into approval drift. The same bounded auth/runtime contract also applies when this recipe is executed through workflow `recipe_ref` steps. It also declares a bounded runtime auth preflight (`claude_exec_probe`), so Guardrail now fails before launch with `missing_auth_prerequisite` when the selected runtime cannot execute a real Claude print probe. Claude CLI authentication must already exist in the same runtime that launches Guardrail. Start by comparing the resolved claude binary plus auth-location environment (for example HOME, XDG_CONFIG_HOME, and CLAUDE_CONFIG_DIR), but do not assume env alignment is always sufficient: some CLI login state is backed by OS-managed secure stores or other process-identity-gated runtime state. A green `claude auth status` alone is not enough if `claude --print` still fails under the Guardrail env contract. If the same `Not logged in` error also appears through a composed host-runtime recipe, stop treating it as Guardrail drift and conclude that the target host runtime itself is missing usable Claude exec auth. If login must be redone for Guardrail reuse, perform `claude auth login --claudeai` (or `--console`) from the exact same shell/runtime that will later launch Guardrail, then rerun the same approved Guardrail command. For long-running bounded implementation packets, do not rely on delayed final stdout as the only visible signal: instruct Claude to create the declared report artifact immediately, append short progress checkpoints there as it works, and use an edit-capable permission mode when the packet is expected to modify files.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "preserve_runtime_env": true,
+  "requires_env": [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "TERM_PROGRAM",
+    "LANG",
+    "TMPDIR",
+    "PWD",
+    "XDG_CONFIG_HOME",
+    "CLAUDE_CONFIG_DIR"
+  ],
+  "requires_auth": [
+    {
+      "type": "claude_exec_probe"
+    }
+  ],
+  "inputs": {
+    "guardrail_repo": {
+      "type": "string",
+      "description": "Path to the Guardrail checkout that contains the Claude wrapper helper",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 8
+      }
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Inline prompt text to send to Claude. For one-shot runs this is still approval-sensitive. For persistent named sessions (`lifecycle=continue|attach` with `no_session_persistence=false`), later user messages can change without reapproval as long as the session identity and executable boundary stay fixed. Keep stable file-backed context in input_files.",
+      "approval_mode": "interactive_message",
+      "required": false
+    },
+    "input_files": {
+      "type": "string",
+      "description": "One or more relative file paths resolved from working_dir. The wrapper reads their contents and injects them into Claude's prompt payload as tagged <input_file> blocks. Repeat --input input_files=... to pass multiple files. There is no separate prompt_file input. For a multi-doc human review loop, approve the full planned file set up front and keep that set stable while later prompts iterate in the same persistent session.",
+      "approval_mode": "list",
+      "content_hash": true,
+      "base_dir_input": "working_dir",
+      "required": false,
+      "item_validator": {
+        "type": "string",
+        "approval_mode": "path_policy",
+        "rules": {
+          "must_be_relative": true,
+          "deny_segments": [".."],
+          "max_depth": 12
+        }
+      }
+    },
+    "report_artifact": {
+      "type": "string",
+      "description": "Optional relative path to the declared human-readable report artifact for this packet. When provided, Guardrail passes it into the Claude wrapper progress contract and treats report-file mtime changes as synthetic progress heartbeats in addition to model-written NDJSON checkpoints.",
+      "approval_mode": "path_policy",
+      "required": false,
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "model": {
+      "type": "string",
+      "description": "Model to use",
+      "enum": ["opus", "sonnet", "haiku"]
+    },
+    "effort": {
+      "type": "string",
+      "description": "Reasoning effort level",
+      "enum": ["low", "medium", "high", "max"]
+    },
+    "mode": {
+      "type": "string",
+      "description": "Permission mode governing tool approval behavior",
+      "enum": ["default", "plan", "acceptEdits", "dontAsk"]
+    },
+    "output_format": {
+      "type": "string",
+      "description": "Response output format",
+      "enum": ["text", "json", "stream-json"]
+    },
+    "max_budget_usd": {
+      "type": "string",
+      "description": "Maximum dollar spend for this invocation. Guardrail shows this explicitly during review/approval. Default is '10.00'.",
+      "default": "10.00",
+      "pattern": "^[0-9]{1,4}\\.[0-9]{2}$"
+    },
+    "allowed_tools": {
+      "type": "string",
+      "description": "Allowed tool list passed to Claude via --allowed-tools",
+      "pattern": "^[A-Za-z0-9_(),* :-]+$",
+      "required": false
+    },
+    "system_prompt": {
+      "type": "string",
+      "description": "Prompt appended to Claude's default system prompt. This is inline text only; there is no system_prompt_file input. Use review_each_time because wording changes execution behavior. Workflow recipe_ref usage does not bypass this reapproval rule. If you need a fixed system prompt for unattended reuse, author a local template that wraps src/claude-exec-wrapper.js directly and bakes the stable prompt into the template definition instead of passing it through claude-exec inputs each run.",
+      "approval_mode": "review_each_time"
+    },
+    "working_dir": {
+      "type": "string",
+      "description": "Relative directory Claude should use as its process cwd. input_files are resolved from this directory.",
+      "approval_mode": "path_policy",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "add_dirs": {
+      "type": "string",
+      "description": "Additional relative directories to grant Claude tool access to",
+      "approval_mode": "list",
+      "required": false,
+      "item_validator": {
+        "type": "string",
+        "approval_mode": "path_policy",
+        "rules": {
+          "must_be_relative": true,
+          "deny_segments": [".."],
+          "max_depth": 12
+        }
+      }
+    },
+    "session_name": {
+      "type": "string",
+      "description": "Session slot identifier used by the Guardrail agent-session contract. This value keys the stored session-contract file and bounds continue/attach lifecycle operations.",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+    },
+    "no_session_persistence": {
+      "type": "boolean",
+      "description": "Disable Claude session persistence. Default true. Guardrail lifecycle/session_id inputs remain Guardrail-side session-contract metadata and do not by themselves rehydrate Claude conversation state.",
+      "default": true,
+      "required": false
+    },
+    "lifecycle": {
+      "type": "string",
+      "description": "Session lifecycle intent: start a fresh named session, continue an existing one, or attach to a previously named session. Defaults to 'start'.",
+      "enum": ["start", "continue", "attach"],
+      "default": "start",
+      "required": false
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Machine-readable session identifier. Optional for 'start'; required for 'continue' and 'attach' if the approved session contract has one.",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "required": false
+    }
+  },
+  "steps": [
+    {
+      "id": "invoke",
+      "description": "Build the prompt from inline text and input_files, then run Claude CLI with structured arguments only",
+      "run": {
+        "command": "node",
+        "args": [
+          "{{bundled_wrapper.claude}}",
+          "--prompt", "{{inputs.prompt}}",
+          "--input-files", "{{inputs.input_files}}",
+          "--model", "{{inputs.model}}",
+          "--effort", "{{inputs.effort}}",
+          "--permission-mode", "{{inputs.mode}}",
+          "--output-format", "{{inputs.output_format}}",
+          "--max-budget-usd", "{{inputs.max_budget_usd}}",
+          "--allowed-tools", "{{inputs.allowed_tools}}",
+          "--system-prompt", "{{inputs.system_prompt}}",
+          "--working-dir", "{{inputs.working_dir}}",
+          "--add-dirs", "{{inputs.add_dirs}}",
+          "--session-name", "{{inputs.session_name}}",
+          "--no-session-persistence", "{{inputs.no_session_persistence}}",
+          "--lifecycle", "{{inputs.lifecycle}}",
+          "--session-id", "{{inputs.session_id}}"
+        ],
+        "mode": "structured",
+        "timeoutMs": 900000
+      },
+      "idempotent": true,
+      "validator": {
+        "regex": ".+"
+      }
+    }
+  ],
+  "progress_channel": {
+    "enabled": true,
+    "model": "cooperative",
+    "heartbeat_policy": {
+      "first_checkpoint_warn_seconds": 30,
+      "stall_warn_seconds": 90,
+      "hard_stall_seconds": 180
+    },
+    "progress_file": "ai-progress.ndjson",
+    "state_file": "ai-progress-state.json",
+    "event_types": [
+      "ai_checkpoint",
+      "ai_artifact_written",
+      "ai_question",
+      "ai_review_requested",
+      "ai_drift_warning",
+      "ai_waiting_for_input",
+      "ai_waiting_for_review",
+      "ai_stalled",
+      "ai_resumed"
+    ],
+    "soft_states": ["waiting_for_review", "waiting_for_input", "drift_warning", "stalled"],
+    "note": "Progress is primarily model-cooperative: the wrapper injects a system appendix instructing Claude to write NDJSON checkpoints to the progress file. The supervisor tails that file and relays events through --json-stream. When report_artifact is declared, Guardrail also treats report-file mtime changes as synthetic artifact-written checkpoints. Missing first checkpoint within 30s emits a warning; no checkpoint or report update for 90s emits stalled; 180s triggers hard escalation."
+  },
+  "guardrails": {
+    "constraints": [
+      "This recipe declares requires_env; standalone recipe execution must allow the same vars with repeated --env-allow flags, and the approved manifest binds to that env intersection even though the bounded Claude probe/invoke path now preserves the wider current runtime env for auth parity",
+      "Never pass --dangerously-skip-permissions or --allow-dangerously-skip-permissions",
+      "input_files are limited to approved relative paths and content-hash bound at approval time",
+      "working_dir controls the Claude process cwd; add_dirs only grants additional tool access",
+      "Guardrail does not provide outer sandboxing for Claude itself; running this recipe outside an external sandbox uses host privileges subject to Claude's own permission model",
+      "This recipe declares requires_auth via `claude_exec_probe`, so Guardrail preflights a real bounded `claude --print` probe before launch and fails with `missing_auth_prerequisite` instead of trusting `claude auth status` alone. The same bounded preflight now applies when `claude-exec` is invoked through workflow `recipe_ref`.",
+      "Guardrail does not perform `claude auth login` for this recipe. If preflight or Claude itself reports `Not logged in`, fix the Claude CLI auth state in the same runtime that launches Guardrail, then rerun the same approved command",
+      "If this recipe and a composed host-runtime recipe for the same tool both fail with the same `Not logged in` error, treat that as missing auth in the target host runtime rather than Guardrail drift or recipe failure",
+      "If another shell or tool can run Claude successfully, compare `which -a claude` and `claude auth status` there versus the Guardrail runtime before changing approval state. Start with PATH, HOME, XDG_CONFIG_HOME, or CLAUDE_CONFIG_DIR, but do not assume env alignment alone will solve secure-store-backed CLI auth",
+      "General Claude auth repair sequence for this recipe: `which -a claude`, `claude auth status`, prefer rerunning Guardrail from a shell where that status already succeeds, and if login must be redone for Guardrail reuse run `claude auth login --claudeai` (or `--console`) from the exact same shell/runtime that will later launch Guardrail",
+      "The inline prompt uses interactive_message semantics: later user messages may change without reapproval only for the same persistent named session (`continue` or `attach` with `no_session_persistence=false`). New sessions or session-identity changes still require approval",
+      "For autonomous edit-bearing runs, prefer an edit-capable Claude permission mode such as `acceptEdits` instead of `default`, because a non-interactive `claude --print` invocation can otherwise idle on tool-approval behavior that Guardrail cannot surface cleanly",
+      "Do not use this one-shot recipe as the primary path for multi-shot execution, live review, or mid-run operator feedback. For those cases, start a resident FIFO lane and use `lane chat` / `lane send` as the primary interface.",
+      "For long-running implementation packets, declare report_artifact whenever possible. Guardrail passes it into the wrapper progress contract and uses report-file mtime changes as a secondary heartbeat, but delayed final stdout alone is still not acceptable operator feedback",
+      "Guardrail now binds a bounded 900000ms / 15m invoke timeout for this recipe instead of the generic 60000ms worker fallback, because packet-sized Claude CLI runs can legitimately take longer than one minute",
+      "For a human-reviewed multi-doc loop, approve the full doc set up front in input_files, keep system_prompt fixed, and then advance slice by slice through later prompts in the same persistent session or resident lane",
+      "system_prompt remains review_each_time even under workflow recipe_ref chaining. If you need a fixed local system prompt with unattended reuse, use a local template that wraps the Claude wrapper directly instead of chaining claude-exec as a recipe_ref",
+      "No shell mode steps — a single structured node wrapper handles prompt assembly and invocation",
+      "When running with a Guardrail progress channel (GUARDRAIL_AI_PROGRESS_FILE set or --guardrail-progress-file passed), the wrapper injects a system appendix instructing Claude to write NDJSON checkpoint lines. This is model-cooperative: missing checkpoints surface as stall warnings, not silent failures",
+      "The progress file and state file are Guardrail artifacts, not user artifacts. Do not confuse them with the declared report artifact which remains the canonical completion signal",
+      "Soft states (waiting_for_review, waiting_for_input, drift_warning, stalled) are non-terminal. Only hard scope violations, nonzero exit, or stall-threshold breach collapse to failed"
+    ],
+    "invariants": [
+      "mode: structured",
+      "At least one prompt source must be present before Claude runs",
+      "Every declared operational input is wired through the wrapper",
+      "Output is non-empty (validator enforces .+ on response)"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "custom",
+  "tags": ["claude", "cli", "ai", "agent"],
+  "channel": "community",
+  "signature": null
+}

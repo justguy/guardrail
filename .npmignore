@@ -1,0 +1,19 @@
+# package.json "files" is the publication allowlist. These deny rules provide
+# a second barrier if that allowlist is changed later.
+tests/
+docs/plans/
+docs/prompts/
+docs/references/
+.claude/
+.guardrail/
+.llm-tracker/
+.agents/
+sessions/
+projects/
+demos/
+img/
+*.log
+*.tmp
+*.cache
+.DS_Store
+mcp-needs-auth-cache.json

@@ -1,0 +1,40 @@
+{
+  "id": "openclaw-debug-ci",
+  "name": "OpenClaw Debug CI",
+  "description": "Run the fixed OpenClaw debug-ci flow with read scope and output verification.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {},
+  "steps": [
+    {
+      "id": "run-task",
+      "description": "Run the bounded OpenClaw debug-ci task via the dedicated task wrapper",
+      "run": {
+        "command": "node",
+        "args": ["{{bundled_wrapper.openclaw_task}}", "--flow", "debug-ci", "--scope", "read", "--no-escalate"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "The flow id is fixed to debug-ci",
+      "Execution is fixed to read scope with no escalation",
+      "Outputs must pass OpenClaw verification before the recipe completes"
+    ],
+    "invariants": [
+      "No alternate OpenClaw flow can be substituted at runtime",
+      "No scope other than read is allowed for this recipe",
+      "A failed verification blocks recipe success"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "openclaw",
+  "tags": ["openclaw", "debug-ci", "task-specific"],
+  "channel": "verified",
+  "signature": null
+}

@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "kind": "template",
+  "name": "git-switch",
+  "description": "Switch this repository to an existing local branch without branch creation, remote guessing, or additional git flags.",
+  "trust_class": "reviewed_internal",
+  "risk": "red",
+  "risk_reasons": [
+    "changes the active Git branch",
+    "can carry uncommitted worktree changes across branches when Git allows it"
+  ],
+  "requires_env": [
+    "PATH"
+  ],
+  "inputs": {
+    "branch": {
+      "type": "string",
+      "description": "Existing local branch to switch to. Branch creation and remote guessing are intentionally not supported.",
+      "pattern": "^(main|master|develop|dev|(feature|bugfix|chore|docs|refactor|test|ci)/[A-Za-z0-9][A-Za-z0-9._/-]{0,95})$"
+    }
+  },
+  "run": {
+    "command": "git",
+    "args": [
+      "-C",
+      "..",
+      "switch",
+      "--no-guess",
+      "--",
+      "{{inputs.branch}}"
+    ],
+    "mode": "structured",
+    "env": {
+      "allow": [
+        "PATH"
+      ]
+    }
+  },
+  "guardrails": {
+    "constraints": [
+      "Only switches this repository, resolved relative to the template directory.",
+      "Only accepts branch names matching the reviewed branch pattern.",
+      "Does not create branches, detach HEAD, guess remote branches, or accept arbitrary git flags."
+    ],
+    "invariants": [
+      "The executed command shape is always git -C .. switch --no-guess -- <branch>.",
+      "Inputs cannot inject additional git options because the branch value is a single structured argument after --.",
+      "Git itself must confirm the target is an existing local branch."
+    ]
+  },
+  "idempotent": true
+}

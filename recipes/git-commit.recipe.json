@@ -1,0 +1,101 @@
+{
+  "id": "git-commit",
+  "name": "Git Commit",
+  "description": "Stage approved paths only, fail closed on unrelated staged changes, and commit a no-op if no approved-path changes are staged.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "guardrail_repo": {
+      "type": "string",
+      "description": "Path to the Guardrail checkout that contains the git commit wrapper helper",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 8
+      }
+    },
+    "repo_path": {
+      "type": "string",
+      "description": "Relative path to the target git repository",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "paths": {
+      "type": "string",
+      "description": "One or more relative repo paths to stage. Repeat --input paths=... to pass multiple paths.",
+      "approval_mode": "list",
+      "base_dir_input": "repo_path",
+      "item_validator": {
+        "type": "string",
+        "approval_mode": "path_policy",
+        "rules": {
+          "must_be_relative": true,
+          "deny_segments": [".."],
+          "max_depth": 12
+        }
+      }
+    },
+    "message_file": {
+      "type": "string",
+      "description": "Relative path to a commit message file. File contents are content-hash bound at approval time.",
+      "approval_mode": "path_policy",
+      "content_hash": true,
+      "base_dir_input": "repo_path",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "run-git-commit",
+      "description": "Stage approved paths, fail closed if unrelated files are already staged, commit only approved paths, and return success when there is no-op staged content.",
+      "run": {
+        "command": "node",
+        "args": [
+          "{{bundled_wrapper.git_commit}}",
+          "--repo-path", "{{inputs.repo_path}}",
+          "--paths", "{{inputs.paths}}",
+          "--message-file", "{{inputs.message_file}}"
+        ],
+        "mode": "structured"
+      },
+      "idempotent": false
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "Only the explicitly approved repo_path, staged paths, and commit message file may influence the commit",
+      "Commit message file is content-hash bound at approval time and rechecked before execution",
+      "No shell mode, no push, and no additional git flags are allowed through this recipe",
+      "The wrapper fails if already-staged changes exist outside approved paths",
+      "The wrapper commits only the approved path list"
+    ],
+    "invariants": [
+      "mode: structured",
+      "At least one staged path must be present",
+      "Commit message comes from the approved message_file path",
+      "Unrelated pre-staged changes block execution",
+      "No-op success is returned when approved paths produce no staged changes",
+      "This recipe never performs git push"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "git",
+  "tags": ["git", "commit", "stage"],
+  "channel": "community",
+  "signature": null
+}

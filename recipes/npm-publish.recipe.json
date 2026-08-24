@@ -1,0 +1,83 @@
+{
+  "id": "npm-publish",
+  "name": "NPM Package Publish",
+  "description": "Build, test, and publish an NPM package to the registry with version bump.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "package_dir": {
+      "type": "string",
+      "description": "Path to the package directory",
+      "pattern": "^[a-zA-Z0-9_./-]+$"
+    },
+    "tag": {
+      "type": "string",
+      "description": "NPM dist-tag for the publish",
+      "enum": ["latest", "beta", "next", "canary"]
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "If true, run publish with --dry-run flag",
+      "default": false
+    }
+  },
+  "steps": [
+    {
+      "id": "install",
+      "description": "Install package dependencies",
+      "run": {
+        "command": "npm",
+        "args": ["ci", "--prefix", "{{inputs.package_dir}}"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "test",
+      "description": "Run package test suite",
+      "run": {
+        "command": "npm",
+        "args": ["test", "--prefix", "{{inputs.package_dir}}"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "build",
+      "description": "Build the package",
+      "run": {
+        "command": "npm",
+        "args": ["run", "build", "--prefix", "{{inputs.package_dir}}"],
+        "mode": "structured"
+      }
+    },
+    {
+      "id": "publish",
+      "description": "Publish the package to the NPM registry",
+      "run": {
+        "command": "npm",
+        "args": ["publish", "--tag", "{{inputs.tag}}", "--prefix", "{{inputs.package_dir}}"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "All steps must run in structured mode (no shell)",
+      "Package directory must be within the project root",
+      "Tests must pass before publish step executes"
+    ],
+    "invariants": [
+      "No publish without passing tests",
+      "No modification of package.json version outside this recipe",
+      "Registry credentials never logged or exposed in output"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "packages",
+  "tags": ["npm", "publish", "ci"],
+  "channel": "verified",
+  "signature": null
+}

@@ -1,0 +1,40 @@
+{
+  "id": "openclaw-fix-tests",
+  "name": "OpenClaw Fix Tests",
+  "description": "Run the fixed OpenClaw test-repair flow with write scope and output verification.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {},
+  "steps": [
+    {
+      "id": "run-task",
+      "description": "Run the bounded OpenClaw fix-tests task via the dedicated task wrapper",
+      "run": {
+        "command": "node",
+        "args": ["{{bundled_wrapper.openclaw_task}}", "--flow", "fix-tests", "--scope", "write", "--no-escalate"],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "The flow id is fixed to fix-tests",
+      "Execution is fixed to write scope with no escalation",
+      "Outputs must pass OpenClaw verification before the recipe completes"
+    ],
+    "invariants": [
+      "No alternate OpenClaw flow can be substituted at runtime",
+      "No scope other than write is allowed for this recipe",
+      "A failed verification blocks recipe success"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "openclaw",
+  "tags": ["openclaw", "fix-tests", "task-specific"],
+  "channel": "verified",
+  "signature": null
+}

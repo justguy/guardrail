@@ -1,0 +1,278 @@
+{
+  "id": "cmux-claude-exec",
+  "name": "CMUX Claude Exec",
+  "description": "Launch a fresh cmux workspace, execute the bundled claude-exec recipe directly inside that terminal runtime under one composed Guardrail approval, and capture the resulting pane state. This recipe keeps the host-runtime hop explicit while binding the inner Claude exec schema, trust, env, content-hash, review_each_time semantics, and hosted Claude auth preflight into the same approval unit. The same child auth/runtime contract is preserved if this recipe is reached through workflow `recipe_ref` execution. If the hosted Claude run fails with the same auth error as direct claude-exec, the fix is login in that target host runtime, not more Guardrail workaround hunting.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "requires_env": [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "TERM_PROGRAM",
+    "LANG",
+    "TMPDIR",
+    "PWD",
+    "XDG_CONFIG_HOME",
+    "CLAUDE_CONFIG_DIR"
+  ],
+  "inputs": {
+    "socket_path": {
+      "type": "string",
+      "description": "Absolute cmux socket path for the target terminal host",
+      "approval_mode": "exact"
+    },
+    "workspace_name": {
+      "type": "string",
+      "description": "Human-readable workspace name to create for the launch",
+      "pattern": "^[A-Za-z0-9 _.-]{1,80}$"
+    },
+    "launch_cwd": {
+      "type": "string",
+      "description": "Relative directory to use as the terminal workspace cwd before sending the inner Guardrail command",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "guardrail_repo": {
+      "type": "string",
+      "description": "Relative path from launch_cwd to the Guardrail checkout that contains src/cli.js and the claude-exec recipe",
+      "approval_mode": "path_policy",
+      "default": ".",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Inline prompt text for the composed claude-exec layer. For a persistent named session (`lifecycle=continue|attach` with `no_session_persistence=false`), later user messages can change without reapproval as long as the composed session identity and executable boundary stay fixed.",
+      "approval_mode": "interactive_message",
+      "required": false
+    },
+    "input_files": {
+      "type": "string",
+      "description": "One or more relative file paths resolved from working_dir for the composed claude-exec layer. Repeat --input input_files=... to pass multiple files. For a multi-doc human review loop, approve the full planned file set up front and keep that set stable while later prompts iterate in the same persistent session.",
+      "approval_mode": "list",
+      "content_hash": true,
+      "base_dir_input": "working_dir",
+      "required": false,
+      "item_validator": {
+        "type": "string",
+        "approval_mode": "path_policy",
+        "rules": {
+          "must_be_relative": true,
+          "deny_segments": [".."],
+          "max_depth": 12
+        }
+      }
+    },
+    "model": {
+      "type": "string",
+      "description": "Claude model for the composed exec layer",
+      "enum": ["opus", "sonnet", "haiku"]
+    },
+    "effort": {
+      "type": "string",
+      "description": "Reasoning effort level for the composed exec layer",
+      "enum": ["low", "medium", "high", "max"]
+    },
+    "mode": {
+      "type": "string",
+      "description": "Permission mode for the composed exec layer",
+      "enum": ["default", "plan", "acceptEdits", "dontAsk"]
+    },
+    "output_format": {
+      "type": "string",
+      "description": "Output format for the composed exec layer",
+      "enum": ["text", "json", "stream-json"]
+    },
+    "max_budget_usd": {
+      "type": "string",
+      "description": "Maximum dollar spend for the composed Claude invocation. Guardrail shows this explicitly during review/approval. Default is '10.00'.",
+      "default": "10.00",
+      "pattern": "^[0-9]{1,4}\\.[0-9]{2}$"
+    },
+    "system_prompt": {
+      "type": "string",
+      "description": "System prompt for the composed claude-exec layer. This remains review_each_time.",
+      "approval_mode": "review_each_time"
+    },
+    "working_dir": {
+      "type": "string",
+      "description": "Relative working directory for the composed claude-exec layer",
+      "approval_mode": "path_policy",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "max_depth": 12
+      }
+    },
+    "add_dirs": {
+      "type": "string",
+      "description": "Additional relative directories to grant to the composed claude-exec layer",
+      "approval_mode": "list",
+      "required": false,
+      "item_validator": {
+        "type": "string",
+        "approval_mode": "path_policy",
+        "rules": {
+          "must_be_relative": true,
+          "deny_segments": [".."],
+          "max_depth": 12
+        }
+      }
+    },
+    "session_name": {
+      "type": "string",
+      "description": "Session slot identifier for the composed claude-exec layer",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+    },
+    "no_session_persistence": {
+      "type": "boolean",
+      "description": "Disable Claude session persistence in the composed exec layer",
+      "default": true,
+      "required": false
+    },
+    "lifecycle": {
+      "type": "string",
+      "description": "Session lifecycle for the composed exec layer",
+      "enum": ["start", "continue", "attach"],
+      "default": "start",
+      "required": false
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Machine-readable session identifier for the composed exec layer",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "required": false
+    },
+    "capture_lines": {
+      "type": "integer",
+      "description": "How many trailing pane lines to capture after sending the inner command",
+      "min": 20,
+      "max": 400,
+      "default": 120,
+      "required": false
+    },
+    "capture_delay_ms": {
+      "type": "integer",
+      "description": "How long to wait before beginning pane polling after send",
+      "min": 0,
+      "max": 10000,
+      "default": 1200,
+      "required": false
+    },
+    "poll_interval_ms": {
+      "type": "integer",
+      "description": "How often to poll pane output while waiting for the hosted exec to finish",
+      "min": 50,
+      "max": 5000,
+      "default": 400,
+      "required": false
+    },
+    "wait_timeout_ms": {
+      "type": "integer",
+      "description": "Maximum time to wait for the hosted exec to print its exit sentinel",
+      "min": 500,
+      "max": 120000,
+      "default": 20000,
+      "required": false
+    },
+    "auth_repair": {
+      "type": "string",
+      "description": "Hosted auth repair mode. Default `console` will run `claude auth login --console` in the exact target runtime if the hosted Claude probe or exec hits login there, then retry once.",
+      "enum": ["none", "console"],
+      "default": "console",
+      "required": false
+    },
+    "auth_repair_timeout_ms": {
+      "type": "integer",
+      "description": "Maximum time to wait for hosted auth repair to finish before surfacing auth_repair_pending_user_input.",
+      "min": 1000,
+      "max": 900000,
+      "default": 300000,
+      "required": false
+    }
+  },
+  "steps": [
+    {
+      "id": "launch-cmux-claude-exec",
+      "description": "Create a cmux workspace, execute the composed claude-exec contract inside it, and capture the pane",
+      "run": {
+        "command": "node",
+        "args": [
+          "{{bundled_wrapper.cmux_claude}}",
+          "--socket-path", "{{inputs.socket_path}}",
+          "--workspace-name", "{{inputs.workspace_name}}",
+          "--launch-cwd", "{{inputs.launch_cwd}}",
+          "--capture-lines", "{{inputs.capture_lines}}",
+          "--capture-delay-ms", "{{inputs.capture_delay_ms}}",
+          "--poll-interval-ms", "{{inputs.poll_interval_ms}}",
+          "--wait-timeout-ms", "{{inputs.wait_timeout_ms}}",
+          "--auth-repair", "{{inputs.auth_repair}}",
+          "--auth-repair-timeout-ms", "{{inputs.auth_repair_timeout_ms}}"
+        ],
+        "mode": "structured"
+      },
+      "composed_recipe": {
+        "recipe": "claude-exec",
+        "inputs": {
+          "guardrail_repo": "{{inputs.guardrail_repo}}",
+          "prompt": "{{inputs.prompt}}",
+          "input_files": "{{inputs.input_files}}",
+          "model": "{{inputs.model}}",
+          "effort": "{{inputs.effort}}",
+          "mode": "{{inputs.mode}}",
+          "output_format": "{{inputs.output_format}}",
+          "max_budget_usd": "{{inputs.max_budget_usd}}",
+          "system_prompt": "{{inputs.system_prompt}}",
+          "working_dir": "{{inputs.working_dir}}",
+          "add_dirs": "{{inputs.add_dirs}}",
+          "session_name": "{{inputs.session_name}}",
+          "no_session_persistence": "{{inputs.no_session_persistence}}",
+          "lifecycle": "{{inputs.lifecycle}}",
+          "session_id": "{{inputs.session_id}}"
+        }
+      },
+      "idempotent": false,
+      "validator": {
+        "regex": ".+"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "This recipe keeps the cmux host-runtime hop explicit, but composes the bundled claude-exec recipe into the same Guardrail approval unit instead of launching a nested inner guardrail run",
+      "The wrapper creates a fresh workspace, executes a bounded composed contract, waits for a hosted exit sentinel, and captures pane output without shell-mode recipe steps",
+      "The composed claude-exec layer still owns its trust boundary, session contract behavior, env handshake, and Claude CLI auth/runtime requirements. The cmux wrapper runs the child recipe's bounded auth preflight inside the hosted runtime before launching Claude. The hosted command intentionally uses `env -i` and then rehydrates only the approved env intersection, so seeing `env -i` in a pane capture is expected; the real failure modes are missing required vars or a host runtime where the bounded Claude exec probe still fails. `prompt` is interactive_message/session-bound; `system_prompt` remains review_each_time",
+      "With the default `auth_repair=console`, the wrapper will run `claude auth login --console` inside that exact hosted runtime if the hosted Claude probe or exec hits login there, rerun the bounded preflight, and retry the original exec once. If login itself still waits on human interaction, Guardrail fails with `auth_repair_pending_user_input` instead of pretending the slice ran",
+      "For a human-reviewed multi-doc loop, approve the full doc set up front in input_files, keep system_prompt fixed, use this recipe only to reach the authenticated host runtime, and prefer the resident lane for later review/continue turns",
+      "If the hosted run fails with the same downstream auth error as direct claude-exec, diagnose that as missing tool auth in the target host runtime rather than Guardrail drift",
+      "socket_path is exact-match approved because it addresses a specific terminal control socket",
+      "One approval manifest covers both the explicit transport layer and the composed claude-exec layer; drift in either layer blocks reuse",
+      "For repeated interaction or repeated monitoring after startup, prefer the resident FIFO lane instead of repeated transport launches or repeated raw host-surface inspection commands"
+    ],
+    "invariants": [
+      "mode: structured",
+      "Output is non-empty (validator enforces .+ on wrapper JSON output)",
+      "The hosted exec contract is always derived from the bundled claude-exec recipe"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "high",
+  "category": "custom",
+  "tags": ["cmux", "claude", "terminal", "orchestration"],
+  "channel": "community",
+  "signature": null
+}

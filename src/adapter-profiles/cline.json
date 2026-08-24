@@ -1,0 +1,44 @@
+{
+  "tool": "cline",
+  "protocol": "mcp",
+  "schema_target": "adapter-result/v1",
+  "version": "1.0.0",
+  "description": "Cline adapter profile — MCP stdio transport for bounded discovery/tool-call integration; general adapter run remains blocked in v0.2",
+  "mcp_transport": {
+    "type": "stdio",
+    "command": "cline",
+    "args": [],
+    "correlation": "request_id",
+    "capability_discovery": "required",
+    "streaming": false
+  },
+  "intercept": {
+    "command": "$.command",
+    "args": "$.args",
+    "cwd": "$.cwd"
+  },
+  "response": {
+    "format": "json",
+    "success": {
+      "status": "success",
+      "stdout": "$.process.stdout"
+    },
+    "blocked": {
+      "status": "blocked",
+      "reason": "$.guardrail.reason"
+    },
+    "failed": {
+      "status": "failed",
+      "exit_code": "$.guardrail.exitCode"
+    }
+  },
+  "exit_codes": {
+    "success": 0,
+    "blocked": 12,
+    "failed": 1
+  },
+  "defaults": {
+    "non_interactive": true,
+    "json_output": true
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "id": "pip-install",
+  "name": "Pip Install",
+  "description": "Install Python dependencies only from an approved hash-locked requirements file.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Guardrail Team",
+    "email": "team@guardrail.dev"
+  },
+  "inputs": {
+    "requirements_file": {
+      "type": "string",
+      "description": "Relative path to a requirements or constraints file. Contents are content-hash bound.",
+      "approval_mode": "path_policy",
+      "content_hash": true,
+      "pattern": "^(?:[^/]+/)*(?:requirements(?:-lock)?|constraints)\\.txt$",
+      "rules": {
+        "must_be_relative": true,
+        "deny_segments": [".."],
+        "allowed_extensions": [".txt"],
+        "max_depth": 12
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "install",
+      "description": "Install the approved dependency set with hash enforcement and no implicit dependency resolution",
+      "run": {
+        "command": "node",
+        "args": [
+          "{{bundled_wrapper.pip_install_safe}}",
+          "--working-dir", ".",
+          "--requirements-file", "{{inputs.requirements_file}}"
+        ],
+        "mode": "structured"
+      }
+    }
+  ],
+  "guardrails": {
+    "constraints": [
+      "The install is fixed to python3 -m pip install with --require-hashes and --no-deps",
+      "The reviewed requirements file contents are content-hash bound at approval time",
+      "The wrapper rejects nested requirements, editable installs, direct URLs, alternate indexes, and unhashed package entries",
+      "No extra index URLs or package specifiers can be injected through runtime inputs"
+    ],
+    "invariants": [
+      "The recipe does not allow unconstrained pip install package-name flows",
+      "Hash enforcement is always enabled",
+      "Structured argv prevents hidden shell expansion"
+    ]
+  },
+  "approval_required": true,
+  "risk_level": "medium",
+  "category": "packages",
+  "tags": ["pip", "install", "hashes"],
+  "channel": "verified",
+  "signature": null
+}
